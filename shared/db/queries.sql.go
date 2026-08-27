@@ -8,6 +8,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -53,6 +54,48 @@ func (q *Queries) ConfirmVideoProcessing(ctx context.Context, arg ConfirmVideoPr
 		&i.DeletedAt,
 	)
 	return i, err
+}
+
+const countCommentSubtree = `-- name: CountCommentSubtree :one
+WITH RECURSIVE subtree AS (
+    SELECT c.id FROM comments c WHERE c.id = $1
+    UNION ALL
+    SELECT c.id FROM comments c
+    JOIN subtree s ON c.parent_id = s.id
+)
+SELECT COUNT(*)::int FROM subtree
+`
+
+// Recursive CTE counting this comment + all descendants.
+// Used before deletion to know how much to decrement
+// the video's comments_count.
+func (q *Queries) CountCommentSubtree(ctx context.Context, id uuid.UUID) (int32, error) {
+	row := q.db.QueryRowContext(ctx, countCommentSubtree, id)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const countFollowers = `-- name: CountFollowers :one
+SELECT COUNT(*) FROM follows WHERE followee_id = $1
+`
+
+func (q *Queries) CountFollowers(ctx context.Context, followeeID uuid.UUID) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countFollowers, followeeID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countFollowing = `-- name: CountFollowing :one
+SELECT COUNT(*) FROM follows WHERE follower_id = $1
+`
+
+func (q *Queries) CountFollowing(ctx context.Context, followerID uuid.UUID) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countFollowing, followerID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }
 
 const createUser = `-- name: CreateUser :one
@@ -165,6 +208,103 @@ func (q *Queries) DecrementLikesForUser(ctx context.Context, userID uuid.UUID) e
 	return err
 }
 
+const deleteCommentByID = `-- name: DeleteCommentByID :exec
+DELETE FROM comments WHERE id = $1
+`
+
+// ON DELETE CASCADE handles replies automatically.
+func (q *Queries) DeleteCommentByID(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, deleteCommentByID, id)
+	return err
+}
+
+const deleteCommentsByUser = `-- name: DeleteCommentsByUser :exec
+DELETE FROM comments WHERE user_id = $1
+`
+
+func (q *Queries) DeleteCommentsByUser(ctx context.Context, userID uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, deleteCommentsByUser, userID)
+	return err
+}
+
+const deleteFollow = `-- name: DeleteFollow :exec
+DELETE FROM follows
+WHERE follower_id = $1 AND followee_id = $2
+`
+
+type DeleteFollowParams struct {
+	FollowerID uuid.UUID `json:"follower_id"`
+	FolloweeID uuid.UUID `json:"followee_id"`
+}
+
+func (q *Queries) DeleteFollow(ctx context.Context, arg DeleteFollowParams) error {
+	_, err := q.db.ExecContext(ctx, deleteFollow, arg.FollowerID, arg.FolloweeID)
+	return err
+}
+
+const deleteFollowsByFollowee = `-- name: DeleteFollowsByFollowee :exec
+DELETE FROM follows WHERE followee_id = $1
+`
+
+func (q *Queries) DeleteFollowsByFollowee(ctx context.Context, followeeID uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, deleteFollowsByFollowee, followeeID)
+	return err
+}
+
+const deleteFollowsByFollower = `-- name: DeleteFollowsByFollower :exec
+DELETE FROM follows WHERE follower_id = $1
+`
+
+func (q *Queries) DeleteFollowsByFollower(ctx context.Context, followerID uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, deleteFollowsByFollower, followerID)
+	return err
+}
+
+const deleteLike = `-- name: DeleteLike :one
+DELETE FROM likes
+WHERE user_id = $1 AND video_id = $2
+RETURNING user_id, video_id, created_at
+`
+
+type DeleteLikeParams struct {
+	UserID  uuid.UUID `json:"user_id"`
+	VideoID uuid.UUID `json:"video_id"`
+}
+
+func (q *Queries) DeleteLike(ctx context.Context, arg DeleteLikeParams) (Like, error) {
+	row := q.db.QueryRowContext(ctx, deleteLike, arg.UserID, arg.VideoID)
+	var i Like
+	err := row.Scan(&i.UserID, &i.VideoID, &i.CreatedAt)
+	return i, err
+}
+
+const deleteLikesByUser = `-- name: DeleteLikesByUser :exec
+DELETE FROM likes WHERE user_id = $1
+`
+
+func (q *Queries) DeleteLikesByUser(ctx context.Context, userID uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, deleteLikesByUser, userID)
+	return err
+}
+
+const deleteNotificationsByActor = `-- name: DeleteNotificationsByActor :exec
+DELETE FROM notifications WHERE actor_id = $1
+`
+
+func (q *Queries) DeleteNotificationsByActor(ctx context.Context, actorID uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, deleteNotificationsByActor, actorID)
+	return err
+}
+
+const deleteNotificationsForUser = `-- name: DeleteNotificationsForUser :exec
+DELETE FROM notifications WHERE user_id = $1
+`
+
+func (q *Queries) DeleteNotificationsForUser(ctx context.Context, userID uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, deleteNotificationsForUser, userID)
+	return err
+}
+
 const deleteVideoRow = `-- name: DeleteVideoRow :exec
 DELETE FROM videos WHERE id = $1
 `
@@ -184,6 +324,67 @@ DELETE FROM videos WHERE user_id = $1
 func (q *Queries) DeleteVideosByUser(ctx context.Context, userID uuid.UUID) error {
 	_, err := q.db.ExecContext(ctx, deleteVideosByUser, userID)
 	return err
+}
+
+const followUser = `-- name: FollowUser :exec
+
+INSERT INTO follows (follower_id, followee_id)
+VALUES ($1, $2)
+ON CONFLICT DO NOTHING
+`
+
+type FollowUserParams struct {
+	FollowerID uuid.UUID `json:"follower_id"`
+	FolloweeID uuid.UUID `json:"followee_id"`
+}
+
+// =====================================================
+// follows
+// =====================================================
+// Idempotent insert. ON CONFLICT DO NOTHING makes it safe
+// to call even if the follow already exists.
+func (q *Queries) FollowUser(ctx context.Context, arg FollowUserParams) error {
+	_, err := q.db.ExecContext(ctx, followUser, arg.FollowerID, arg.FolloweeID)
+	return err
+}
+
+const getCommentByID = `-- name: GetCommentByID :one
+SELECT c.id, c.video_id, c.user_id, c.parent_id, c.content, c.created_at, u.username, u.display_name, u.avatar_url, u.is_private
+FROM comments c
+JOIN users u ON u.id = c.user_id
+WHERE c.id = $1
+LIMIT 1
+`
+
+type GetCommentByIDRow struct {
+	ID          uuid.UUID      `json:"id"`
+	VideoID     uuid.UUID      `json:"video_id"`
+	UserID      uuid.UUID      `json:"user_id"`
+	ParentID    uuid.NullUUID  `json:"parent_id"`
+	Content     string         `json:"content"`
+	CreatedAt   time.Time      `json:"created_at"`
+	Username    string         `json:"username"`
+	DisplayName sql.NullString `json:"display_name"`
+	AvatarUrl   sql.NullString `json:"avatar_url"`
+	IsPrivate   bool           `json:"is_private"`
+}
+
+func (q *Queries) GetCommentByID(ctx context.Context, id uuid.UUID) (GetCommentByIDRow, error) {
+	row := q.db.QueryRowContext(ctx, getCommentByID, id)
+	var i GetCommentByIDRow
+	err := row.Scan(
+		&i.ID,
+		&i.VideoID,
+		&i.UserID,
+		&i.ParentID,
+		&i.Content,
+		&i.CreatedAt,
+		&i.Username,
+		&i.DisplayName,
+		&i.AvatarUrl,
+		&i.IsPrivate,
+	)
+	return i, err
 }
 
 const getPendingVideoByUser = `-- name: GetPendingVideoByUser :one
@@ -579,6 +780,102 @@ func (q *Queries) IncrementViews(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
+const insertComment = `-- name: InsertComment :one
+
+INSERT INTO comments (video_id, user_id, parent_id, content)
+VALUES ($1, $2, $3, $4)
+RETURNING id, video_id, user_id, parent_id, content, created_at
+`
+
+type InsertCommentParams struct {
+	VideoID  uuid.UUID     `json:"video_id"`
+	UserID   uuid.UUID     `json:"user_id"`
+	ParentID uuid.NullUUID `json:"parent_id"`
+	Content  string        `json:"content"`
+}
+
+// =====================================================
+// comments
+// =====================================================
+func (q *Queries) InsertComment(ctx context.Context, arg InsertCommentParams) (Comment, error) {
+	row := q.db.QueryRowContext(ctx, insertComment,
+		arg.VideoID,
+		arg.UserID,
+		arg.ParentID,
+		arg.Content,
+	)
+	var i Comment
+	err := row.Scan(
+		&i.ID,
+		&i.VideoID,
+		&i.UserID,
+		&i.ParentID,
+		&i.Content,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const insertLike = `-- name: InsertLike :one
+
+INSERT INTO likes (user_id, video_id)
+VALUES ($1, $2)
+ON CONFLICT DO NOTHING
+RETURNING user_id, video_id, created_at
+`
+
+type InsertLikeParams struct {
+	UserID  uuid.UUID `json:"user_id"`
+	VideoID uuid.UUID `json:"video_id"`
+}
+
+// =====================================================
+// likes
+// =====================================================
+func (q *Queries) InsertLike(ctx context.Context, arg InsertLikeParams) (Like, error) {
+	row := q.db.QueryRowContext(ctx, insertLike, arg.UserID, arg.VideoID)
+	var i Like
+	err := row.Scan(&i.UserID, &i.VideoID, &i.CreatedAt)
+	return i, err
+}
+
+const insertNotification = `-- name: InsertNotification :one
+
+INSERT INTO notifications (user_id, actor_id, type, payload)
+VALUES ($1, $2, $3, $4)
+RETURNING id, user_id, actor_id, type, payload, is_read, created_at
+`
+
+type InsertNotificationParams struct {
+	UserID  uuid.UUID       `json:"user_id"`
+	ActorID uuid.UUID       `json:"actor_id"`
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+// =====================================================
+// notifications
+// =====================================================
+func (q *Queries) InsertNotification(ctx context.Context, arg InsertNotificationParams) (Notification, error) {
+	row := q.db.QueryRowContext(ctx, insertNotification,
+		arg.UserID,
+		arg.ActorID,
+		arg.Type,
+		arg.Payload,
+	)
+	var i Notification
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.ActorID,
+		&i.Type,
+		&i.Payload,
+		&i.IsRead,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const insertVideo = `-- name: InsertVideo :one
 
 INSERT INTO videos (user_id, r2_key, title, description)
@@ -623,6 +920,126 @@ func (q *Queries) InsertVideo(ctx context.Context, arg InsertVideoParams) (Video
 		&i.DeletedAt,
 	)
 	return i, err
+}
+
+const isFollowing = `-- name: IsFollowing :one
+SELECT EXISTS (
+    SELECT 1 FROM follows
+    WHERE follower_id = $1 AND followee_id = $2
+)
+`
+
+type IsFollowingParams struct {
+	FollowerID uuid.UUID `json:"follower_id"`
+	FolloweeID uuid.UUID `json:"followee_id"`
+}
+
+func (q *Queries) IsFollowing(ctx context.Context, arg IsFollowingParams) (bool, error) {
+	row := q.db.QueryRowContext(ctx, isFollowing, arg.FollowerID, arg.FolloweeID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const isLiked = `-- name: IsLiked :one
+SELECT EXISTS (
+    SELECT 1 FROM likes
+    WHERE user_id = $1 AND video_id = $2
+)
+`
+
+type IsLikedParams struct {
+	UserID  uuid.UUID `json:"user_id"`
+	VideoID uuid.UUID `json:"video_id"`
+}
+
+func (q *Queries) IsLiked(ctx context.Context, arg IsLikedParams) (bool, error) {
+	row := q.db.QueryRowContext(ctx, isLiked, arg.UserID, arg.VideoID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const listCommentsByVideo = `-- name: ListCommentsByVideo :many
+SELECT
+    c.id,
+    c.video_id,
+    c.user_id,
+    c.parent_id,
+    c.content,
+    c.created_at,
+    u.username,
+    u.display_name,
+    u.avatar_url,
+    u.is_private
+FROM comments c
+JOIN users u ON u.id = c.user_id
+WHERE c.video_id = $1
+  AND ($2::timestamptz IS NULL
+       OR (c.created_at, c.id) < ($2::timestamptz, $3::uuid))
+ORDER BY c.created_at DESC, c.id DESC
+LIMIT $4
+`
+
+type ListCommentsByVideoParams struct {
+	VideoID       uuid.UUID     `json:"video_id"`
+	CursorCreated sql.NullTime  `json:"cursor_created"`
+	CursorID      uuid.NullUUID `json:"cursor_id"`
+	PageLimit     int32         `json:"page_limit"`
+}
+
+type ListCommentsByVideoRow struct {
+	ID          uuid.UUID      `json:"id"`
+	VideoID     uuid.UUID      `json:"video_id"`
+	UserID      uuid.UUID      `json:"user_id"`
+	ParentID    uuid.NullUUID  `json:"parent_id"`
+	Content     string         `json:"content"`
+	CreatedAt   time.Time      `json:"created_at"`
+	Username    string         `json:"username"`
+	DisplayName sql.NullString `json:"display_name"`
+	AvatarUrl   sql.NullString `json:"avatar_url"`
+	IsPrivate   bool           `json:"is_private"`
+}
+
+// Flat list of comments for a video, cursor pagination.
+// Joins user for author info.
+func (q *Queries) ListCommentsByVideo(ctx context.Context, arg ListCommentsByVideoParams) ([]ListCommentsByVideoRow, error) {
+	rows, err := q.db.QueryContext(ctx, listCommentsByVideo,
+		arg.VideoID,
+		arg.CursorCreated,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListCommentsByVideoRow{}
+	for rows.Next() {
+		var i ListCommentsByVideoRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.VideoID,
+			&i.UserID,
+			&i.ParentID,
+			&i.Content,
+			&i.CreatedAt,
+			&i.Username,
+			&i.DisplayName,
+			&i.AvatarUrl,
+			&i.IsPrivate,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listFeedVideos = `-- name: ListFeedVideos :many
@@ -683,6 +1100,207 @@ func (q *Queries) ListFeedVideos(ctx context.Context, arg ListFeedVideosParams) 
 			&i.CommentsCount,
 			&i.CreatedAt,
 			&i.DeletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listFollowers = `-- name: ListFollowers :many
+SELECT
+    f.follower_id AS id,
+    u.username,
+    u.display_name,
+    u.avatar_url,
+    u.is_private,
+    f.created_at,
+    EXISTS (
+        SELECT 1 FROM follows f2
+        WHERE f2.follower_id = $1 AND f2.followee_id = f.follower_id
+    ) AS is_following_back
+FROM follows f
+JOIN users u ON u.id = f.follower_id
+WHERE f.followee_id = $2
+  AND ($3::timestamptz IS NULL
+       OR (f.created_at, f.follower_id) < ($3::timestamptz, $4::uuid))
+ORDER BY f.created_at DESC, f.follower_id DESC
+LIMIT $5
+`
+
+type ListFollowersParams struct {
+	FollowerID    uuid.UUID     `json:"follower_id"`
+	FolloweeID    uuid.UUID     `json:"followee_id"`
+	CursorCreated sql.NullTime  `json:"cursor_created"`
+	CursorID      uuid.NullUUID `json:"cursor_id"`
+	PageLimit     int32         `json:"page_limit"`
+}
+
+type ListFollowersRow struct {
+	ID              uuid.UUID      `json:"id"`
+	Username        string         `json:"username"`
+	DisplayName     sql.NullString `json:"display_name"`
+	AvatarUrl       sql.NullString `json:"avatar_url"`
+	IsPrivate       bool           `json:"is_private"`
+	CreatedAt       time.Time      `json:"created_at"`
+	IsFollowingBack bool           `json:"is_following_back"`
+}
+
+// Returns followers of followee_id with user profile fields.
+// Cursor pagination: (f.created_at, f.follower_id) < ($3, $4).
+func (q *Queries) ListFollowers(ctx context.Context, arg ListFollowersParams) ([]ListFollowersRow, error) {
+	rows, err := q.db.QueryContext(ctx, listFollowers,
+		arg.FollowerID,
+		arg.FolloweeID,
+		arg.CursorCreated,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListFollowersRow{}
+	for rows.Next() {
+		var i ListFollowersRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Username,
+			&i.DisplayName,
+			&i.AvatarUrl,
+			&i.IsPrivate,
+			&i.CreatedAt,
+			&i.IsFollowingBack,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listFollowing = `-- name: ListFollowing :many
+SELECT
+    f.followee_id AS id,
+    u.username,
+    u.display_name,
+    u.avatar_url,
+    u.is_private,
+    f.created_at
+FROM follows f
+JOIN users u ON u.id = f.followee_id
+WHERE f.follower_id = $1
+  AND ($2::timestamptz IS NULL
+       OR (f.created_at, f.followee_id) < ($2::timestamptz, $3::uuid))
+ORDER BY f.created_at DESC, f.followee_id DESC
+LIMIT $4
+`
+
+type ListFollowingParams struct {
+	FollowerID    uuid.UUID     `json:"follower_id"`
+	CursorCreated sql.NullTime  `json:"cursor_created"`
+	CursorID      uuid.NullUUID `json:"cursor_id"`
+	PageLimit     int32         `json:"page_limit"`
+}
+
+type ListFollowingRow struct {
+	ID          uuid.UUID      `json:"id"`
+	Username    string         `json:"username"`
+	DisplayName sql.NullString `json:"display_name"`
+	AvatarUrl   sql.NullString `json:"avatar_url"`
+	IsPrivate   bool           `json:"is_private"`
+	CreatedAt   time.Time      `json:"created_at"`
+}
+
+// Returns users that follower_id is following.
+func (q *Queries) ListFollowing(ctx context.Context, arg ListFollowingParams) ([]ListFollowingRow, error) {
+	rows, err := q.db.QueryContext(ctx, listFollowing,
+		arg.FollowerID,
+		arg.CursorCreated,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListFollowingRow{}
+	for rows.Next() {
+		var i ListFollowingRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Username,
+			&i.DisplayName,
+			&i.AvatarUrl,
+			&i.IsPrivate,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listNotifications = `-- name: ListNotifications :many
+SELECT id, user_id, actor_id, type, payload, is_read, created_at
+FROM notifications
+WHERE user_id = $1
+  AND ($2::timestamptz IS NULL
+       OR (created_at, id) < ($2::timestamptz, $3::uuid))
+ORDER BY created_at DESC, id DESC
+LIMIT $4
+`
+
+type ListNotificationsParams struct {
+	UserID        uuid.UUID     `json:"user_id"`
+	CursorCreated sql.NullTime  `json:"cursor_created"`
+	CursorID      uuid.NullUUID `json:"cursor_id"`
+	PageLimit     int32         `json:"page_limit"`
+}
+
+// All notifications for a user, newest first, cursor pagination.
+func (q *Queries) ListNotifications(ctx context.Context, arg ListNotificationsParams) ([]Notification, error) {
+	rows, err := q.db.QueryContext(ctx, listNotifications,
+		arg.UserID,
+		arg.CursorCreated,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Notification{}
+	for rows.Next() {
+		var i Notification
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.ActorID,
+			&i.Type,
+			&i.Payload,
+			&i.IsRead,
+			&i.CreatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -855,6 +1473,20 @@ func (q *Queries) ListVideosEligibleForCleanup(ctx context.Context, limit int32)
 		return nil, err
 	}
 	return items, nil
+}
+
+const markAllNotificationsRead = `-- name: MarkAllNotificationsRead :execrows
+UPDATE notifications
+SET is_read = TRUE
+WHERE user_id = $1 AND is_read = FALSE
+`
+
+func (q *Queries) MarkAllNotificationsRead(ctx context.Context, userID uuid.UUID) (int64, error) {
+	result, err := q.db.ExecContext(ctx, markAllNotificationsRead, userID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const markVideoDeleted = `-- name: MarkVideoDeleted :one

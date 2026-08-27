@@ -303,3 +303,186 @@ LIMIT $1;
 
 -- name: DeleteVideoRow :exec
 DELETE FROM videos WHERE id = $1;
+
+-- =====================================================
+-- follows
+-- =====================================================
+
+-- name: FollowUser :exec
+-- Idempotent insert. ON CONFLICT DO NOTHING makes it safe
+-- to call even if the follow already exists.
+INSERT INTO follows (follower_id, followee_id)
+VALUES ($1, $2)
+ON CONFLICT DO NOTHING;
+
+-- name: DeleteFollow :exec
+DELETE FROM follows
+WHERE follower_id = $1 AND followee_id = $2;
+
+-- name: IsFollowing :one
+SELECT EXISTS (
+    SELECT 1 FROM follows
+    WHERE follower_id = $1 AND followee_id = $2
+);
+
+-- name: ListFollowers :many
+-- Returns followers of followee_id with user profile fields.
+-- Cursor pagination: (f.created_at, f.follower_id) < ($3, $4).
+SELECT
+    f.follower_id AS id,
+    u.username,
+    u.display_name,
+    u.avatar_url,
+    u.is_private,
+    f.created_at,
+    EXISTS (
+        SELECT 1 FROM follows f2
+        WHERE f2.follower_id = $1 AND f2.followee_id = f.follower_id
+    ) AS is_following_back
+FROM follows f
+JOIN users u ON u.id = f.follower_id
+WHERE f.followee_id = $2
+  AND (sqlc.narg('cursor_created')::timestamptz IS NULL
+       OR (f.created_at, f.follower_id) < (sqlc.narg('cursor_created')::timestamptz, sqlc.narg('cursor_id')::uuid))
+ORDER BY f.created_at DESC, f.follower_id DESC
+LIMIT sqlc.arg('page_limit');
+
+-- name: ListFollowing :many
+-- Returns users that follower_id is following.
+SELECT
+    f.followee_id AS id,
+    u.username,
+    u.display_name,
+    u.avatar_url,
+    u.is_private,
+    f.created_at
+FROM follows f
+JOIN users u ON u.id = f.followee_id
+WHERE f.follower_id = $1
+  AND (sqlc.narg('cursor_created')::timestamptz IS NULL
+       OR (f.created_at, f.followee_id) < (sqlc.narg('cursor_created')::timestamptz, sqlc.narg('cursor_id')::uuid))
+ORDER BY f.created_at DESC, f.followee_id DESC
+LIMIT sqlc.arg('page_limit');
+
+-- name: CountFollowers :one
+SELECT COUNT(*) FROM follows WHERE followee_id = $1;
+
+-- name: CountFollowing :one
+SELECT COUNT(*) FROM follows WHERE follower_id = $1;
+
+-- name: DeleteFollowsByFollower :exec
+DELETE FROM follows WHERE follower_id = $1;
+
+-- name: DeleteFollowsByFollowee :exec
+DELETE FROM follows WHERE followee_id = $1;
+
+-- =====================================================
+-- likes
+-- =====================================================
+
+-- name: InsertLike :one
+INSERT INTO likes (user_id, video_id)
+VALUES ($1, $2)
+ON CONFLICT DO NOTHING
+RETURNING *;
+
+-- name: DeleteLike :one
+DELETE FROM likes
+WHERE user_id = $1 AND video_id = $2
+RETURNING *;
+
+-- name: IsLiked :one
+SELECT EXISTS (
+    SELECT 1 FROM likes
+    WHERE user_id = $1 AND video_id = $2
+);
+
+-- name: DeleteLikesByUser :exec
+DELETE FROM likes WHERE user_id = $1;
+
+-- =====================================================
+-- comments
+-- =====================================================
+
+-- name: InsertComment :one
+INSERT INTO comments (video_id, user_id, parent_id, content)
+VALUES ($1, $2, $3, $4)
+RETURNING *;
+
+-- name: GetCommentByID :one
+SELECT c.*, u.username, u.display_name, u.avatar_url, u.is_private
+FROM comments c
+JOIN users u ON u.id = c.user_id
+WHERE c.id = $1
+LIMIT 1;
+
+-- name: ListCommentsByVideo :many
+-- Flat list of comments for a video, cursor pagination.
+-- Joins user for author info.
+SELECT
+    c.id,
+    c.video_id,
+    c.user_id,
+    c.parent_id,
+    c.content,
+    c.created_at,
+    u.username,
+    u.display_name,
+    u.avatar_url,
+    u.is_private
+FROM comments c
+JOIN users u ON u.id = c.user_id
+WHERE c.video_id = $1
+  AND (sqlc.narg('cursor_created')::timestamptz IS NULL
+       OR (c.created_at, c.id) < (sqlc.narg('cursor_created')::timestamptz, sqlc.narg('cursor_id')::uuid))
+ORDER BY c.created_at DESC, c.id DESC
+LIMIT sqlc.arg('page_limit');
+
+-- name: CountCommentSubtree :one
+-- Recursive CTE counting this comment + all descendants.
+-- Used before deletion to know how much to decrement
+-- the video's comments_count.
+WITH RECURSIVE subtree AS (
+    SELECT c.id FROM comments c WHERE c.id = $1
+    UNION ALL
+    SELECT c.id FROM comments c
+    JOIN subtree s ON c.parent_id = s.id
+)
+SELECT COUNT(*)::int FROM subtree;
+
+-- name: DeleteCommentByID :exec
+-- ON DELETE CASCADE handles replies automatically.
+DELETE FROM comments WHERE id = $1;
+
+-- name: DeleteCommentsByUser :exec
+DELETE FROM comments WHERE user_id = $1;
+
+-- =====================================================
+-- notifications
+-- =====================================================
+
+-- name: InsertNotification :one
+INSERT INTO notifications (user_id, actor_id, type, payload)
+VALUES ($1, $2, $3, $4)
+RETURNING *;
+
+-- name: ListNotifications :many
+-- All notifications for a user, newest first, cursor pagination.
+SELECT *
+FROM notifications
+WHERE user_id = $1
+  AND (sqlc.narg('cursor_created')::timestamptz IS NULL
+       OR (created_at, id) < (sqlc.narg('cursor_created')::timestamptz, sqlc.narg('cursor_id')::uuid))
+ORDER BY created_at DESC, id DESC
+LIMIT sqlc.arg('page_limit');
+
+-- name: MarkAllNotificationsRead :execrows
+UPDATE notifications
+SET is_read = TRUE
+WHERE user_id = $1 AND is_read = FALSE;
+
+-- name: DeleteNotificationsForUser :exec
+DELETE FROM notifications WHERE user_id = $1;
+
+-- name: DeleteNotificationsByActor :exec
+DELETE FROM notifications WHERE actor_id = $1;
