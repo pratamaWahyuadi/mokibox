@@ -2,7 +2,12 @@ version: "2"
 sql:
   - engine: "postgresql"
     schema: "../migrations/001_init.sql"
-    queries: "queries.sql"
+    # Queries live in per-table files under sqlc/queries/.
+    # sqlc picks up every *.sql file in the directory in
+    # alphabetical order; split was introduced in phase-1.5
+    # to make each table's query surface easy to read and
+    # diff in isolation.
+    queries: "queries"
     gen:
       go:
         package: "db"
