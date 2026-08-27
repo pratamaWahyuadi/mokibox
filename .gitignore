@@ -1,1 +1,27 @@
+# Secrets & local env
 .env
+.env.local
+.env.*.local
+
+# Build artifacts
+bin/
+*.exe
+*.test
+*.out
+
+# Logs
+*.log
+
+# Local data volumes / runtime data
+data/
+pgdata/
+redisdata/
+
+# Go
+vendor/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
