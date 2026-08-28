@@ -3,16 +3,19 @@
 // for which URL paths the gateway exposes and which
 // middleware protects them.
 //
-// Phase 3 issue B (this commit) registers only the
-// user profile endpoints:
+// Phase 3 issue B (commit phase-3.2) registered the
+// user profile endpoints; this commit (issue C) extends
+// routes.go with the Zitadel Actions V2 webhook, mounted
+// OUTSIDE the auth group. After this commit the full
+// phase-3 route set is:
 //   - GET  /healthz                          (no auth)
+//   - POST /api/webhooks/zitadel             (no JWT auth;
+//       signature verified inside the handler)
 //   - GET  /api/users/me                     (auth)
 //   - PUT  /api/users/me                     (auth)
 //   - GET  /api/users/:id                    (auth)
 //   - GET  /api/users/:id/videos             (auth)
 //
-// Phase 3 issue C extends this file with the Zitadel
-// webhook route, mounted OUTSIDE the auth group.
 // Subsequent phases add their own endpoints here
 // (upload-intent, confirm, feed, follow, like, comment,
 // notification, delete, etc.). Phase 9 finalises the
@@ -52,11 +55,17 @@ type RouterDeps struct {
 	// it in here. Tests can pass a stub that satisfies
 	// middleware.TokenVerifier.
 	AuthVerifier middleware.TokenVerifier
+	// WebhookSigningKey is the ZITADEL_TARGET_SIGNING_KEY
+	// used to verify the HMAC on every Actions V2 call.
+	// Kept as a separate field (not buried in Cfg) so
+	// tests can inject a fixed key without depending on
+	// the env loader.
+	WebhookSigningKey string
 }
 
 // NewRouter returns a fully wired *echo.Echo with the
-// phase-3 issue-B routes registered. It does not start
-// the server; main.go is responsible for e.Start.
+// phase-3 routes registered. It does not start the
+// server; main.go is responsible for e.Start.
 //
 // The function does not own the dependencies it
 // receives - the caller (main.go) is expected to keep
@@ -70,6 +79,17 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	// trivial so the orchestrator's docker healthcheck
 	// can hit it cheaply.
 	e.GET("/healthz", handlers.HealthHandler)
+
+	// Webhook: mounted on the root Echo (NOT under the
+	// JWT auth group) because Actions V2 authenticates
+	// the call via the ZITADEL-Signature HMAC header
+	// rather than a Bearer token. Rate limiting lives
+	// in phase 9 (middleware.RateLimitWebhook) - the
+	// route is registered without it now so a future
+	// commit can insert the middleware without touching
+	// this file.
+	wh := handlers.NewWebhookHandler(d.Queries, d.WebhookSigningKey)
+	e.POST("/api/webhooks/zitadel", wh.Handle)
 
 	// Authenticated API group. Everything under /api/*
 	// (except the webhook) requires a valid Zitadel JWT

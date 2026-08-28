@@ -5,12 +5,30 @@
 // NewRouter needs and starts the Echo server.
 //
 // Phase 9 will replace the body of main() with the
-// production wiring: env loading, real DB pool, R2
-// client, Asynq client, Zitadel verifier, custom HTTP
-// error handler, request validator, graceful shutdown,
-// and signal handling. Keeping phase 3's main this
-// short means a missing dependency in the dev
-// environment does not block the issue-B commit.
+// production wiring: env loading via shared.LoadAPI,
+// real DB pool, R2 client, Asynq client, Zitadel
+// verifier, custom HTTP error handler, request
+// validator, graceful shutdown, and signal handling.
+// Keeping phase 3's main this short means a missing
+// dependency in the dev environment does not block the
+// issue-B / issue-C commits.
+//
+// For the phase-3 smoke test we DO read a few env vars
+// directly so a developer can `go run ./api-gateway`
+// against a local Postgres + Redis without first
+// standing up the full phase-9 main. The set of
+// recognised vars is the minimum needed to exercise
+// the auth and webhook paths:
+//   - API_GATEWAY_ADDR            listen addr (default :8080)
+//   - ZITADEL_ISSUER_URL          issuer for the JWT verifier
+//   - ZITADEL_API_CLIENT_ID       expected audience
+//   - ZITADEL_TARGET_SIGNING_KEY  Actions V2 HMAC secret
+//
+// If the issuer is empty, we wire a denyAllVerifier so
+// a stray /api/users/* request cannot accidentally be
+// served as an authenticated user. If the signing key
+// is empty, the webhook handler refuses every request
+// (defence in depth - see handlers/webhook.go).
 package main
 
 import (
@@ -21,6 +39,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/pratamaWahyuadi/mokibox/api-gateway/middleware"
 )
 
 // addr is the listen address for the API gateway. It
@@ -36,21 +56,22 @@ func main() {
 		addr = defaultAddr
 	}
 
-	// RouterDeps{} is the zero-value config; phase 9
-	// will populate it from a real config. Building
-	// the router with empty deps succeeds because the
-	// user endpoints only use DB / Queries inside the
-	// handler (which is not exercised by this minimal
-	// main). The auth middleware requires a non-nil
-	// Verifier, so we wire a stub here that always
-	// rejects - that way an accidentally exposed
-	// /api/users/* cannot impersonate a real user.
-	//
-	// In phase 9 this becomes
-	//   middleware.NewZitadelVerifier(ctx, ...)
-	// and the rest of RouterDeps is filled from env.
+	// Phase-3 wiring: read the absolute minimum env
+	// set needed to exercise /api/users/* and the
+	// webhook. Phase 9 replaces this with
+	// shared.LoadAPI() and real client construction.
+	verifier, err := buildVerifier(
+		os.Getenv("ZITADEL_ISSUER_URL"),
+		os.Getenv("ZITADEL_API_CLIENT_ID"),
+	)
+	if err != nil {
+		log.Printf("api-gateway: verifier disabled: %v", err)
+		verifier = denyAllVerifier{}
+	}
+
 	deps := RouterDeps{
-		AuthVerifier: denyAllVerifier{},
+		AuthVerifier:      verifier,
+		WebhookSigningKey: os.Getenv("ZITADEL_TARGET_SIGNING_KEY"),
 	}
 
 	e := NewRouter(deps)
@@ -83,11 +104,28 @@ func main() {
 	}
 }
 
-// denyAllVerifier is the stand-in TokenVerifier used by
-// the phase-3 minimal main. It rejects every token so a
-// stray /api/users/* request cannot accidentally be
-// served. Phase 9 replaces it with
-// middleware.NewZitadelVerifier(ctx, cfg.ZitadelIssuerURL, cfg.ZitadelAPIClientID).
+// buildVerifier returns the production Zitadel
+// TokenVerifier when both required env vars are set;
+// otherwise it returns an error so the caller can
+// substitute a denyAllVerifier (a misconfigured
+// deployment should never accidentally accept tokens).
+func buildVerifier(issuer, apiClientID string) (middleware.TokenVerifier, error) {
+	if issuer == "" || apiClientID == "" {
+		return nil, errVerifierNotConfigured
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return middleware.NewZitadelVerifier(ctx, issuer, apiClientID)
+}
+
+// errVerifierNotConfigured is the sentinel returned
+// when the Zitadel env vars are missing.
+var errVerifierNotConfigured = errStub("ZITADEL_ISSUER_URL / ZITADEL_API_CLIENT_ID not set")
+
+// denyAllVerifier is the stand-in TokenVerifier used
+// when the Zitadel env is not configured. It rejects
+// every token so a stray /api/users/* request cannot
+// accidentally be served. Phase 9 removes it.
 type denyAllVerifier struct{}
 
 // CheckToken always returns an empty subject and an
