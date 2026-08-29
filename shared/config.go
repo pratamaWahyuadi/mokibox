@@ -36,6 +36,15 @@ type APIConfig struct {
 	ZitadelIssuerURL    string
 	ZitadelClientID     string // Web/OIDC client (used by login UI)
 	ZitadelAPIClientID  string // API client (audience for access tokens)
+	// ZitadelTargetSigningKey is the signingKey returned
+	// by Zitadel when an Actions V2 Target was created.
+	// The api-gateway webhook uses it to verify the
+	// ZITADEL-Signature HMAC on every incoming call. It
+	// is separate from the OIDC JWKS keys: the signingKey
+	// is a shared secret returned exactly once at Target
+	// creation time, so it lives in env, not in the
+	// OIDC discovery document.
+	ZitadelTargetSigningKey string
 
 	// Cloudflare R2
 	R2AccountID       string
@@ -88,6 +97,7 @@ func LoadAPI() (*APIConfig, error) {
 		ZitadelIssuerURL:    os.Getenv("ZITADEL_ISSUER_URL"),
 		ZitadelClientID:     os.Getenv("ZITADEL_CLIENT_ID"),
 		ZitadelAPIClientID:  os.Getenv("ZITADEL_API_CLIENT_ID"),
+		ZitadelTargetSigningKey: os.Getenv("ZITADEL_TARGET_SIGNING_KEY"),
 		R2AccountID:         os.Getenv("R2_ACCOUNT_ID"),
 		R2AccessKeyID:       os.Getenv("R2_ACCESS_KEY_ID"),
 		R2SecretAccessKey:   os.Getenv("R2_SECRET_ACCESS_KEY"),
@@ -116,6 +126,7 @@ func LoadAPI() (*APIConfig, error) {
 		"ZITADEL_ISSUER_URL", c.ZitadelIssuerURL,
 		"ZITADEL_CLIENT_ID", c.ZitadelClientID,
 		"ZITADEL_API_CLIENT_ID", c.ZitadelAPIClientID,
+		"ZITADEL_TARGET_SIGNING_KEY", c.ZitadelTargetSigningKey,
 		"R2_ACCOUNT_ID", c.R2AccountID,
 		"R2_ACCESS_KEY_ID", c.R2AccessKeyID,
 		"R2_SECRET_ACCESS_KEY", c.R2SecretAccessKey,
