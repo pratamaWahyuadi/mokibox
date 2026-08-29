@@ -1,21 +1,44 @@
 # =====================================================
-# TikTok Clone Backend MVP - docker-compose
+# MokiBox Backend - docker-compose
 #
-# All services run on a single internal bridge network.
-# PostgreSQL and Redis are NEVER published to the host
-# (NFR-11, SEC-02, SEC-03). Only Nginx publishes 80/443
-# to the host.
+# MokiBox app services only. The Zitadel identity
+# provider is deployed separately (see the sibling
+# `zitadel-compose/` directory - it is NOT in this
+# repository and is intentionally not merged here).
+#
+# Rationale: Zitadel v3+ ships as a multi-service
+# compose (api + login + Traefik + dedicated Postgres)
+# and shares no network/credentials with the MokiBox
+# app. Keeping the two compose files separate matches
+# the upstream Zitadel layout and avoids the restart
+# loop we hit when we tried to run Zitadel v2 as a
+# single container inside the app stack.
+#
+# All app services run on a single internal bridge
+# network. PostgreSQL and Redis are NEVER published
+# to the host (NFR-11, SEC-02, SEC-03). Only Nginx
+# publishes 80/443 to the host.
+#
+# Bring-up order on a fresh VPS:
+#   1. cd ../zitadel-compose && docker compose up -d
+#      (or `make up-zitadel` from this directory)
+#   2. make up                         (MokiBox services)
+#
+# The api-gateway reads ZITADEL_ISSUER_URL from env and
+# calls out to the Zitadel stack over the host network.
+# It does NOT depend on a `zitadel` service in this
+# compose file.
 # =====================================================
 
-name: tiktok-backend
+name: mokibox
 
 services:
   # -------------------------------------------------
-  # PostgreSQL 16 - internal only
+  # PostgreSQL 16 - internal only (MokiBox app DB)
   # -------------------------------------------------
   postgres:
     image: postgres:16-alpine
-    container_name: tiktok-postgres
+    container_name: mokibox-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER:     ${POSTGRES_USER}
@@ -38,7 +61,7 @@ services:
   # -------------------------------------------------
   redis:
     image: redis:7-alpine
-    container_name: tiktok-redis
+    container_name: mokibox-redis
     restart: unless-stopped
     command:
       - redis-server
@@ -58,63 +81,30 @@ services:
     # No `ports:` directive on purpose - internal only.
 
   # -------------------------------------------------
-  # Zitadel - self-hosted identity provider
-  # (Phase 0 issue: pinned image, reachable via Nginx
-  #  at https://auth.example.com -> /zitadel/)
-  # Database credentials for Zitadel reuse the postgres
-  # superuser; create the `zitadel` DB in bootstrap.
-  # -------------------------------------------------
-  zitadel:
-    image: ghcr.io/zitadel/zitadel:${ZITADEL_VERSION}
-    container_name: tiktok-zitadel
-    restart: unless-stopped
-    command: start-from-init --masterkey "PleaseChangeMeZitadelMasterKey"
-    environment:
-      ZITADEL_PORT: 8080
-      # Public issuer URL - must match the Nginx route
-      ZITADEL_EXTERNALDOMAIN: ${ZITADEL_ISSUER_URL}
-      ZITADEL_EXTERNALPORT: 443
-      ZITADEL_EXTERNALSECURE: "true"
-      ZITADEL_TLS_ENABLED: "false"
-
-      # Reuse the same Postgres instance, separate database
-      ZITADEL_DATABASE_POSTGRES_HOST: postgres
-      ZITADEL_DATABASE_POSTGRES_PORT: 5432
-      ZITADEL_DATABASE_POSTGRES_USER: ${POSTGRES_USER}
-      ZITADEL_DATABASE_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      ZITADEL_DATABASE_POSTGRES_SSL_MODE: disable
-      ZITADEL_DATABASE_POSTGRES_DATABASE: zitadel
-
-      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORDCHANGEREQUIRED: "false"
-      ZITADEL_FIRSTINSTANCE_LOGINCLIENTPATPATH: /zitadel/bootstrap/login-client.pat
-      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_MACHINE_USERNAME: login-client
-      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_MACHINE_NAME: "Automatically Initialized IAM_LOGIN_CLIENT"
-      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_PAT_EXPIRATIONDATE: 2030-01-01T00:00:00Z
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - backend
-    # No `ports:` directive on purpose - reachable only
-    # through Nginx at /zitadel/.
-
-  # -------------------------------------------------
-  # API gateway - Go + Echo (Phase 9 wires the real
-  # binary; Phase 0 only needs the service to resolve)
+  # API gateway - Go + Echo
+  # (Phase 3 ships the auth + user + webhook code;
+  #  phase 9 wires the production main + validator.)
+  #
+  # The api-gateway talks to Zitadel over the host
+  # network using ZITADEL_ISSUER_URL. There is no
+  # `zitadel` service in this compose - it lives in
+  # the separate zitadel-compose project.
   # -------------------------------------------------
   api-gateway:
     build:
       context: ./api-gateway
       dockerfile: Dockerfile
-    image: tiktok-api-gateway:phase0
-    container_name: tiktok-api-gateway
+    image: mokibox-api-gateway:dev
+    container_name: mokibox-api-gateway
     restart: unless-stopped
     environment:
       DATABASE_URL:        ${DATABASE_URL}
       REDIS_ADDR:          ${REDIS_ADDR}
       REDIS_PASSWORD:      ${REDIS_PASSWORD}
       ZITADEL_ISSUER_URL:  ${ZITADEL_ISSUER_URL}
+      ZITADEL_CLIENT_ID:     ${ZITADEL_CLIENT_ID}
       ZITADEL_API_CLIENT_ID: ${ZITADEL_API_CLIENT_ID}
+      ZITADEL_TARGET_SIGNING_KEY: ${ZITADEL_TARGET_SIGNING_KEY}
       R2_ACCOUNT_ID:       ${R2_ACCOUNT_ID}
       R2_ACCESS_KEY_ID:    ${R2_ACCESS_KEY_ID}
       R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY}
@@ -129,22 +119,20 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      zitadel:
-        condition: service_started
     networks:
       - backend
 
   # -------------------------------------------------
   # Transcoder worker - Asynq consumer
-  # (Phase 5 wires the real binary; Phase 0 only needs
-  # the service to resolve)
+  # (Phase 5 wires the real binary; current image is
+  #  a phase-0 placeholder.)
   # -------------------------------------------------
   transcoder-worker:
     build:
       context: ./transcoder-worker
       dockerfile: Dockerfile
-    image: tiktok-transcoder-worker:phase0
-    container_name: tiktok-transcoder-worker
+    image: mokibox-transcoder-worker:dev
+    container_name: mokibox-transcoder-worker
     restart: unless-stopped
     # Worker MUST NOT expose any HTTP port.
     expose: []   # explicit - no ports mapped
@@ -179,11 +167,13 @@ services:
       - backend
 
   # -------------------------------------------------
-  # Nginx - the only public entry point
+  # Nginx - the only public entry point for the app
+  # Zitadel serves itself through its own Traefik in
+  # the sibling zitadel-compose project.
   # -------------------------------------------------
   nginx:
     image: nginx:1.27-alpine
-    container_name: tiktok-nginx
+    container_name: mokibox-nginx
     restart: unless-stopped
     ports:
       - "80:80"
@@ -193,7 +183,6 @@ services:
       - ./deploy/nginx/certs:/etc/nginx/certs:ro
     depends_on:
       - api-gateway
-      - zitadel
     networks:
       - backend
 
@@ -205,7 +194,8 @@ networks:
     driver: bridge
 
 # =====================================================
-# Named volumes for persistent data
+# Named volumes for persistent MokiBox app data
+# (Zitadel has its own volumes in zitadel-compose.)
 # =====================================================
 volumes:
   pgdata:

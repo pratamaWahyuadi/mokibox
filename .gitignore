@@ -17,6 +17,12 @@ data/
 pgdata/
 redisdata/
 
+# Sibling identity-provider stack (Zitadel) - lives
+# outside the MokiBox source tree (see LLD asumsi A11).
+# Default Makefile lookup is ./zitadel-compose/ but it
+# can also be a sibling directory.
+zitadel-compose/
+
 # Go
 vendor/
 

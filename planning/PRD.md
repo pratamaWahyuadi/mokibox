@@ -70,7 +70,7 @@ Masalah yang dibereskan PRD ini:
 | FR-AUTH-01 | API **hanya** menerima access token JWT dari Zitadel. Token divalidasi penuh via JWKS: signature, issuer, audience, expiry, dan algoritma. |
 | FR-AUTH-02 | **Tidak ada logika refresh token di sisi Go.** Refresh token rotation sepenuhnya ditangani Zitadel. Kalau token expired, API cukup return `401` dan client redirect ke Zitadel. |
 | FR-AUTH-03 | Auth middleware melakukan **get-or-create user** berdasarkan `sub` (zitadel_id). Kalau user sudah dinonaktifkan (`is_active = false`), tolak request. |
-| FR-AUTH-04 | Zitadel di-self-host dalam docker-compose yang sama, dikonfigurasi dengan hosted UI, email/password internal, **dan Google Sign-In**. |
+| FR-AUTH-04 | Zitadel di-self-host via docker-compose terpisah (`../zitadel-compose/`, lihat LLD asumsi A11), dikonfigurasi dengan hosted UI, email/password internal, **dan Google Sign-In**. Compose project MokiBox refer Zitadel sebagai external dependency lewat `ZITADEL_ISSUER_URL`; tidak ada service `zitadel` di MokiBox `docker-compose.yml`. |
 | FR-AUTH-05 | Backend wajib menyediakan endpoint webhook Zitadel untuk event `user.deleted` / `user.deactivated`. Webhook wajib diverifikasi signature/secret-nya. Jika event valid, backend harus menonaktifkan user di PostgreSQL (`is_active = false`) untuk `user.deactivated`, atau menjalankan prosedur penghapusan data lokal untuk `user.deleted`. || FR-USER-01 | Endpoint profil: `GET /api/users/me`, `PUT /api/users/me`, `GET /api/users/:id`, `GET /api/users/:id/videos`. |
 | FR-USER-02 | Data PII yang disimpan hanya: `username`, `display_name`, `bio`, `avatar_url`. **Email dari Zitadel tidak disimpan di PostgreSQL.** |
 | FR-USER-03 | Delete account P0: hapus semua data user (profil, video, like, comment, follow, notifikasi) + file di R2. Penghapusan di Zitadel bisa via UI/admin atau webhook, tapi data lokal harus bersih. |
@@ -128,7 +128,7 @@ Masalah yang dibereskan PRD ini:
 | NFR-08 | Logging cukup stdout dari docker-compose. Tidak perlu structured logging / log collector. |
 | NFR-09 | Monitoring cukup manual. Tidak perlu dashboard/alert di MVP. |
 | NFR-10 | Deployment manual: `git pull` + `docker-compose up -d --build`. Tidak perlu CI/CD. |
-| NFR-11 | Semua komponen jalan di satu VPS, satu docker-compose. |
+| NFR-11 | Semua komponen jalan di satu VPS, dengan 2 compose project (`docker-compose.yml` MokiBox + `../zitadel-compose/docker-compose.yml` Zitadel). Lihat LLD asumsi A11 untuk deviasi dari NFR-11 awal ("satu docker-compose"): Zitadel v3+ arsitektur multi-service tidak fit di satu compose dengan MokiBox tanpa restart loop. |
 | NFR-12 | Data residency bebas. |
 | NFR-13 | Retensi: video/akun yang dihapus → file di R2 harus ikut dihapus maksimal 1×24 jam. |
 | NFR-14 | Multi-device login diperbolehkan. Tidak perlu fitur logout semua perangkat di MVP. |
@@ -450,6 +450,9 @@ Catatan:
 
 ### Struktur Direktori
 
+> Catatan: Zitadel dideploy di luar repo MokiBox (lihat LLD asumsi A11)
+> sebagai `../zitadel-compose/`. Folder itu di luar scope git MokiBox.
+
 ```text
 tiktok-backend/
 ├── docker-compose.yml
@@ -487,6 +490,12 @@ tiktok-backend/
 │
 └── migrations/
     └── 001_init.sql
+```
+
+Sibling (di luar repo):
+```text
+../zitadel-compose/
+└── docker-compose.yml     # Traefik + zitadel-api + zitadel-login + zitadel-postgres
 ```
 
 ### API Endpoint
