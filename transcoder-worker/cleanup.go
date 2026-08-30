@@ -38,6 +38,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -186,7 +187,23 @@ func (w *Worker) HandleCleanupVideo(ctx context.Context, t *asynq.Task) error {
 		// prefixes. HlsPrefix is stored without the
 		// trailing slash (e.g. "hls/<uid>/<vid>") so
 		// we append "/" here.
-		if err := w.R2.DeletePrefix(ctx, video.HlsPrefix.String+"/"); err != nil {
+		//
+		// Belt-and-braces: also assert the prefix
+		// starts with "hls/" so a malformed or
+		// manually-edited DB row cannot trick the
+		// helper into targeting the bucket root.
+		// DeletePrefix itself rejects "/", "//", and
+		// any prefix with no non-slash characters, but
+		// checking here gives a clearer error log line
+		// and protects against future refactors that
+		// move the call site.
+		prefix := video.HlsPrefix.String + "/"
+		if !strings.HasPrefix(prefix, "hls/") {
+			w.Logger.Error("HandleCleanupVideo: refusing to delete, hls_prefix does not start with 'hls/'",
+				"video_id", videoID, "hls_prefix", video.HlsPrefix.String)
+			return nil
+		}
+		if err := w.R2.DeletePrefix(ctx, prefix); err != nil {
 			w.Logger.Error("HandleCleanupVideo: delete hls prefix", "err", err,
 				"hls_prefix", video.HlsPrefix.String)
 			return err

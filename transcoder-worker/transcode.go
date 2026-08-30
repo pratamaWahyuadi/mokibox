@@ -88,10 +88,10 @@ var transcodeVariants = []struct {
 }
 
 // MaxRetries is the application-level retry budget.
-// PRD FR-VIDEO-08 + LLD section 8: at most 3 attempts
-// per video. IncrementVideoRetry runs at the start of
-// each attempt so retry_count is "1-based attempt
-// index minus 1" by the time we check it.
+// PRD FR-VIDEO-07 + LLD section 8: at most 3 attempts
+// per video. The check happens BEFORE the increment
+// (per LLD line 726-727), so the row's retry_count
+// stays at most 3 across the entire attempt sequence.
 const MaxRetries = 3
 
 // retryDelayFor returns the ProcessIn delay for the
@@ -160,16 +160,14 @@ func (w *Worker) HandleTranscode(ctx context.Context, t *asynq.Task) error {
 		return nil
 	}
 
-	// Increment retry counter BEFORE doing any work so
-	// a mid-pipeline crash still increments. The query
-	// is a sqlc one-liner.
-	incremented, err := w.Queries.IncrementVideoRetry(ctx, videoID)
-	if err != nil {
-		w.Logger.Error("transcode handler: increment retry", "err", err, "video_id", videoID)
-		return nil
-	}
-	if incremented.RetryCount > MaxRetries {
-		// We've already used our retry budget.
+	// Retry budget check FIRST (LLD line 726: "retry_count >= 3
+	// -> set FAILED, return nil"). We use the just-loaded
+	// `video` row so the budget reflects what is in the DB
+	// before this attempt's work begins. If a previous
+	// attempt already exhausted the budget, the producer-side
+	// asynq.MaxRetry(1) safety net or the worker re-enqueue
+	// path may still deliver this task; we treat it as final.
+	if video.RetryCount >= MaxRetries {
 		// Mark FAILED (idempotent if FAILED is
 		// already set) and ask cleanup to remove
 		// the raw key. The user will see the
@@ -178,12 +176,23 @@ func (w *Worker) HandleTranscode(ctx context.Context, t *asynq.Task) error {
 			w.Logger.Error("transcode handler: mark failed (post-budget)", "err", ferr, "video_id", videoID)
 		}
 		if _, qerr := shared.EnqueueCleanupObjects(w.Asynq, shared.CleanupObjectsPayload{
-			Keys: []string{incremented.R2Key},
+			Keys: []string{video.R2Key},
 		}); qerr != nil {
-			w.Logger.Warn("transcode handler: enqueue cleanup raw after budget exhaustion", "err", qerr, "r2_key", incremented.R2Key)
+			w.Logger.Warn("transcode handler: enqueue cleanup raw after budget exhaustion", "err", qerr, "r2_key", video.R2Key)
 		}
 		w.Logger.Info("transcode handler: retry budget exhausted, marked FAILED",
-			"video_id", videoID, "retry_count", incremented.RetryCount)
+			"video_id", videoID, "retry_count", video.RetryCount)
+		return nil
+	}
+
+	// Increment retry counter so the row reflects the
+	// in-flight attempt. Following LLD step 3 ("Increment
+	// retry_count") - happens AFTER the budget check so
+	// an over-budget re-delivery does not bump the
+	// counter past its true value.
+	incremented, err := w.Queries.IncrementVideoRetry(ctx, videoID)
+	if err != nil {
+		w.Logger.Error("transcode handler: increment retry", "err", err, "video_id", videoID)
 		return nil
 	}
 

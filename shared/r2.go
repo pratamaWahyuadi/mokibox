@@ -258,17 +258,34 @@ func (c *R2Client) DeleteObjects(ctx context.Context, keys []string) error {
 // across all batches; NotFound keys are silently
 // skipped (idempotent).
 //
-// prefix MUST end with "/" so we do not accidentally
-// delete keys that share a longer common prefix
-// (e.g. "hls/u/v1/" should not match "hls/u/v11/").
-// The constructor rejects any prefix that does not end
-// with a slash.
+// Safety guards (defence in depth - HandleCleanupVideo
+// also pre-validates the prefix, but if a future caller
+// forgets we still refuse):
+//   - prefix MUST end with "/" so we do not
+//     accidentally delete keys that share a longer
+//     common prefix (e.g. "hls/u/v1/" should not
+//     match "hls/u/v11/").
+//   - prefix MUST NOT be just "/" or "//..." - that
+//     would mean "delete everything in the bucket"
+//     and is never a valid cleanup target.
+//   - prefix MUST contain at least one non-slash
+//     character (so "" is impossible even if a caller
+//     concatenates badly).
+// These three checks make bucket-wipe impossible
+// from this helper regardless of what the caller
+// passes.
 func (c *R2Client) DeletePrefix(ctx context.Context, prefix string) error {
 	if prefix == "" {
 		return fmt.Errorf("DeletePrefix: prefix is empty")
 	}
 	if !strings.HasSuffix(prefix, "/") {
 		return fmt.Errorf("DeletePrefix: prefix %q must end with '/'", prefix)
+	}
+	// Bucket-wipe guard. ListObjectsV2 with Prefix=""
+	// or "//" returns every key in the bucket; refuse
+	// anything that would amount to that.
+	if strings.Trim(prefix, "/") == "" {
+		return fmt.Errorf("DeletePrefix: prefix %q is too broad (would match bucket root)", prefix)
 	}
 
 	const batchSize = 1000 // AWS DeleteObjects hard limit per request

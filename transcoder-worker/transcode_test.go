@@ -3,6 +3,11 @@
 // itself runs ffprobe + ffmpeg + R2 and is exercised
 // end-to-end in the runtime smoke; here we only cover
 // the functions that can be unit-tested without I/O.
+//
+// retryDelayFor and the MaxRetries constant are tested
+// alongside the helpers because the retry-counter
+// ordering is a class of bug that recurs every time the
+// handler is touched (off-by-one in `>= 3` vs `> 3`).
 package main
 
 import (
@@ -10,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseFFmpegDuration(t *testing.T) {
@@ -78,6 +84,36 @@ func TestWriteMasterPlaylist(t *testing.T) {
 	for _, s := range wantSubs {
 		if !strings.Contains(got, s) {
 			t.Errorf("master.m3u8 missing substring %q\nfull output:\n%s", s, got)
+		}
+	}
+}
+
+// TestMaxRetriesConstant pins the constant so a
+// future edit that bumps it to 4 or drops it to 2
+// is caught at test time. The PRD says "max 3"
+// (FR-VIDEO-07); silently changing the budget would
+// be a class of bug we want to be loud about.
+func TestMaxRetriesConstant(t *testing.T) {
+	if MaxRetries != 3 {
+		t.Errorf("MaxRetries = %d, want 3 (PRD FR-VIDEO-07)", MaxRetries)
+	}
+}
+
+// TestRetryDelayFor ensures the 30s * retry_count formula
+// from LLD section 8 is what actually ships.
+func TestRetryDelayFor(t *testing.T) {
+	cases := []struct {
+		retryCount int32
+		want       time.Duration
+	}{
+		{0, 0 * time.Second}, // attempt 2 was retry_count 1 -> 30s, but attempt 1 = 0
+		{1, 30 * time.Second},
+		{2, 60 * time.Second},
+		{3, 90 * time.Second},
+	}
+	for _, c := range cases {
+		if got := retryDelayFor(c.retryCount); got != c.want {
+			t.Errorf("retryDelayFor(%d) = %v, want %v", c.retryCount, got, c.want)
 		}
 	}
 }
