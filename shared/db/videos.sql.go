@@ -444,7 +444,20 @@ func (q *Queries) InsertVideo(ctx context.Context, arg InsertVideoParams) (Video
 }
 
 const listFeedVideos = `-- name: ListFeedVideos :many
-SELECT v.id, v.user_id, v.title, v.description, v.r2_key, v.hls_prefix, v.thumbnail_key, v.duration_seconds, v.status, v.retry_count, v.likes_count, v.views_count, v.comments_count, v.created_at, v.deleted_at
+SELECT
+    v.id, v.user_id, v.title, v.description, v.r2_key,
+    v.hls_prefix, v.thumbnail_key, v.duration_seconds,
+    v.status, v.retry_count, v.likes_count, v.views_count,
+    v.comments_count, v.created_at, v.deleted_at,
+    u.id            AS user_id_2,
+    u.username      AS user_username,
+    u.display_name  AS user_display_name,
+    u.avatar_url    AS user_avatar_url,
+    u.is_private    AS user_is_private,
+    EXISTS (
+        SELECT 1 FROM likes l
+        WHERE l.video_id = v.id AND l.user_id = $2
+    ) AS liked_by_me
 FROM videos v
 JOIN users u ON u.id = v.user_id
 WHERE v.status = 'READY'
@@ -455,25 +468,60 @@ WHERE v.status = 'READY'
            SELECT 1 FROM follows f
            WHERE f.follower_id = $1 AND f.followee_id = u.id
        ))
-  AND ($2::timestamptz IS NULL
-       OR (v.created_at, v.id) < ($2::timestamptz, $3::uuid))
+  AND ($3::timestamptz IS NULL
+       OR (v.created_at, v.id) < ($3::timestamptz, $4::uuid))
 ORDER BY v.created_at DESC, v.id DESC
-LIMIT $4
+LIMIT $5
 `
 
 type ListFeedVideosParams struct {
 	UserID        uuid.UUID     `json:"user_id"`
+	ViewerID      uuid.NullUUID `json:"viewer_id"`
 	CursorCreated sql.NullTime  `json:"cursor_created"`
 	CursorID      uuid.NullUUID `json:"cursor_id"`
 	PageLimit     int32         `json:"page_limit"`
 }
 
+type ListFeedVideosRow struct {
+	ID              uuid.UUID      `json:"id"`
+	UserID          uuid.UUID      `json:"user_id"`
+	Title           sql.NullString `json:"title"`
+	Description     sql.NullString `json:"description"`
+	R2Key           string         `json:"r2_key"`
+	HlsPrefix       sql.NullString `json:"hls_prefix"`
+	ThumbnailKey    sql.NullString `json:"thumbnail_key"`
+	DurationSeconds sql.NullInt32  `json:"duration_seconds"`
+	Status          string         `json:"status"`
+	RetryCount      int32          `json:"retry_count"`
+	LikesCount      int32          `json:"likes_count"`
+	ViewsCount      int32          `json:"views_count"`
+	CommentsCount   int32          `json:"comments_count"`
+	CreatedAt       time.Time      `json:"created_at"`
+	DeletedAt       sql.NullTime   `json:"deleted_at"`
+	UserID2         uuid.UUID      `json:"user_id_2"`
+	UserUsername    string         `json:"user_username"`
+	UserDisplayName sql.NullString `json:"user_display_name"`
+	UserAvatarUrl   sql.NullString `json:"user_avatar_url"`
+	UserIsPrivate   bool           `json:"user_is_private"`
+	LikedByMe       bool           `json:"liked_by_me"`
+}
+
 // FR-FEED-01: status=READY, owner active, exclude self,
 // include public accounts + accounts the viewer follows.
 // Cursor pagination uses (created_at, id) < ($3, $4).
-func (q *Queries) ListFeedVideos(ctx context.Context, arg ListFeedVideosParams) ([]Video, error) {
+//
+// Phase 6 widened the row to include the owner user
+// fields (for the nested "user" summary in VideoObject)
+// and an EXISTS (likes) per-row "liked_by_me" flag, so
+// the feed handler can build the full VideoObject
+// without an N+1 round trip. viewer_id can be NULL
+// when the feed is fetched without a session (e.g. a
+// cron job pulling the public timeline) - in that case
+// liked_by_me is FALSE for every row.
+func (q *Queries) ListFeedVideos(ctx context.Context, arg ListFeedVideosParams) ([]ListFeedVideosRow, error) {
 	rows, err := q.db.QueryContext(ctx, listFeedVideos,
 		arg.UserID,
+		arg.ViewerID,
 		arg.CursorCreated,
 		arg.CursorID,
 		arg.PageLimit,
@@ -482,9 +530,9 @@ func (q *Queries) ListFeedVideos(ctx context.Context, arg ListFeedVideosParams) 
 		return nil, err
 	}
 	defer rows.Close()
-	items := []Video{}
+	items := []ListFeedVideosRow{}
 	for rows.Next() {
-		var i Video
+		var i ListFeedVideosRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.UserID,
@@ -501,6 +549,12 @@ func (q *Queries) ListFeedVideos(ctx context.Context, arg ListFeedVideosParams) 
 			&i.CommentsCount,
 			&i.CreatedAt,
 			&i.DeletedAt,
+			&i.UserID2,
+			&i.UserUsername,
+			&i.UserDisplayName,
+			&i.UserAvatarUrl,
+			&i.UserIsPrivate,
+			&i.LikedByMe,
 		); err != nil {
 			return nil, err
 		}

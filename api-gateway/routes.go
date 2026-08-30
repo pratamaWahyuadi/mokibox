@@ -8,8 +8,11 @@
 // routes.go with the Zitadel Actions V2 webhook
 // (mounted OUTSIDE the auth group). Phase 4 adds the
 // upload-intent and confirm endpoints inside the auth
-// group. After this commit the full phase-3/4 route
-// set is:
+// group. Phase 6 issue A (this commit) adds the home
+// feed behind the auth group. Phase 6 issues B and C
+// will register video detail/status/playlist and
+// follow endpoints in their own commits. After this
+// commit the full phase-3/4/6.A route set is:
 //   - GET  /healthz                          (no auth)
 //   - POST /api/webhooks/zitadel             (no JWT auth;
 //       signature verified inside the handler)
@@ -17,6 +20,7 @@
 //   - PUT  /api/users/me                     (auth)
 //   - GET  /api/users/:id                    (auth)
 //   - GET  /api/users/:id/videos             (auth)
+//   - GET  /api/feed/home                    (auth)   [phase 6.A]
 //   - POST /api/videos/upload-intent         (auth)
 //   - POST /api/videos/confirm               (auth)
 //
@@ -140,6 +144,18 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	}
 	api.POST("/videos/upload-intent", vh.UploadIntent)
 	api.POST("/videos/confirm", vh.ConfirmUpload)
+
+	// Phase 6.A: home feed. Same auth-group placement
+	// as the rest of /api/*. The handler builds the
+	// full VideoObject (presigned thumbnail, signed
+	// playlist URL, liked_by_me, user summary) so the
+	// client gets a ready-to-render page in a single
+	// request - no N+1 follow-up round trips.
+	fh, err := handlers.NewFeedHandler(d.Queries, d.R2, d.Cfg)
+	if err != nil {
+		panic(fmt.Sprintf("api-gateway: NewFeedHandler: %v", err))
+	}
+	api.GET("/feed/home", fh.HomeFeed)
 
 	return e
 }
