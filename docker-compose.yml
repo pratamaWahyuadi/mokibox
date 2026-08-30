@@ -129,8 +129,13 @@ services:
   # -------------------------------------------------
   transcoder-worker:
     build:
-      context: ./transcoder-worker
-      dockerfile: Dockerfile
+      # The worker shares a single Go module with the
+      # api-gateway (rooted at the repo root), so the
+      # build context must include go.mod / go.sum and
+      # the shared/ package. ./transcoder-worker/Dockerfile
+      # is the relative path under that context.
+      context: .
+      dockerfile: transcoder-worker/Dockerfile
     image: mokibox-transcoder-worker:dev
     container_name: mokibox-transcoder-worker
     restart: unless-stopped
@@ -151,18 +156,32 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    # Hardening (SEC-02). Real values wired in Phase 5;
-    # kept here so the compose file is a single source of
-    # truth once the worker is built.
+    # Hardening (SEC-02). The worker processes untrusted
+    # uploads so we tighten the sandbox as much as
+    # compose / linux lets us:
+    #   - read_only root FS (no on-disk writes outside /tmp)
+    #   - tmpfs /tmp with sticky bit + 512M cap, owned by
+    #     the same UID as the binary (10001) so ffmpeg's
+    #     temp files are writable
+    #   - cap_drop ALL + no-new-privileges (drop setuid
+    #     escalation vectors)
+    #   - pids_limit 100 to bound runaway fork bombs
+    #     from a hostile media file
+    #   - mem_limit 2g + cpus 1.5 to bound the impact of
+    #     a single stuck job on the host VPS
+    #   - explicit user 10001:10001 matches the Dockerfile
+    #     USER directive
     read_only: true
     tmpfs:
-      - /tmp:size=512m
+      - /tmp:size=512M,mode=1777,uid=10001,gid=10001
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
     user: "10001:10001"
-    pids_limit: 200
+    pids_limit: 100
+    mem_limit: 2g
+    cpus: "1.5"
     networks:
       - backend
 

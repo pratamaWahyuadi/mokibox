@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -242,6 +243,92 @@ func (c *R2Client) DeleteObjects(ctx context.Context, keys []string) error {
 		return fmt.Errorf("DeleteObjects: %s: %s", aws.ToString(e.Key), aws.ToString(e.Message))
 	}
 	return nil
+}
+
+// DeletePrefix removes every object whose key starts
+// with prefix. It is used by the worker cleanup path
+// to remove all HLS + thumbnail outputs under a video's
+// hls_prefix without having to list the exact filenames
+// the transcode pipeline produced.
+//
+// Implementation: ListObjectsV2 paginator collects every
+// key under the prefix, then a single DeleteObjects
+// call batches up to 1000 keys per AWS spec. The
+// returned error is the first non-NotFound failure
+// across all batches; NotFound keys are silently
+// skipped (idempotent).
+//
+// Safety guards (defence in depth - HandleCleanupVideo
+// also pre-validates the prefix, but if a future caller
+// forgets we still refuse):
+//   - prefix MUST end with "/" so we do not
+//     accidentally delete keys that share a longer
+//     common prefix (e.g. "hls/u/v1/" should not
+//     match "hls/u/v11/").
+//   - prefix MUST NOT be just "/" or "//..." - that
+//     would mean "delete everything in the bucket"
+//     and is never a valid cleanup target.
+//   - prefix MUST contain at least one non-slash
+//     character (so "" is impossible even if a caller
+//     concatenates badly).
+// These three checks make bucket-wipe impossible
+// from this helper regardless of what the caller
+// passes.
+func (c *R2Client) DeletePrefix(ctx context.Context, prefix string) error {
+	if prefix == "" {
+		return fmt.Errorf("DeletePrefix: prefix is empty")
+	}
+	if !strings.HasSuffix(prefix, "/") {
+		return fmt.Errorf("DeletePrefix: prefix %q must end with '/'", prefix)
+	}
+	// Bucket-wipe guard. ListObjectsV2 with Prefix=""
+	// or "//" returns every key in the bucket; refuse
+	// anything that would amount to that.
+	if strings.Trim(prefix, "/") == "" {
+		return fmt.Errorf("DeletePrefix: prefix %q is too broad (would match bucket root)", prefix)
+	}
+
+	const batchSize = 1000 // AWS DeleteObjects hard limit per request
+	var firstErr error
+
+	pager := s3.NewListObjectsV2Paginator(c.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(c.bucket),
+		Prefix: aws.String(prefix),
+	})
+	batch := make([]string, 0, batchSize)
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		// Reuse DeleteObjects so NotFound handling,
+		// logging, and error wrapping stay in one place.
+		if err := c.DeleteObjects(ctx, batch); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("DeletePrefix: batch under %q: %w", prefix, err)
+		}
+		batch = batch[:0]
+	}
+
+	for pager.HasMorePages() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("DeletePrefix: list under %q: %w", prefix, mapR2Error("DeletePrefix", prefix, err))
+			}
+			return firstErr
+		}
+		for _, obj := range page.Contents {
+			key := aws.ToString(obj.Key)
+			if key == "" {
+				continue
+			}
+			batch = append(batch, key)
+			if len(batch) >= batchSize {
+				flush()
+			}
+		}
+	}
+	flush()
+	return firstErr
 }
 
 // Download streams the object at key to a local file at
