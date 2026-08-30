@@ -159,35 +159,12 @@ func (w *Worker) Close() {
 	}
 }
 
-// HandleCleanupObjects is the asynq entry point for
-// shared.TypeCleanupObjects. Issue D replaces this
-// stub with the real R2 DeleteObjects pipeline;
-// logging + nil return keeps the build green while
-// the worker can still drain any pre-existing
-// cleanup:objects tasks without erroring.
-func (w *Worker) HandleCleanupObjects(ctx context.Context, t *asynq.Task) error {
-	w.Logger.Warn("HandleCleanupObjects stub: not yet wired (issue D)",
-		"task_type", t.Type())
-	return nil
-}
-
-// HandleCleanupVideo is the asynq entry point for
-// shared.TypeCleanupVideo. Issue D replaces this stub
-// with the real "DELETED + >24h -> hard delete row +
-// cleanup R2" pipeline.
-func (w *Worker) HandleCleanupVideo(ctx context.Context, t *asynq.Task) error {
-	w.Logger.Warn("HandleCleanupVideo stub: not yet wired (issue D)",
-		"task_type", t.Type())
-	return nil
-}
-
 // registerHandlers wires the three task types the worker
-// consumes. HandleTranscode is implemented in transcode.go;
-// HandleCleanupObjects and HandleCleanupVideo have stub
-// bodies above that issue D replaces with the real
-// pipelines. Splitting the handler bodies from main.go
-// keeps each pipeline readable and lets issue-level
-// commits stay focused.
+// consumes. The handler bodies live in transcode.go
+// (HandleTranscode) and cleanup.go
+// (HandleCleanupObjects, HandleCleanupVideo); splitting
+// them from main.go keeps each pipeline readable and
+// lets issue-level commits stay focused.
 func (w *Worker) registerHandlers(mux *asynq.ServeMux) {
 	mux.HandleFunc(shared.TypeTranscodeVideo, w.HandleTranscode)
 	mux.HandleFunc(shared.TypeCleanupObjects, w.HandleCleanupObjects)
