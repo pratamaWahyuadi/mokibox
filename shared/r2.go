@@ -331,6 +331,45 @@ func (c *R2Client) DeletePrefix(ctx context.Context, prefix string) error {
 	return firstErr
 }
 
+// GetObject reads the object at key and returns its
+// raw body. It is used by the api-gateway to fetch
+// the master.m3u8 and per-variant HLS playlists that
+// the GetPlaylist handler then rewrites and returns
+// to the player. The body is bounded by maxBytes so
+// a pathological object (e.g. a misnamed binary that
+// landed under hls_prefix/) cannot exhaust the
+// gateway's memory.
+//
+// Missing object is returned as ErrNotFound (the
+// sentinel declared in errors.go) so the handler can
+// map it to 404 with a stable code.
+func (c *R2Client) GetObject(ctx context.Context, key string, maxBytes int64) ([]byte, error) {
+	if key == "" {
+		return nil, fmt.Errorf("GetObject: key is empty")
+	}
+	if maxBytes <= 0 {
+		maxBytes = 8 * 1024 * 1024 // 8 MiB - HLS master + variant playlists are tiny
+	}
+	out, err := c.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, mapR2Error("GetObject", key, err)
+	}
+	defer out.Body.Close()
+	// LimitReader guards against a runaway object;
+	// io.ReadAll reads until EOF or the cap.
+	body, err := io.ReadAll(io.LimitReader(out.Body, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("GetObject: read %s: %w", key, err)
+	}
+	if int64(len(body)) > maxBytes {
+		return nil, fmt.Errorf("GetObject: %s exceeds %d bytes", key, maxBytes)
+	}
+	return body, nil
+}
+
 // Download streams the object at key to a local file at
 // destPath. The file is created with 0600 and the call
 // is the only writer; the worker is expected to run

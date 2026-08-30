@@ -8,11 +8,12 @@
 // routes.go with the Zitadel Actions V2 webhook
 // (mounted OUTSIDE the auth group). Phase 4 adds the
 // upload-intent and confirm endpoints inside the auth
-// group. Phase 6 issue A (this commit) adds the home
-// feed behind the auth group. Phase 6 issues B and C
-// will register video detail/status/playlist and
-// follow endpoints in their own commits. After this
-// commit the full phase-3/4/6.A route set is:
+// group. Phase 6 issue A added the home feed behind
+// the auth group; issue B (this commit) adds the
+// video detail / status / playlist endpoints. Issue C
+// will register follow endpoints in its own commit.
+// After this commit the full phase-3/4/6.A/6.B route
+// set is:
 //   - GET  /healthz                          (no auth)
 //   - POST /api/webhooks/zitadel             (no JWT auth;
 //       signature verified inside the handler)
@@ -23,6 +24,9 @@
 //   - GET  /api/feed/home                    (auth)   [phase 6.A]
 //   - POST /api/videos/upload-intent         (auth)
 //   - POST /api/videos/confirm               (auth)
+//   - GET  /api/videos/:id                   (auth)   [phase 6.B]
+//   - GET  /api/videos/:id/status            (auth)   [phase 6.B]
+//   - GET  /api/videos/:id/playlist.m3u8     (auth+token) [phase 6.B]
 //
 // Phase 9 finalises the global HTTP error handler, the
 // body validator, and the production main.go that
@@ -156,6 +160,22 @@ func NewRouter(d RouterDeps) *echo.Echo {
 		panic(fmt.Sprintf("api-gateway: NewFeedHandler: %v", err))
 	}
 	api.GET("/feed/home", fh.HomeFeed)
+
+	// Phase 6.B: video read endpoints. All three
+	// share the same VideoHandler from video.go.
+	// - /videos/:id               - full VideoObject
+	//                              (auth, visibility
+	//                              rules per LLD)
+	// - /videos/:id/status        - processing status
+	//                              (owner only)
+	// - /videos/:id/playlist.m3u8 - signed HLS playlist
+	//                              (auth OR media
+	//                              token; returns raw
+	//                              application/vnd.apple.mpegurl,
+	//                              NOT the JSON envelope)
+	api.GET("/videos/:id", vh.GetVideoDetail)
+	api.GET("/videos/:id/status", vh.GetVideoStatus)
+	api.GET("/videos/:id/playlist.m3u8", vh.GetPlaylist)
 
 	return e
 }
