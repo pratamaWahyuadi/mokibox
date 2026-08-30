@@ -9,11 +9,10 @@
 // (mounted OUTSIDE the auth group). Phase 4 adds the
 // upload-intent and confirm endpoints inside the auth
 // group. Phase 6 issue A added the home feed behind
-// the auth group; issue B (this commit) adds the
-// video detail / status / playlist endpoints. Issue C
-// will register follow endpoints in its own commit.
-// After this commit the full phase-3/4/6.A/6.B route
-// set is:
+// the auth group; issue B added the video detail /
+// status / playlist endpoints; issue C (this commit)
+// adds the follow endpoints. After this commit the
+// full phase-3/4/6 route set is:
 //   - GET  /healthz                          (no auth)
 //   - POST /api/webhooks/zitadel             (no JWT auth;
 //       signature verified inside the handler)
@@ -21,6 +20,10 @@
 //   - PUT  /api/users/me                     (auth)
 //   - GET  /api/users/:id                    (auth)
 //   - GET  /api/users/:id/videos             (auth)
+//   - POST /api/users/:id/follow             (auth)   [phase 6.C]
+//   - DELETE /api/users/:id/follow           (auth)   [phase 6.C]
+//   - GET  /api/users/:id/followers          (auth)   [phase 6.C]
+//   - GET  /api/users/:id/following          (auth)   [phase 6.C]
 //   - GET  /api/feed/home                    (auth)   [phase 6.A]
 //   - POST /api/videos/upload-intent         (auth)
 //   - POST /api/videos/confirm               (auth)
@@ -126,6 +129,16 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	api.PUT("/users/me", uh.UpdateMe)
 	api.GET("/users/:id", uh.GetUserProfile)
 	api.GET("/users/:id/videos", uh.GetUserVideos)
+
+	// Phase 6.C: follow endpoints. POST/DELETE are
+	// idempotent (FollowUser is ON CONFLICT DO
+	// NOTHING; DeleteFollow silently no-ops). The
+	// list endpoints honour the private-account
+	// visibility rule (404, not 403).
+	api.POST("/users/:id/follow", uh.FollowUser)
+	api.DELETE("/users/:id/follow", uh.UnfollowUser)
+	api.GET("/users/:id/followers", uh.ListFollowers)
+	api.GET("/users/:id/following", uh.ListFollowing)
 
 	// Phase 4: upload-intent + confirm. Both sit
 	// inside the auth group so the *db.User on the

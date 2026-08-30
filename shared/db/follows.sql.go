@@ -91,6 +91,30 @@ func (q *Queries) FollowUser(ctx context.Context, arg FollowUserParams) error {
 	return err
 }
 
+const getFollow = `-- name: GetFollow :one
+SELECT follower_id, followee_id, created_at
+FROM follows
+WHERE follower_id = $1 AND followee_id = $2
+`
+
+type GetFollowParams struct {
+	FollowerID uuid.UUID `json:"follower_id"`
+	FolloweeID uuid.UUID `json:"followee_id"`
+}
+
+// Returns the row (including created_at) for a given
+// (follower, followee) pair, or sql.ErrNoRows when the
+// follow does not exist. Used by the follow handler to
+// return the wire `created_at` after an idempotent
+// INSERT (which is ON CONFLICT DO NOTHING and therefore
+// cannot RETURNING the original row).
+func (q *Queries) GetFollow(ctx context.Context, arg GetFollowParams) (Follow, error) {
+	row := q.db.QueryRowContext(ctx, getFollow, arg.FollowerID, arg.FolloweeID)
+	var i Follow
+	err := row.Scan(&i.FollowerID, &i.FolloweeID, &i.CreatedAt)
+	return i, err
+}
+
 const isFollowing = `-- name: IsFollowing :one
 SELECT EXISTS (
     SELECT 1 FROM follows
