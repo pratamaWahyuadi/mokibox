@@ -140,10 +140,49 @@ func dbRoundtrip(ctx context.Context) error {
 	}
 	log.Printf("smoke: roundtrip verified id=%s status=%s", fetched.ID, fetched.Status)
 
-	if err := cleanupVideo(ctx, sqlDB, inserted.ID); err != nil {
-		return fmt.Errorf("post-cleanup: %w", err)
+	// Exercise UpdatePendingVideoMetadata: this is the
+	// new query added in phase 4 so the upload-intent
+	// reuse path refreshes title/description.
+	newTitle := "smoke updated title"
+	newDesc := "smoke updated desc"
+	if _, err := q.UpdatePendingVideoMetadata(ctx, db.UpdatePendingVideoMetadataParams{
+		ID:          inserted.ID,
+		Title:       sql.NullString{String: newTitle, Valid: true},
+		Description: sql.NullString{String: newDesc, Valid: true},
+	}); err != nil {
+		return fmt.Errorf("UpdatePendingVideoMetadata: %w", err)
 	}
-	log.Printf("smoke: post-cleanup deleted id=%s", inserted.ID)
+	refreshed, err := q.GetPendingVideoByUser(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("GetPendingVideoByUser after metadata update: %w", err)
+	}
+	if !refreshed.Title.Valid || refreshed.Title.String != newTitle {
+		return fmt.Errorf("metadata title not refreshed: %+v", refreshed.Title)
+	}
+	if !refreshed.Description.Valid || refreshed.Description.String != newDesc {
+		return fmt.Errorf("metadata description not refreshed: %+v", refreshed.Description)
+	}
+	log.Printf("smoke: UpdatePendingVideoMetadata verified title=%q desc=%q", refreshed.Title.String, refreshed.Description.String)
+
+	// UpdatePendingVideoMetadata must surface
+	// sql.ErrNoRows when the row no longer matches
+	// the WHERE guard (deleted OR status !=
+	// PENDING_UPLOAD). Simulate by deleting the row
+	// first, then trying the update.
+	if err := cleanupVideo(ctx, sqlDB, inserted.ID); err != nil {
+		return fmt.Errorf("pre-metadata-err cleanup: %w", err)
+	}
+	if _, err := q.UpdatePendingVideoMetadata(ctx, db.UpdatePendingVideoMetadataParams{
+		ID:          inserted.ID,
+		Title:       sql.NullString{String: "x", Valid: true},
+		Description: sql.NullString{String: "y", Valid: true},
+	}); err == nil {
+		return fmt.Errorf("UpdatePendingVideoMetadata on missing row should error")
+	} else if !isNoRows(err) {
+		return fmt.Errorf("UpdatePendingVideoMetadata missing-row wrong error type: %v", err)
+	} else {
+		log.Printf("smoke: UpdatePendingVideoMetadata ErrNoRows OK: %v", err)
+	}
 	return nil
 }
 

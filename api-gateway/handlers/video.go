@@ -210,33 +210,46 @@ func (h *VideoHandler) UploadIntent(c echo.Context) error {
 	} else {
 		// Reuse the existing row. Rotate r2_key to the
 		// canonical "<userID>/<existingID>/source.mp4"
-		// path. Note: DEVIATION - we intentionally do NOT
-		// refresh title/description on the existing row
-		// because the acceptance criteria only require
-		// r2_key rotation and the sqlc surface does not
-		// expose a query that updates title/description
-		// while preserving status = PENDING_UPLOAD.
+		// path AND refresh title/description so a user
+		// who corrected their title between two
+		// upload-intent calls sees the latest values.
+		// Both updates are guarded by status =
+		// PENDING_UPLOAD so a concurrent /confirm in
+		// another tab surfaces as 409 instead of
+		// silently mutating a row that has already
+		// moved to PROCESSING.
 		videoID = existing.ID
 		oldKey = existing.R2Key
 		r2Key = uploadKey(user.ID, existing.ID)
-		if oldKey == r2Key {
-			// Defensive: if the canonical key happens
-			// to match the stored key (very first
-			// upload-intent after a previous successful
-			// upload where the row was reused), skip
-			// the UPDATE - it would be a no-op write
-			// that still bumps updated_at and wastes a
-			// round trip.
-		} else {
+		if oldKey != r2Key {
 			updated, uerr := h.Queries.UpdatePendingVideoR2Key(ctx, db.UpdatePendingVideoR2KeyParams{
 				ID:    existing.ID,
 				R2Key: r2Key,
 			})
 			if uerr != nil {
+				if errors.Is(uerr, sql.ErrNoRows) || errors.Is(uerr, pgx.ErrNoRows) {
+					// Concurrent state transition.
+					return shared.RespondError(c, shared.Wrap(shared.ErrVideoStatusConflict,
+						"video state changed concurrently"))
+				}
 				slog.Error("UpdatePendingVideoR2Key failed", "err", uerr, "video_id", existing.ID)
 				return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "rotate pending video key"))
 			}
 			videoID = updated.ID
+		}
+		if _, merr := h.Queries.UpdatePendingVideoMetadata(ctx, db.UpdatePendingVideoMetadataParams{
+			ID:          existing.ID,
+			Title:       nullString(title),
+			Description: nullString(desc),
+		}); merr != nil {
+			if errors.Is(merr, sql.ErrNoRows) || errors.Is(merr, pgx.ErrNoRows) {
+				// Same race: the row was promoted to
+				// PROCESSING between our two updates.
+				return shared.RespondError(c, shared.Wrap(shared.ErrVideoStatusConflict,
+					"video state changed concurrently"))
+			}
+			slog.Error("UpdatePendingVideoMetadata failed", "err", merr, "video_id", existing.ID)
+			return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "update pending video metadata"))
 		}
 	}
 
