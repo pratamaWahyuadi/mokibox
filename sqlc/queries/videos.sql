@@ -27,6 +27,21 @@ SET r2_key = $2
 WHERE id = $1 AND status = 'PENDING_UPLOAD'
 RETURNING *;
 
+-- name: UpdatePendingVideoMetadata :one
+-- Refresh title/description on an existing
+-- PENDING_UPLOAD row when upload-intent is called
+-- again. The WHERE guard matches UpdatePendingVideoR2Key
+-- so a concurrent state transition (e.g. the user
+-- confirmed in another tab) makes the UPDATE a no-op
+-- (returns sql.ErrNoRows) instead of overwriting
+-- metadata on a row that has already moved to
+-- PROCESSING.
+UPDATE videos
+SET title = $2,
+    description = $3
+WHERE id = $1 AND status = 'PENDING_UPLOAD'
+RETURNING *;
+
 -- name: GetVideoByID :one
 SELECT *
 FROM videos

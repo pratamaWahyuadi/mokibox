@@ -790,6 +790,51 @@ func (q *Queries) MarkVideoReady(ctx context.Context, arg MarkVideoReadyParams) 
 	return i, err
 }
 
+const updatePendingVideoMetadata = `-- name: UpdatePendingVideoMetadata :one
+UPDATE videos
+SET title = $2,
+    description = $3
+WHERE id = $1 AND status = 'PENDING_UPLOAD'
+RETURNING id, user_id, title, description, r2_key, hls_prefix, thumbnail_key, duration_seconds, status, retry_count, likes_count, views_count, comments_count, created_at, deleted_at
+`
+
+type UpdatePendingVideoMetadataParams struct {
+	ID          uuid.UUID      `json:"id"`
+	Title       sql.NullString `json:"title"`
+	Description sql.NullString `json:"description"`
+}
+
+// Refresh title/description on an existing
+// PENDING_UPLOAD row when upload-intent is called
+// again. The WHERE guard matches UpdatePendingVideoR2Key
+// so a concurrent state transition (e.g. the user
+// confirmed in another tab) makes the UPDATE a no-op
+// (returns sql.ErrNoRows) instead of overwriting
+// metadata on a row that has already moved to
+// PROCESSING.
+func (q *Queries) UpdatePendingVideoMetadata(ctx context.Context, arg UpdatePendingVideoMetadataParams) (Video, error) {
+	row := q.db.QueryRowContext(ctx, updatePendingVideoMetadata, arg.ID, arg.Title, arg.Description)
+	var i Video
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Title,
+		&i.Description,
+		&i.R2Key,
+		&i.HlsPrefix,
+		&i.ThumbnailKey,
+		&i.DurationSeconds,
+		&i.Status,
+		&i.RetryCount,
+		&i.LikesCount,
+		&i.ViewsCount,
+		&i.CommentsCount,
+		&i.CreatedAt,
+		&i.DeletedAt,
+	)
+	return i, err
+}
+
 const updatePendingVideoR2Key = `-- name: UpdatePendingVideoR2Key :one
 UPDATE videos
 SET r2_key = $2
