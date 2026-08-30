@@ -455,9 +455,28 @@ func (h *VideoHandler) ConfirmUpload(c echo.Context) error {
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "confirm video"))
 	}
 
-	// Enqueue the transcode task. Per LLD the worker
-	// owns retry policy, so the producer asks for
-	// MaxRetry(1) only.
+	// Enqueue the transcode task.
+	//
+	// Retry model (two layers, do not confuse):
+	//   1. asynq-level retry: asynq.MaxRetry(1) lets
+	//      the queue itself retry the task ONCE on
+	//      transient failures such as a Redis blip
+	//      before dropping it. This is the queue's
+	//      own safety net; the producer hands control
+	//      over the moment EnqueueTranscode returns.
+	//   2. application-level retry (handled by the
+	//      transcoder worker in fase 5): the worker
+	//      catches a transcode error, checks
+	//      retry_count < 3 against the videos row, and
+	//      re-enqueues a fresh transcode:video task
+	//      with ProcessIn(30s * retry_count). This is
+	//      where the PRD "retry maksimal 3 kali" rule
+	//      is enforced - per the LLD retry section.
+	//
+	// The producer therefore sets MaxRetry(1) so a
+	// stuck task fails fast into the application-level
+	// retry path instead of being silently retried
+	// by asynq forever.
 	info, qerr := shared.EnqueueTranscode(h.Queue, shared.TranscodeVideoPayload{VideoID: confirmed.ID.String()}, asynq.MaxRetry(1))
 	if qerr != nil {
 		// Roll back so the row stays PENDING_UPLOAD
