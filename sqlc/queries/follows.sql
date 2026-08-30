@@ -10,6 +10,17 @@ INSERT INTO follows (follower_id, followee_id)
 VALUES ($1, $2)
 ON CONFLICT DO NOTHING;
 
+-- name: GetFollow :one
+-- Returns the row (including created_at) for a given
+-- (follower, followee) pair, or sql.ErrNoRows when the
+-- follow does not exist. Used by the follow handler to
+-- return the wire `created_at` after an idempotent
+-- INSERT (which is ON CONFLICT DO NOTHING and therefore
+-- cannot RETURNING the original row).
+SELECT follower_id, followee_id, created_at
+FROM follows
+WHERE follower_id = $1 AND followee_id = $2;
+
 -- name: DeleteFollow :exec
 DELETE FROM follows
 WHERE follower_id = $1 AND followee_id = $2;

@@ -8,8 +8,11 @@
 // routes.go with the Zitadel Actions V2 webhook
 // (mounted OUTSIDE the auth group). Phase 4 adds the
 // upload-intent and confirm endpoints inside the auth
-// group. After this commit the full phase-3/4 route
-// set is:
+// group. Phase 6 issue A added the home feed behind
+// the auth group; issue B added the video detail /
+// status / playlist endpoints; issue C (this commit)
+// adds the follow endpoints. After this commit the
+// full phase-3/4/6 route set is:
 //   - GET  /healthz                          (no auth)
 //   - POST /api/webhooks/zitadel             (no JWT auth;
 //       signature verified inside the handler)
@@ -17,8 +20,16 @@
 //   - PUT  /api/users/me                     (auth)
 //   - GET  /api/users/:id                    (auth)
 //   - GET  /api/users/:id/videos             (auth)
+//   - POST /api/users/:id/follow             (auth)   [phase 6.C]
+//   - DELETE /api/users/:id/follow           (auth)   [phase 6.C]
+//   - GET  /api/users/:id/followers          (auth)   [phase 6.C]
+//   - GET  /api/users/:id/following          (auth)   [phase 6.C]
+//   - GET  /api/feed/home                    (auth)   [phase 6.A]
 //   - POST /api/videos/upload-intent         (auth)
 //   - POST /api/videos/confirm               (auth)
+//   - GET  /api/videos/:id                   (auth)   [phase 6.B]
+//   - GET  /api/videos/:id/status            (auth)   [phase 6.B]
+//   - GET  /api/videos/:id/playlist.m3u8     (auth+token) [phase 6.B]
 //
 // Phase 9 finalises the global HTTP error handler, the
 // body validator, and the production main.go that
@@ -119,6 +130,16 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	api.GET("/users/:id", uh.GetUserProfile)
 	api.GET("/users/:id/videos", uh.GetUserVideos)
 
+	// Phase 6.C: follow endpoints. POST/DELETE are
+	// idempotent (FollowUser is ON CONFLICT DO
+	// NOTHING; DeleteFollow silently no-ops). The
+	// list endpoints honour the private-account
+	// visibility rule (404, not 403).
+	api.POST("/users/:id/follow", uh.FollowUser)
+	api.DELETE("/users/:id/follow", uh.UnfollowUser)
+	api.GET("/users/:id/followers", uh.ListFollowers)
+	api.GET("/users/:id/following", uh.ListFollowing)
+
 	// Phase 4: upload-intent + confirm. Both sit
 	// inside the auth group so the *db.User on the
 	// context is always populated. Constructor returns
@@ -140,6 +161,34 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	}
 	api.POST("/videos/upload-intent", vh.UploadIntent)
 	api.POST("/videos/confirm", vh.ConfirmUpload)
+
+	// Phase 6.A: home feed. Same auth-group placement
+	// as the rest of /api/*. The handler builds the
+	// full VideoObject (presigned thumbnail, signed
+	// playlist URL, liked_by_me, user summary) so the
+	// client gets a ready-to-render page in a single
+	// request - no N+1 follow-up round trips.
+	fh, err := handlers.NewFeedHandler(d.Queries, d.R2, d.Cfg)
+	if err != nil {
+		panic(fmt.Sprintf("api-gateway: NewFeedHandler: %v", err))
+	}
+	api.GET("/feed/home", fh.HomeFeed)
+
+	// Phase 6.B: video read endpoints. All three
+	// share the same VideoHandler from video.go.
+	// - /videos/:id               - full VideoObject
+	//                              (auth, visibility
+	//                              rules per LLD)
+	// - /videos/:id/status        - processing status
+	//                              (owner only)
+	// - /videos/:id/playlist.m3u8 - signed HLS playlist
+	//                              (auth OR media
+	//                              token; returns raw
+	//                              application/vnd.apple.mpegurl,
+	//                              NOT the JSON envelope)
+	api.GET("/videos/:id", vh.GetVideoDetail)
+	api.GET("/videos/:id/status", vh.GetVideoStatus)
+	api.GET("/videos/:id/playlist.m3u8", vh.GetPlaylist)
 
 	return e
 }

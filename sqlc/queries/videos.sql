@@ -111,7 +111,29 @@ LIMIT sqlc.arg('page_limit');
 -- FR-FEED-01: status=READY, owner active, exclude self,
 -- include public accounts + accounts the viewer follows.
 -- Cursor pagination uses (created_at, id) < ($3, $4).
-SELECT v.*
+--
+-- Phase 6 widened the row to include the owner user
+-- fields (for the nested "user" summary in VideoObject)
+-- and an EXISTS (likes) per-row "liked_by_me" flag, so
+-- the feed handler can build the full VideoObject
+-- without an N+1 round trip. viewer_id can be NULL
+-- when the feed is fetched without a session (e.g. a
+-- cron job pulling the public timeline) - in that case
+-- liked_by_me is FALSE for every row.
+SELECT
+    v.id, v.user_id, v.title, v.description, v.r2_key,
+    v.hls_prefix, v.thumbnail_key, v.duration_seconds,
+    v.status, v.retry_count, v.likes_count, v.views_count,
+    v.comments_count, v.created_at, v.deleted_at,
+    u.id            AS user_id_2,
+    u.username      AS user_username,
+    u.display_name  AS user_display_name,
+    u.avatar_url    AS user_avatar_url,
+    u.is_private    AS user_is_private,
+    EXISTS (
+        SELECT 1 FROM likes l
+        WHERE l.video_id = v.id AND l.user_id = sqlc.narg('viewer_id')
+    ) AS liked_by_me
 FROM videos v
 JOIN users u ON u.id = v.user_id
 WHERE v.status = 'READY'
