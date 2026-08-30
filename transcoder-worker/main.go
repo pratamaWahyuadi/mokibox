@@ -159,31 +159,22 @@ func (w *Worker) Close() {
 	}
 }
 
-// HandleTranscode is the entry point for the
-// transcode:video task. The full pipeline (ffprobe +
-// ffmpeg + R2 upload + MarkVideoReady) lives in
-// transcoder-worker/transcode.go and is wired in
-// issue C. Issue A only declares the symbol so the
-// build + smoke-test pass without dragging the
-// pipeline into this commit.
-func (w *Worker) HandleTranscode(ctx context.Context, t *asynq.Task) error {
-	w.Logger.Warn("HandleTranscode stub: pipeline not yet wired (issue C)",
-		"task_type", t.Type())
-	return nil
-}
-
-// HandleCleanupObjects is the entry point for the
-// cleanup:objects task. The real implementation lives
-// in cleanup.go and is wired in issue D.
+// HandleCleanupObjects is the asynq entry point for
+// shared.TypeCleanupObjects. Issue D replaces this
+// stub with the real R2 DeleteObjects pipeline;
+// logging + nil return keeps the build green while
+// the worker can still drain any pre-existing
+// cleanup:objects tasks without erroring.
 func (w *Worker) HandleCleanupObjects(ctx context.Context, t *asynq.Task) error {
 	w.Logger.Warn("HandleCleanupObjects stub: not yet wired (issue D)",
 		"task_type", t.Type())
 	return nil
 }
 
-// HandleCleanupVideo is the entry point for the
-// cleanup:video task. The real implementation lives
-// in cleanup.go and is wired in issue D.
+// HandleCleanupVideo is the asynq entry point for
+// shared.TypeCleanupVideo. Issue D replaces this stub
+// with the real "DELETED + >24h -> hard delete row +
+// cleanup R2" pipeline.
 func (w *Worker) HandleCleanupVideo(ctx context.Context, t *asynq.Task) error {
 	w.Logger.Warn("HandleCleanupVideo stub: not yet wired (issue D)",
 		"task_type", t.Type())
@@ -191,11 +182,12 @@ func (w *Worker) HandleCleanupVideo(ctx context.Context, t *asynq.Task) error {
 }
 
 // registerHandlers wires the three task types the worker
-// consumes. The bodies are stubs until issues C (transcode
-// pipeline) and D (cleanup tasks) replace them with their
-// committed implementations. Splitting the wiring from
-// the bodies lets each issue own its own commit
-// (atomic-commit rule from git-phase-issue-workflow).
+// consumes. HandleTranscode is implemented in transcode.go;
+// HandleCleanupObjects and HandleCleanupVideo have stub
+// bodies above that issue D replaces with the real
+// pipelines. Splitting the handler bodies from main.go
+// keeps each pipeline readable and lets issue-level
+// commits stay focused.
 func (w *Worker) registerHandlers(mux *asynq.ServeMux) {
 	mux.HandleFunc(shared.TypeTranscodeVideo, w.HandleTranscode)
 	mux.HandleFunc(shared.TypeCleanupObjects, w.HandleCleanupObjects)
