@@ -4,10 +4,12 @@
 // middleware protects them.
 //
 // Phase 3 issue B (commit phase-3.2) registered the
-// user profile endpoints; this commit (issue C) extends
-// routes.go with the Zitadel Actions V2 webhook, mounted
-// OUTSIDE the auth group. After this commit the full
-// phase-3 route set is:
+// user profile endpoints; phase 3 issue C extended
+// routes.go with the Zitadel Actions V2 webhook
+// (mounted OUTSIDE the auth group). Phase 4 adds the
+// upload-intent and confirm endpoints inside the auth
+// group. After this commit the full phase-3/4 route
+// set is:
 //   - GET  /healthz                          (no auth)
 //   - POST /api/webhooks/zitadel             (no JWT auth;
 //       signature verified inside the handler)
@@ -15,15 +17,18 @@
 //   - PUT  /api/users/me                     (auth)
 //   - GET  /api/users/:id                    (auth)
 //   - GET  /api/users/:id/videos             (auth)
+//   - POST /api/videos/upload-intent         (auth)
+//   - POST /api/videos/confirm               (auth)
 //
-// Subsequent phases add their own endpoints here
-// (upload-intent, confirm, feed, follow, like, comment,
-// notification, delete, etc.). Phase 9 finalises the
-// global HTTP error handler, the body validator, and
-// the production main.go that calls NewRouter.
+// Phase 9 finalises the global HTTP error handler, the
+// body validator, and the production main.go that
+// calls NewRouter.
 package main
 
 import (
+	"database/sql"
+	"fmt"
+
 	"github.com/labstack/echo/v4"
 
 	"github.com/hibiken/asynq"
@@ -46,6 +51,15 @@ import (
 type RouterDeps struct {
 	DB      *pgxpool.Pool
 	Queries *db.Queries
+	// SQLDB is the *sql.DB opened from DATABASE_URL via
+	// pgx/v5/stdlib. It is required for the confirm
+	// transaction (sqlc's Queries.WithTx takes a
+	// *sql.Tx, which only *sql.DB can produce). It is
+	// kept separate from DB above because the user
+	// handler's ErrNoRows checks are calibrated for
+	// pgxpool; mixing the two at the call site is
+	// explicit rather than implicit.
+	SQLDB   *sql.DB
 	R2      *shared.R2Client
 	Queue   *asynq.Client
 	Cfg     *shared.APIConfig
@@ -104,6 +118,28 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	api.PUT("/users/me", uh.UpdateMe)
 	api.GET("/users/:id", uh.GetUserProfile)
 	api.GET("/users/:id/videos", uh.GetUserVideos)
+
+	// Phase 4: upload-intent + confirm. Both sit
+	// inside the auth group so the *db.User on the
+	// context is always populated. Constructor returns
+	// an error if any dependency is missing; the
+	// startup of main.go is responsible for surfacing
+	// that error before the server begins accepting
+	// traffic.
+	vh, err := handlers.NewVideoHandler(d.Queries, d.SQLDB, d.R2, d.Queue, d.Cfg)
+	if err != nil {
+		// We cannot return an error from NewRouter
+		// (its signature is fixed by phase 3) so the
+		// misconfiguration is surfaced via echo's
+		// panic-on-startup path: log and let main.go
+		// handle the missing-route by panicking before
+		// serving. In practice main.go checks these
+		// deps before calling NewRouter so the panic
+		// here is unreachable but kept defensive.
+		panic(fmt.Sprintf("api-gateway: NewVideoHandler: %v", err))
+	}
+	api.POST("/videos/upload-intent", vh.UploadIntent)
+	api.POST("/videos/confirm", vh.ConfirmUpload)
 
 	return e
 }

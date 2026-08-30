@@ -1,38 +1,53 @@
 // Command api-gateway is the public-facing HTTP service
 // for the MokiBox backend. This file is the
-// process entry point and is deliberately minimal in
-// phase 3: it just constructs the dependencies that
-// NewRouter needs and starts the Echo server.
+// process entry point and wires the runtime
+// dependencies (config, db pools, R2 client, Asynq
+// client, Zitadel verifier) into the Echo router.
 //
-// Phase 9 will replace the body of main() with the
-// production wiring: env loading via shared.LoadAPI,
-// real DB pool, R2 client, Asynq client, Zitadel
-// verifier, custom HTTP error handler, request
-// validator, graceful shutdown, and signal handling.
-// Keeping phase 3's main this short means a missing
-// dependency in the dev environment does not block the
-// issue-B / issue-C commits.
+// Phase 3 left a minimal main that only ran the router
+// with a stub TokenVerifier. Phase 4 extends it with
+// the dependencies required by the upload-intent +
+// confirm handlers:
+//   - APIConfig via shared.LoadAPI (DATABASE_URL,
+//     REDIS_*, R2_*, MEDIA_TOKEN_*, PRESIGN_UPLOAD_EXPIRY,
+//     etc.)
+//   - *pgxpool.Pool via shared.NewDB
+//   - *sql.DB via database/sql + pgx/v5/stdlib
+//     (used by Queries.WithTx in confirm)
+//   - *db.Queries via db.New on the *sql.DB
+//   - *shared.R2Client via shared.NewR2Client
+//   - *asynq.Client via shared.NewAsynqClient
+//   - The production Zitadel TokenVerifier via
+//     middleware.NewZitadelVerifier when issuer is set;
+//     otherwise a denyAllVerifier so a misconfigured
+//     deployment cannot accidentally authenticate
+//     anyone.
 //
-// For the phase-3 smoke test we DO read a few env vars
-// directly so a developer can `go run ./api-gateway`
-// against a local Postgres + Redis without first
-// standing up the full phase-9 main. The set of
-// recognised vars is the minimum needed to exercise
-// the auth and webhook paths:
-//   - API_GATEWAY_ADDR            listen addr (default :8080)
-//   - ZITADEL_ISSUER_URL          issuer for the JWT verifier
-//   - ZITADEL_API_CLIENT_ID       expected audience
-//   - ZITADEL_TARGET_SIGNING_KEY  Actions V2 HMAC secret
+// The ZITADEL_* env vars are read directly so a
+// developer can `go run ./api-gateway` against a local
+// Postgres + Redis + R2 without first standing up the
+// full phase-9 production wiring (custom HTTP error
+// handler, request validator, graceful shutdown that
+// closes every client). Phase 9 owns that work; phase 4
+// only adds the deps required to run upload-intent +
+// confirm end-to-end.
 //
-// If the issuer is empty, we wire a denyAllVerifier so
-// a stray /api/users/* request cannot accidentally be
-// served as an authenticated user. If the signing key
-// is empty, the webhook handler refuses every request
-// (defence in depth - see handlers/webhook.go).
+// Env vars:
+//   - API_GATEWAY_ADDR             listen addr (default :8080)
+//   - ZITADEL_ISSUER_URL           issuer for the JWT verifier
+//   - ZITADEL_API_CLIENT_ID        expected audience
+//   - ZITADEL_TARGET_SIGNING_KEY   Actions V2 HMAC secret
+//   - DATABASE_URL                 Postgres connection string
+//     (role tiktok_api)
+//   - REDIS_ADDR / REDIS_PASSWORD  Asynq producer connection
+//   - R2_*                         Cloudflare R2 credentials
+//   - MEDIA_TOKEN_SECRET, MEDIA_TOKEN_TTL,
+//     PRESIGN_UPLOAD_EXPIRY        media token + presign tuning
 package main
 
 import (
 	"context"
+	"database/sql"
 	"log"
 	"net/http"
 	"os"
@@ -41,6 +56,10 @@ import (
 	"time"
 
 	"github.com/pratamaWahyuadi/mokibox/api-gateway/middleware"
+	"github.com/pratamaWahyuadi/mokibox/shared"
+	"github.com/pratamaWahyuadi/mokibox/shared/db"
+
+	_ "github.com/jackc/pgx/v5/stdlib" // database/sql driver for pgx
 )
 
 // addr is the listen address for the API gateway. It
@@ -56,10 +75,71 @@ func main() {
 		addr = defaultAddr
 	}
 
-	// Phase-3 wiring: read the absolute minimum env
-	// set needed to exercise /api/users/* and the
-	// webhook. Phase 9 replaces this with
-	// shared.LoadAPI() and real client construction.
+	cfg, err := shared.LoadAPI()
+	if err != nil {
+		log.Fatalf("api-gateway: load config: %v", err)
+	}
+
+	// Phase 4 wiring: every dependency NewRouter needs
+	// is built here. Phase 9 will wrap this with
+	// signal-driven graceful shutdown that closes each
+	// client; for phase 4 we Close() the pools on
+	// SIGINT/SIGTERM and let the http.Server shut down
+	// on its own deadline.
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// *pgxpool.Pool for the user handler (queries that
+	// do not need a tx).
+	pgPool, err := shared.NewDB(ctx, cfg.DatabaseURL, shared.APIPoolMaxConns)
+	if err != nil {
+		log.Fatalf("api-gateway: NewDB: %v", err)
+	}
+	defer pgPool.Close()
+
+	// *sql.DB for Queries.WithTx. Opening via
+	// pgx/v5/stdlib keeps both pools pointing at the
+	// same database / role. A separate pool is
+	// intentional so the user handler's ErrNoRows
+	// semantics (pgx.ErrNoRows) stay correct.
+	sqlDB, err := sql.Open("pgx", cfg.DatabaseURL)
+	if err != nil {
+		log.Fatalf("api-gateway: sql.Open: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(int(shared.APIPoolMaxConns))
+	sqlDB.SetMaxIdleConns(2)
+	sqlDB.SetConnMaxLifetime(30 * time.Minute)
+	defer sqlDB.Close()
+	pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
+	if err := sqlDB.PingContext(pingCtx); err != nil {
+		pingCancel()
+		log.Fatalf("api-gateway: sqlDB ping: %v", err)
+	}
+	pingCancel()
+
+	queries := db.New(sqlDB)
+
+	r2Client, err := shared.NewR2Client(ctx, shared.R2Config{
+		AccountID:       cfg.R2AccountID,
+		AccessKeyID:     cfg.R2AccessKeyID,
+		SecretAccessKey: cfg.R2SecretAccessKey,
+		Bucket:          cfg.R2Bucket,
+		Endpoint:        cfg.R2Endpoint,
+	})
+	if err != nil {
+		log.Fatalf("api-gateway: NewR2Client: %v", err)
+	}
+
+	asynqClient, err := shared.NewAsynqClient(shared.RedisConfig{
+		Addr:     cfg.RedisAddr,
+		Password: cfg.RedisPassword,
+	})
+	if err != nil {
+		log.Fatalf("api-gateway: NewAsynqClient: %v", err)
+	}
+	defer asynqClient.Close()
+
 	verifier, err := buildVerifier(
 		os.Getenv("ZITADEL_ISSUER_URL"),
 		os.Getenv("ZITADEL_API_CLIENT_ID"),
@@ -70,6 +150,12 @@ func main() {
 	}
 
 	deps := RouterDeps{
+		DB:                pgPool,
+		Queries:           queries,
+		SQLDB:             sqlDB,
+		R2:                r2Client,
+		Queue:             asynqClient,
+		Cfg:               cfg,
 		AuthVerifier:      verifier,
 		WebhookSigningKey: os.Getenv("ZITADEL_TARGET_SIGNING_KEY"),
 	}
@@ -97,8 +183,8 @@ func main() {
 	<-stop
 	log.Println("shutting down api-gateway")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelShutdown()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown error: %v", err)
 	}
