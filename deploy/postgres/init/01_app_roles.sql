@@ -1,14 +1,17 @@
 -- =====================================================
--- 01_roles.sql
--- Creates the two application database roles used by the
--- API gateway and the transcoder worker.
+-- 01_app_roles.sql
+-- Creates the MokiBox app's two application database
+-- roles. The Zitadel identity provider is NOT bootstrapped
+-- here - it lives in its own Postgres instance in the
+-- sibling zitadel-compose project (see planning/LLD_PLAN.md
+-- asumsi A11 for the rationale).
 --
 -- IMPORTANT:
---   This file is mounted into postgres at
---     /docker-entrypoint-initdb.d:ro
---   and runs ONLY on the FIRST initialization of the data
---   directory. The passwords below are placeholders for
---   local development only.
+--   This file is mounted into the MokiBox postgres
+--   container at /docker-entrypoint-initdb.d:ro and
+--   runs ONLY on the FIRST initialization of the data
+--   directory. The passwords below are placeholders
+--   for local development only.
 --
 --   For real deployments, run scripts/bootstrap_db.sh
 --   (which reads TIKTOK_API_DB_PASSWORD and

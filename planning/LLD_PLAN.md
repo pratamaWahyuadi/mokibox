@@ -20,6 +20,7 @@ Beberapa celah teknis yang tidak dieksplisitkan di dokumen sumber saya tutup den
 | A8 | **Worker role PostgreSQL dibatasi.** | Role `tiktok_api` dapat CRUD semua tabel app. Role `tiktok_worker` hanya `SELECT, UPDATE, DELETE` pada `videos`. Tidak ada superuser untuk worker. |
 | A9 | **Counter `likes_count`, `comments_count`, `views_count` diupdate di aplikasi dalam transaksi**, bukan trigger. | Konsisten dengan catatan ERD. Untuk delete comment dengan reply, dipakai recursive CTE untuk menghitung seluruh subtree sebelum delete. |
 | A10 | **Endpoint `DELETE /api/users/me` wajib ada**, walau tidak ada di tabel endpoint PRD asli, karena API Contract menambahkannya untuk US-09. | Diimplementasikan di Fase 8. |
+| A11 | **Zitadel identity provider dideploy sebagai compose project terpisah**, bukan service di dalam `docker-compose.yml` MokiBox. | Sejak Zitadel v3+ arsitektur multi-service (Traefik + zitadel-api + zitadel-login + Postgres sendiri) yang tidak bisa di-merge dengan stack MokiBox tanpa restart loop. MokiBox cuma butuh Zitadel sebagai external dependency (issuer URL + JWKS endpoint). Folder `../zitadel-compose/` (di luar repo MokiBox) memegang stack Zitadel. Makefile punya target `up-zitadel` / `up-all` / `down-zitadel` / `logs-zitadel` untuk manage lifecycle Zitadel terpisah. **Deviasi dari NFR-11 ("satu docker-compose")** — NFR-11 maksudnya "satu VPS" bukan "satu compose file", dan dependency Zitadel sebagai external service lebih sehat secara arsitektur. |
 
 ---
 
@@ -113,8 +114,20 @@ tiktok-backend/
 
 ## 3. Fase 0 — Setup Repo, Infra, Docker Compose, Zitadel
 
+> **Asumsi A11 update (post-fase-3)**: Zitadel v3+ arsitektur multi-service
+> (Traefik + zitadel-api + zitadel-login + Postgres sendiri) yang tidak
+> fit di dalam satu `docker-compose.yml` MokiBox. Zitadel sekarang
+> dideploy sebagai compose project terpisah di `../zitadel-compose/`
+> (di luar repo MokiBox). MokiBox cuma refer Zitadel sebagai external
+> dependency via `ZITADEL_ISSUER_URL`. Makefile punya target
+> `up-zitadel` / `up-all` / `down-zitadel` / `logs-zitadel` untuk
+> manage lifecycle-nya. Detail di Asumsi A11.
+
 ### Tujuan
-Semua service dasar jalan di satu VPS via `docker-compose`, dan PostgreSQL/Redis tidak terpapar ke host.
+Semua service app MokiBox jalan di satu VPS via `docker-compose`, dan
+PostgreSQL/Redis tidak terpapar ke host. Zitadel dideploy terpisah
+(lihat catatan A11 di atas) sebagai identity-provider stack independen
+yang share cuma network host.
 
 ### Task
 
@@ -159,7 +172,7 @@ Semua service dasar jalan di satu VPS via `docker-compose`, dan PostgreSQL/Redis
    ```
 
 3. **Buat `docker-compose.yml`**
-   - Service: `postgres:16-alpine`, `redis:7-alpine`, `zitadel` (pin version image, jangan `latest`), `api-gateway`, `transcoder-worker`, `nginx`.
+   - Service: `postgres:16-alpine`, `redis:7-alpine`, `api-gateway`, `transcoder-worker`, `nginx` (Zitadel **bukan** service di sini, lihat A11).
    - **PostgreSQL tidak publish port ke host.**
    - **Redis tidak publish port ke host**, jalankan dengan `--requirepass ${REDIS_PASSWORD}`.
    - Volume untuk `pgdata` dan `redisdata`.
@@ -200,17 +213,21 @@ Semua service dasar jalan di satu VPS via `docker-compose`, dan PostgreSQL/Redis
        ...
    ```
 
-4. **Buat `deploy/postgres/init/01_roles.sql`** untuk create role API dan worker:
+4. **Buat `deploy/postgres/init/01_app_roles.sql`** untuk create role API dan worker:
    ```sql
    CREATE ROLE tiktok_api LOGIN PASSWORD 'change-me';
    CREATE ROLE tiktok_worker LOGIN PASSWORD 'change-me';
    ```
    > Password role benar-benar diisi dari environment. Untuk produksi, lebih aman dibuat manual via `scripts/bootstrap_db.sh`, bukan di-commit dengan password asli. Docker init SQL hanya digunakan untuk development lokal.
+   > File ini TIDAK bootstrap Zitadel — Zitadel punya Postgres sendiri (lihat A11).
 
 5. **Buat `deploy/nginx/default.conf`**
    - `server` untuk `api.example.com`.
    - `location /api/` → `proxy_pass http://api-gateway:8080;`
-   - `location /zitadel/` → `proxy_pass http://zitadel:8080;` + WebSocket headers.
+   - ~~`location /zitadel/` → `proxy_pass http://zitadel:8080;` + WebSocket headers.~~
+     Dihapus per A11: Zitadel di-reverse-proxy oleh Traefik di
+     `zitadel-compose` sendiri, bukan Nginx MokiBox. CORS / auth flow
+     di-handle di sisi Zitadel, MokiBox cuma konsumsi JWT via JWKS.
    - `location /healthz` → `proxy_pass http://api-gateway:8080/healthz;`
    - Aktifkan HSTS, TLS 1.2+, `client_max_body_size 1m` (upload tidak lewat Nginx, langsung ke R2).
 
