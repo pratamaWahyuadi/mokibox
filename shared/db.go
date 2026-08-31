@@ -2,67 +2,77 @@ package shared
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/jackc/pgx/v5/stdlib" // database/sql "pgx" driver (pgx stdlib adapter)
 )
 
-// NewDB builds a *pgxpool.Pool against the given database URL.
-// maxConns controls the upper bound on connections held open
-// by this service. The API gateway sets it to 10, the
-// transcoder worker to 5 (see APIPoolMaxConns and
-// WorkerPoolMaxConns). The pool is created eagerly and
-// verified with a Ping before being returned, so a bad URL
-// or missing role is surfaced immediately at startup rather
-// than on the first request.
+// NewSQLDB opens a *sql.DB pool against the given DSN
+// using the pgx stdlib adapter (registered via the
+// blank import above).
 //
-// Callers MUST call pool.Close() on shutdown. The pool is
-// returned as a concrete struct (not an interface) on
-// purpose: pgxpool.Pool is the contract every other layer
-// (sqlc, drivers, instrumentation) already speaks, and
-// wrapping it in an interface here would just force every
-// downstream consumer to define its own interface anyway.
-func NewDB(ctx context.Context, databaseURL string, maxConns int32) (*pgxpool.Pool, error) {
-	if databaseURL == "" {
-		return nil, fmt.Errorf("NewDB: databaseURL is empty")
+// Why *sql.DB via pgx stdlib (not *pgxpool.Pool):
+//
+// sqlc (engine "postgresql") generates Queries.WithTx
+// with a *sql.Tx signature. *sql.Tx can only be
+// produced by *sql.DB.BeginTx - *pgxpool.Pool returns
+// pgx.Tx which is NOT a *sql.Tx. So sqlc forces us to
+// keep at least one *sql.DB around.
+//
+// Trade-off (intentional, do not "optimize" back to
+// pgxpool without re-reading this comment):
+//
+//   - We lose pgxpool's granular acquire/release
+//     semantics and its named prepared-statement
+//     cache.
+//   - pgx stdlib adapter still uses pgx type mapping
+//     and a per-connection prepared-statement cache,
+//     so we keep the pgx wire-level benefits.
+//   - For the MokiBox workload (max 10 conn API +
+//     max 5 conn worker, single VPS), the difference
+//     is negligible.
+//
+// If a future phase needs pgxpool-only ergonomics,
+// rewrite shared/db/*.sql.go (~1900 LOC of generated
+// code) to use pgx.Tx instead of *sql.Tx. Do NOT
+// silently re-introduce a second pool.
+//
+// maxConns caps *sql.DB.SetMaxOpenConns; maxIdle caps
+// SetMaxIdleConns. The pool is verified with a Ping
+// (5s deadline) before returning so a misconfigured
+// DSN is surfaced at startup, not on the first
+// request.
+//
+// Callers MUST call (*sql.DB).Close() on shutdown.
+func NewSQLDB(ctx context.Context, dsn string, maxConns, maxIdle int32) (*sql.DB, error) {
+	if dsn == "" {
+		return nil, fmt.Errorf("NewSQLDB: dsn is empty")
 	}
 	if maxConns <= 0 {
-		return nil, fmt.Errorf("NewDB: maxConns must be > 0, got %d", maxConns)
+		return nil, fmt.Errorf("NewSQLDB: maxConns must be > 0, got %d", maxConns)
+	}
+	if maxIdle < 0 {
+		return nil, fmt.Errorf("NewSQLDB: maxIdle must be >= 0, got %d", maxIdle)
 	}
 
-	cfg, err := pgxpool.ParseConfig(databaseURL)
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("parse database url: %w", err)
+		return nil, fmt.Errorf("sql.Open: %w", err)
 	}
-	cfg.MaxConns = maxConns
-	// Conservative defaults for a single-VPS deployment.
-	// MinConns=0 so a quiet worker doesn't keep an idle
-	// connection; the API gateway may want a small MinConns
-	// to avoid the first-request handshake cost, but a
-	// unified conservative default keeps the code simple.
-	cfg.MinConns = 0
-	// Per-conn lifetime caps so a long-lived process does
-	// not accumulate dead connections across Postgres
-	// restarts or NAT timeouts.
-	cfg.MaxConnLifetime = 30 * time.Minute
-	cfg.MaxConnIdleTime = 5 * time.Minute
-	cfg.HealthCheckPeriod = 30 * time.Second
+	db.SetMaxOpenConns(int(maxConns))
+	db.SetMaxIdleConns(int(maxIdle))
+	// Conservative lifetime cap: a long-lived process
+	// must not accumulate dead connections across
+	// Postgres restarts or NAT timeouts.
+	db.SetConnMaxLifetime(30 * time.Minute)
 
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("create pgxpool: %w", err)
-	}
-
-	// Verify the pool is actually usable before returning
-	// it. A 5s deadline keeps a misconfigured deployment
-	// from hanging the caller indefinitely.
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if err := pool.Ping(pingCtx); err != nil {
-		pool.Close()
+	if err := db.PingContext(pingCtx); err != nil {
+		_ = db.Close()
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
-
-	return pool, nil
+	return db, nil
 }

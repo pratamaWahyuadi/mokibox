@@ -1,36 +1,18 @@
 // Command api-gateway is the public-facing HTTP service
-// for the MokiBox backend. This file is the
-// process entry point and wires the runtime
-// dependencies (config, db pools, R2 client, Asynq
+// for the MokiBox backend. This file is the process
+// entry point and wires the runtime dependencies
+// (config, single *sql.DB pool, R2 client, Asynq
 // client, Zitadel verifier) into the Echo router.
 //
-// Phase 3 left a minimal main that only ran the router
-// with a stub TokenVerifier. Phase 4 extends it with
-// the dependencies required by the upload-intent +
-// confirm handlers:
-//   - APIConfig via shared.LoadAPI (DATABASE_URL,
-//     REDIS_*, R2_*, MEDIA_TOKEN_*, PRESIGN_UPLOAD_EXPIRY,
-//     etc.)
-//   - *pgxpool.Pool via shared.NewDB
-//   - *sql.DB via database/sql + pgx/v5/stdlib
-//     (used by Queries.WithTx in confirm)
-//   - *db.Queries via db.New on the *sql.DB
-//   - *shared.R2Client via shared.NewR2Client
-//   - *asynq.Client via shared.NewAsynqClient
-//   - The production Zitadel TokenVerifier via
-//     middleware.NewZitadelVerifier when issuer is set;
-//     otherwise a denyAllVerifier so a misconfigured
-//     deployment cannot accidentally authenticate
-//     anyone.
+// A single *sql.DB pool (backed by pgx stdlib) is used
+// for both sqlc *db.Queries (read path) and
+// Queries.WithTx (transaction path). pgxpool is no
+// longer part of this binary.
 //
-// The ZITADEL_* env vars are read directly so a
-// developer can `go run ./api-gateway` against a local
-// Postgres + Redis + R2 without first standing up the
-// full phase-9 production wiring (custom HTTP error
-// handler, request validator, graceful shutdown that
-// closes every client). Phase 9 owns that work; phase 4
-// only adds the deps required to run upload-intent +
-// confirm end-to-end.
+// Phase 9 will wrap this with signal-driven graceful
+// shutdown that closes each client; for now we Close()
+// the pool on SIGINT/SIGTERM and let the http.Server
+// shut down on its own deadline.
 //
 // Env vars:
 //   - API_GATEWAY_ADDR             listen addr (default :8080)
@@ -47,7 +29,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"log"
 	"net/http"
 	"os"
@@ -58,8 +39,6 @@ import (
 	"github.com/pratamaWahyuadi/mokibox/api-gateway/middleware"
 	"github.com/pratamaWahyuadi/mokibox/shared"
 	"github.com/pratamaWahyuadi/mokibox/shared/db"
-
-	_ "github.com/jackc/pgx/v5/stdlib" // database/sql driver for pgx
 )
 
 // addr is the listen address for the API gateway. It
@@ -83,40 +62,20 @@ func main() {
 	// Phase 4 wiring: every dependency NewRouter needs
 	// is built here. Phase 9 will wrap this with
 	// signal-driven graceful shutdown that closes each
-	// client; for phase 4 we Close() the pools on
+	// client; for now we Close() the pool on
 	// SIGINT/SIGTERM and let the http.Server shut down
 	// on its own deadline.
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// *pgxpool.Pool for the user handler (queries that
-	// do not need a tx).
-	pgPool, err := shared.NewDB(ctx, cfg.DatabaseURL, shared.APIPoolMaxConns)
+	// Single *sql.DB pool (via pgx stdlib). Used for
+	// both sqlc *db.Queries and Queries.WithTx.
+	sqlDB, err := shared.NewSQLDB(ctx, cfg.DatabaseURL, shared.APIPoolMaxConns, 2)
 	if err != nil {
-		log.Fatalf("api-gateway: NewDB: %v", err)
+		log.Fatalf("api-gateway: NewSQLDB: %v", err)
 	}
-	defer pgPool.Close()
-
-	// *sql.DB for Queries.WithTx. Opening via
-	// pgx/v5/stdlib keeps both pools pointing at the
-	// same database / role. A separate pool is
-	// intentional so the user handler's ErrNoRows
-	// semantics (pgx.ErrNoRows) stay correct.
-	sqlDB, err := sql.Open("pgx", cfg.DatabaseURL)
-	if err != nil {
-		log.Fatalf("api-gateway: sql.Open: %v", err)
-	}
-	sqlDB.SetMaxOpenConns(int(shared.APIPoolMaxConns))
-	sqlDB.SetMaxIdleConns(2)
-	sqlDB.SetConnMaxLifetime(30 * time.Minute)
 	defer sqlDB.Close()
-	pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
-	if err := sqlDB.PingContext(pingCtx); err != nil {
-		pingCancel()
-		log.Fatalf("api-gateway: sqlDB ping: %v", err)
-	}
-	pingCancel()
 
 	queries := db.New(sqlDB)
 
@@ -150,9 +109,8 @@ func main() {
 	}
 
 	deps := RouterDeps{
-		DB:                pgPool,
 		Queries:           queries,
-		SQLDB:             sqlDB,
+		DB:                sqlDB,
 		R2:                r2Client,
 		Queue:             asynqClient,
 		Cfg:               cfg,

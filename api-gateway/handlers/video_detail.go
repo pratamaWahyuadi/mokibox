@@ -34,6 +34,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -42,7 +43,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v4"
 
 	"github.com/pratamaWahyuadi/mokibox/api-gateway/middleware"
@@ -109,7 +109,7 @@ func (h *VideoHandler) GetVideoDetail(c echo.Context) error {
 		ViewerID: uuid.NullUUID{UUID: viewerID, Valid: viewerID != uuid.Nil},
 	})
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "video not found"))
 		}
 		slog.Error("GetVideoDetail failed", "err", err, "video_id", videoID)
@@ -125,7 +125,7 @@ func (h *VideoHandler) GetVideoDetail(c echo.Context) error {
 		// not leak the video.
 		owner, uerr := h.Queries.GetUserByID(ctx, row.UserID)
 		if uerr != nil {
-			if errors.Is(uerr, pgx.ErrNoRows) {
+			if errors.Is(uerr, sql.ErrNoRows) {
 				return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "video not found"))
 			}
 			slog.Error("GetUserByID during detail visibility failed", "err", uerr, "user_id", row.UserID)
@@ -237,7 +237,7 @@ func (h *VideoHandler) GetVideoStatus(c echo.Context) error {
 
 	row, err := h.Queries.GetVideoByID(c.Request().Context(), videoID)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "video not found"))
 		}
 		slog.Error("GetVideoByID during status failed", "err", err, "video_id", videoID)
@@ -310,7 +310,7 @@ func (h *VideoHandler) GetPlaylist(c echo.Context) error {
 	// Fetch the video row (status + hls_prefix + owner).
 	row, err := h.Queries.GetVideoByID(ctx, videoID)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "video not found"))
 		}
 		slog.Error("GetVideoByID during playlist failed", "err", err, "video_id", videoID)
@@ -333,7 +333,7 @@ func (h *VideoHandler) GetPlaylist(c echo.Context) error {
 		ownerID := row.UserID
 		owner, uerr := h.Queries.GetUserByID(ctx, ownerID)
 		if uerr != nil {
-			if errors.Is(uerr, pgx.ErrNoRows) {
+			if errors.Is(uerr, sql.ErrNoRows) {
 				return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "video not found"))
 			}
 			slog.Error("GetUserByID during playlist visibility failed", "err", uerr, "user_id", ownerID)

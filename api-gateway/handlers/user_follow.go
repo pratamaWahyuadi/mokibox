@@ -28,7 +28,6 @@ import (
 	"log/slog"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v4"
 
 	"github.com/pratamaWahyuadi/mokibox/api-gateway/middleware"
@@ -92,7 +91,7 @@ func (h *UserHandler) FollowUser(c echo.Context) error {
 	ctx := c.Request().Context()
 	target, err := h.Queries.GetUserByID(ctx, targetID)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "user not found"))
 		}
 		slog.Error("GetUserByID during follow failed", "err", err, "user_id", targetID)
@@ -346,7 +345,7 @@ func (h *UserHandler) ListFollowing(c echo.Context) error {
 func (h *UserHandler) assertCanSeeFollowList(c echo.Context, viewerID, targetID uuid.UUID) error {
 	target, err := h.Queries.GetUserByID(c.Request().Context(), targetID)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "user not found"))
 		}
 		slog.Error("GetUserByID during follow-list visibility failed", "err", err, "user_id", targetID)

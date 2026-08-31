@@ -42,7 +42,6 @@ import (
 	"log/slog"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v4"
 
 	"github.com/zitadel/zitadel-go/v3/pkg/actions"
@@ -194,6 +193,8 @@ func (h *WebhookHandler) Handle(c echo.Context) error {
 // Zitadel does not retry forever.
 var errUserNotFound = errors.New("local user not found")
 
+// HLS driver is pgx via pgx/v5/stdlib (registered as
+// the "pgx" *sql.DB driver).
 // lookupUserIDByZitadelID is a thin wrapper around
 // GetUserByZitadelID that returns the user id
 // (uuid.UUID) instead of the full row, so the webhook
@@ -201,16 +202,13 @@ var errUserNotFound = errors.New("local user not found")
 // Hiding the row keeps the handler narrow and makes
 // the missing-row case ergonomic.
 //
-// sqlc-generated code over pgxpool can surface a
-// missing row as either pgx.ErrNoRows (when the
-// consumer is a *pgxpool.Pool) or sql.ErrNoRows (when
-// the consumer is a *sql.DB opened via
-// pgx/v5/stdlib, as is the case in main.go). We check
-// for both so the handler works in either wiring.
+// The handler runs against a *sql.DB (pgx stdlib), so
+// a missing row surfaces as sql.ErrNoRows from
+// QueryRowContext().Scan().
 func lookupUserIDByZitadelID(ctx context.Context, q *db.Queries, sub string) (uuid.UUID, error) {
 	row, err := q.GetUserByZitadelID(ctx, sub)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return uuid.Nil, errUserNotFound
 		}
 		return uuid.Nil, fmt.Errorf("GetUserByZitadelID: %w", err)

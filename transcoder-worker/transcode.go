@@ -67,7 +67,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
-	"github.com/jackc/pgx/v5"
 
 	"github.com/pratamaWahyuadi/mokibox/shared"
 	"github.com/pratamaWahyuadi/mokibox/shared/db"
@@ -147,7 +146,7 @@ func (w *Worker) HandleTranscode(ctx context.Context, t *asynq.Task) error {
 
 	video, err := w.Queries.GetVideoByID(ctx, videoID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			w.Logger.Info("transcode handler: video not found, skipping", "video_id", videoID)
 			return nil
 		}
@@ -392,7 +391,7 @@ func (w *Worker) HandleTranscode(ctx context.Context, t *asynq.Task) error {
 	// R2 storage tight during the race window.
 	fresh, err := w.Queries.GetVideoByID(ctx, videoID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			w.Logger.Info("transcode handler: video disappeared mid-flight, cleaning uploads",
 				"video_id", videoID, "uploaded_count", len(uploadedKeys))
 			cleanupOnFailure()
@@ -421,7 +420,7 @@ func (w *Worker) HandleTranscode(ctx context.Context, t *asynq.Task) error {
 		DurationSeconds: sql.NullInt32{Int32: int32(math.Round(durationSec)), Valid: true},
 	}
 	if _, err := w.Queries.MarkVideoReady(ctx, readyParams); err != nil {
-		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			w.Logger.Info("transcode handler: mark-ready guarded by status, video already moved",
 				"video_id", videoID)
 			cleanupOnFailure()

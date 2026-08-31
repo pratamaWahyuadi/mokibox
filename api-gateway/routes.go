@@ -6,13 +6,12 @@
 // Phase 3 issue B (commit phase-3.2) registered the
 // user profile endpoints; phase 3 issue C extended
 // routes.go with the Zitadel Actions V2 webhook
-// (mounted OUTSIDE the auth group). Phase 4 adds the
+// (mounted OUTSIDE the auth group). Phase 4 added the
 // upload-intent and confirm endpoints inside the auth
 // group. Phase 6 issue A added the home feed behind
 // the auth group; issue B added the video detail /
-// status / playlist endpoints; issue C (this commit)
-// adds the follow endpoints. After this commit the
-// full phase-3/4/6 route set is:
+// status / playlist endpoints; issue C added the
+// follow endpoints. The current full route set is:
 //   - GET  /healthz                          (no auth)
 //   - POST /api/webhooks/zitadel             (no JWT auth;
 //       signature verified inside the handler)
@@ -20,16 +19,16 @@
 //   - PUT  /api/users/me                     (auth)
 //   - GET  /api/users/:id                    (auth)
 //   - GET  /api/users/:id/videos             (auth)
-//   - POST /api/users/:id/follow             (auth)   [phase 6.C]
-//   - DELETE /api/users/:id/follow           (auth)   [phase 6.C]
-//   - GET  /api/users/:id/followers          (auth)   [phase 6.C]
-//   - GET  /api/users/:id/following          (auth)   [phase 6.C]
-//   - GET  /api/feed/home                    (auth)   [phase 6.A]
+//   - POST /api/users/:id/follow             (auth)
+//   - DELETE /api/users/:id/follow           (auth)
+//   - GET  /api/users/:id/followers          (auth)
+//   - GET  /api/users/:id/following          (auth)
+//   - GET  /api/feed/home                    (auth)
 //   - POST /api/videos/upload-intent         (auth)
 //   - POST /api/videos/confirm               (auth)
-//   - GET  /api/videos/:id                   (auth)   [phase 6.B]
-//   - GET  /api/videos/:id/status            (auth)   [phase 6.B]
-//   - GET  /api/videos/:id/playlist.m3u8     (auth+token) [phase 6.B]
+//   - GET  /api/videos/:id                   (auth)
+//   - GET  /api/videos/:id/status            (auth)
+//   - GET  /api/videos/:id/playlist.m3u8     (auth+token)
 //
 // Phase 9 finalises the global HTTP error handler, the
 // body validator, and the production main.go that
@@ -44,8 +43,6 @@ import (
 
 	"github.com/hibiken/asynq"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/pratamaWahyuadi/mokibox/api-gateway/handlers"
 	"github.com/pratamaWahyuadi/mokibox/api-gateway/middleware"
 	"github.com/pratamaWahyuadi/mokibox/shared"
@@ -59,18 +56,12 @@ import (
 // flat (rather than taking a single fat struct) means
 // main.go in phase 9 can assemble them inline without
 // inventing a new config wrapper.
+//
+// DB is the single *sql.DB pool (via pgx stdlib);
+// sufficient for both sqlc Queries and Queries.WithTx.
 type RouterDeps struct {
-	DB      *pgxpool.Pool
 	Queries *db.Queries
-	// SQLDB is the *sql.DB opened from DATABASE_URL via
-	// pgx/v5/stdlib. It is required for the confirm
-	// transaction (sqlc's Queries.WithTx takes a
-	// *sql.Tx, which only *sql.DB can produce). It is
-	// kept separate from DB above because the user
-	// handler's ErrNoRows checks are calibrated for
-	// pgxpool; mixing the two at the call site is
-	// explicit rather than implicit.
-	SQLDB   *sql.DB
+	DB      *sql.DB
 	R2      *shared.R2Client
 	Queue   *asynq.Client
 	Cfg     *shared.APIConfig
@@ -124,7 +115,7 @@ func NewRouter(d RouterDeps) *echo.Echo {
 		Queries:  d.Queries,
 	}))
 
-	uh := handlers.NewUserHandler(d.DB, d.Queries, d.R2, d.Queue, d.Cfg)
+	uh := handlers.NewUserHandler(d.Queries, d.R2, d.Queue, d.Cfg)
 	api.GET("/users/me", uh.GetMe)
 	api.PUT("/users/me", uh.UpdateMe)
 	api.GET("/users/:id", uh.GetUserProfile)
@@ -147,7 +138,7 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	// startup of main.go is responsible for surfacing
 	// that error before the server begins accepting
 	// traffic.
-	vh, err := handlers.NewVideoHandler(d.Queries, d.SQLDB, d.R2, d.Queue, d.Cfg)
+	vh, err := handlers.NewVideoHandler(d.Queries, d.DB, d.R2, d.Queue, d.Cfg)
 	if err != nil {
 		// We cannot return an error from NewRouter
 		// (its signature is fixed by phase 3) so the

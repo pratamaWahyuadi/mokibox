@@ -26,8 +26,6 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v4"
 
 	"github.com/hibiken/asynq"
@@ -45,7 +43,6 @@ import (
 // means phase 6/7 can wire them without touching
 // routes.go.
 type UserHandler struct {
-	DB      *pgxpool.Pool
 	Queries *db.Queries
 	R2      *shared.R2Client // used from phase 6 for presigned thumbnail URLs
 	Queue   *asynq.Client   // used from phase 7 to enqueue notifications
@@ -58,9 +55,8 @@ type UserHandler struct {
 // leaves R2 and Queue as zero values - the methods
 // implemented here do not touch them, so passing nil is
 // safe and the strict wiring will be added in phase 9).
-func NewUserHandler(pool *pgxpool.Pool, q *db.Queries, r2 *shared.R2Client, queue *asynq.Client, cfg *shared.APIConfig) *UserHandler {
+func NewUserHandler(q *db.Queries, r2 *shared.R2Client, queue *asynq.Client, cfg *shared.APIConfig) *UserHandler {
 	return &UserHandler{
-		DB:      pool,
 		Queries: q,
 		R2:      r2,
 		Queue:   queue,
@@ -215,7 +211,7 @@ func (h *UserHandler) GetUserProfile(c echo.Context) error {
 		FollowerID: viewer.ID,
 	})
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "user not found"))
 		}
 		slog.Error("get user profile failed", "err", err, "user_id", targetID)
@@ -358,7 +354,7 @@ func (h *UserHandler) GetUserVideos(c echo.Context) error {
 	// videos table.
 	target, err := h.Queries.GetUserByID(c.Request().Context(), targetID)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "user not found"))
 		}
 		slog.Error("get target user failed", "err", err, "user_id", targetID)

@@ -34,7 +34,6 @@ import (
 	"log/slog"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v4"
 
 	"github.com/zitadel/zitadel-go/v3/pkg/authorization"
@@ -111,14 +110,14 @@ func newUsername() (string, error) {
 // CreateUser uses ON CONFLICT DO NOTHING RETURNING * so a
 // concurrent first-login for the same sub collapses to a
 // single row; in that case CreateUser returns
-// pgx.ErrNoRows and we re-select. This keeps the
+// sql.ErrNoRows and we re-select. This keeps the
 // get-or-create path race-free without taking a row lock.
 func getOrCreateUser(ctx context.Context, q *db.Queries, sub string) (db.User, error) {
 	existing, err := q.GetUserByZitadelID(ctx, sub)
 	if err == nil {
 		return existing, nil
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, sql.ErrNoRows) {
 		return db.User{}, fmt.Errorf("get user by zitadel id: %w", err)
 	}
 
@@ -135,8 +134,8 @@ func getOrCreateUser(ctx context.Context, q *db.Queries, sub string) (db.User, e
 	if err == nil {
 		return created, nil
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		// pgx.ErrNoRows here means ON CONFLICT DO NOTHING
+	if !errors.Is(err, sql.ErrNoRows) {
+		// sql.ErrNoRows here means ON CONFLICT DO NOTHING
 		// swallowed a concurrent insert; any other error is
 		// a real failure and must propagate.
 		return db.User{}, fmt.Errorf("create user: %w", err)
