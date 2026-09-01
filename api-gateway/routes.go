@@ -209,5 +209,14 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	api.DELETE("/comments/:id", sh.DeleteComment)
 	api.POST("/comments/:id/reply", sh.ReplyComment)
 
+	// Phase 7.C: notification inbox. Read-only + a
+	// single UPDATE, so the handler only needs
+	// Queries (no *sql.DB). Payload is forwarded as
+	// opaque JSON produced by the follow/like/comment
+	// paths; this endpoint never inspects it.
+	nh := handlers.NewNotificationHandler(d.Queries)
+	api.GET("/notifications", nh.List)
+	api.PUT("/notifications/read-all", nh.MarkAllRead)
+
 	return e
 }
