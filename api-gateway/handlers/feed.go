@@ -31,7 +31,6 @@ import (
 	"log/slog"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v4"
 
 	"github.com/pratamaWahyuadi/mokibox/api-gateway/middleware"
@@ -119,7 +118,7 @@ func (h *FeedHandler) HomeFeed(c echo.Context) error {
 	ctx := c.Request().Context()
 	rows, err := h.Queries.ListFeedVideos(ctx, params)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			// :many never returns ErrNoRows, but a future
 			// sqlc change might; map to empty page rather
 			// than a 500 so the client sees a sane envelope.

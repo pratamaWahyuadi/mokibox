@@ -1,10 +1,10 @@
 // Smoke test for phase 4 (issue A).
 //
 // Verifies the wiring without spinning up the Echo
-// server: a real *pgxpool.Pool against the local
-// Postgres container, plus a real *shared.R2Client
-// against the R2 credentials in .env. Both checks
-// exit 0 on success.
+// server: a real *sql.DB (via pgx stdlib) against the
+// local Postgres container, plus a real
+// *shared.R2Client against the R2 credentials in
+// .env. Both checks exit 0 on success.
 //
 // Run from repo root:
 //
@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
@@ -57,23 +56,19 @@ func dbRoundtrip(ctx context.Context) error {
 	if dbURL == "" {
 		return fmt.Errorf("DATABASE_URL is empty")
 	}
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		return fmt.Errorf("pgxpool.New: %w", err)
-	}
-	defer pool.Close()
-	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	if err := pool.Ping(pingCtx); err != nil {
-		cancel()
-		return fmt.Errorf("pgxpool ping: %w", err)
-	}
-	cancel()
-
 	sqlDB, err := sql.Open("pgx", dbURL)
 	if err != nil {
 		return fmt.Errorf("sql.Open: %w", err)
 	}
 	defer sqlDB.Close()
+	sqlDB.SetMaxOpenConns(2)
+	sqlDB.SetMaxIdleConns(1)
+	pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
+	if err := sqlDB.PingContext(pingCtx); err != nil {
+		pingCancel()
+		return fmt.Errorf("sqlDB ping: %w", err)
+	}
+	pingCancel()
 
 	q := db.New(sqlDB)
 
@@ -81,7 +76,7 @@ func dbRoundtrip(ctx context.Context) error {
 	// the database (any user works; the test creates a
 	// PENDING_UPLOAD row scoped to that user and cleans
 	// it up afterwards).
-	userID, err := pickExistingUser(ctx, pool)
+	userID, err := pickExistingUser(ctx, sqlDB)
 	if err != nil {
 		return fmt.Errorf("pick existing user: %w", err)
 	}
@@ -114,9 +109,8 @@ func dbRoundtrip(ctx context.Context) error {
 	log.Printf("smoke: InsertVideo id=%s r2_key=%s", inserted.ID, inserted.R2Key)
 
 	// Verify "no row" path: GetVideoByID must surface
-	// sql.ErrNoRows (or pgx.ErrNoRows), which is the
-	// contract confirm-upload relies on for the 404
-	// branch.
+	// sql.ErrNoRows, which is the contract
+	// confirm-upload relies on for the 404 branch.
 	if _, err := q.GetVideoByID(ctx, uuid.New()); err == nil {
 		return fmt.Errorf("GetVideoByID should have returned an error for a missing id")
 	} else if !isNoRows(err) {
@@ -223,9 +217,9 @@ func r2Presign(ctx context.Context) error {
 // for re-runs (idempotent because the username is
 // fixed and the table has a UNIQUE constraint that
 // surfaces as 23505, which we ignore).
-func pickExistingUser(ctx context.Context, pool *pgxpool.Pool) (uuid.UUID, error) {
+func pickExistingUser(ctx context.Context, sqlDB *sql.DB) (uuid.UUID, error) {
 	var id uuid.UUID
-	err := pool.QueryRow(ctx, "SELECT id FROM users LIMIT 1").Scan(&id)
+	err := sqlDB.QueryRowContext(ctx, "SELECT id FROM users LIMIT 1").Scan(&id)
 	if err == nil {
 		return id, nil
 	}
@@ -235,7 +229,7 @@ func pickExistingUser(ctx context.Context, pool *pgxpool.Pool) (uuid.UUID, error
 	// Seed a smoke-test user.
 	zitadelSub := fmt.Sprintf("smoke-test-%s", strings.ReplaceAll(uuid.New().String(), "-", ""))
 	username := fmt.Sprintf("smoke_%s", strings.ReplaceAll(uuid.New().String(), "-", "")[:10])
-	if err := pool.QueryRow(ctx,
+	if err := sqlDB.QueryRowContext(ctx,
 		`INSERT INTO users (zitadel_id, username, display_name, is_private, is_active)
 		 VALUES ($1, $2, $3, FALSE, TRUE)
 		 RETURNING id`,

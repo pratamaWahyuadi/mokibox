@@ -43,7 +43,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
-	"github.com/jackc/pgx/v5"
 
 	"github.com/pratamaWahyuadi/mokibox/shared"
 )
@@ -139,7 +138,7 @@ func (w *Worker) HandleCleanupVideo(ctx context.Context, t *asynq.Task) error {
 
 	video, err := w.Queries.GetVideoByID(ctx, videoID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			w.Logger.Info("HandleCleanupVideo: row gone, skip", "video_id", videoID)
 			return nil
 		}

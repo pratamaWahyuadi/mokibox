@@ -17,7 +17,7 @@
 //	cleanup.go   - HandleCleanupObjects + HandleCleanupVideo
 //	               (NFR-13, FR-VIDEO-11).
 //
-// All dependencies (DB pool, sql.DB, sqlc queries, R2
+// All dependencies (*sql.DB pool, sqlc queries, R2
 // client, asynq server, logger) are wired into the
 // Worker struct via NewWorker so the handlers can be
 // table-tested in phase 10 by substituting mocks.
@@ -32,24 +32,19 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/hibiken/asynq"
-	_ "github.com/jackc/pgx/v5/stdlib" // database/sql "pgx" driver
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/pratamaWahyuadi/mokibox/shared"
 	"github.com/pratamaWahyuadi/mokibox/shared/db"
 )
 
-// Worker holds every dependency the handlers need. Both
-// pool (used for direct pgx queries - the worker never
-// needs *pgxpool.Pool specifically but the constructor
-// keeps it for parity with the api-gateway) and sqlDB
-// (used by sqlc Queries.WithTx if a future handler needs
-// a transaction) are stored. The concrete struct is
-// returned from NewWorker; handlers that want to mock
-// can declare a small interface in their own package.
+// Worker holds every dependency the handlers need. DB
+// is the single *sql.DB pool (via pgx stdlib) shared by
+// sqlc Queries (read path) and Queries.WithTx
+// (transaction path). The concrete struct is returned
+// from NewWorker; handlers that want to mock can
+// declare a small interface in their own package.
 //
 // Logger is the slog.Logger that all handlers use to log
 // failures with structured fields. Per
@@ -57,8 +52,7 @@ import (
 // "video_id" / "task_id" / "op" so failures can be
 // correlated back to the request that produced them.
 type Worker struct {
-	DB      *pgxpool.Pool
-	SQLDB   *sql.DB
+	DB      *sql.DB
 	Queries *db.Queries
 	R2      *shared.R2Client
 	Asynq   *asynq.Client // for re-enqueue + cleanup enqueue
@@ -83,28 +77,9 @@ func NewWorker(ctx context.Context, cfg *shared.WorkerConfig, logger *slog.Logge
 		return nil, fmt.Errorf("NewWorker: logger is nil")
 	}
 
-	pool, err := shared.NewDB(ctx, cfg.WorkerDatabaseURL, shared.WorkerPoolMaxConns)
+	sqlDB, err := shared.NewSQLDB(ctx, cfg.WorkerDatabaseURL, shared.WorkerPoolMaxConns, shared.WorkerPoolMaxConns)
 	if err != nil {
 		return nil, fmt.Errorf("NewWorker: open postgres pool: %w", err)
-	}
-
-	sqlDB, err := sql.Open("pgx", cfg.WorkerDatabaseURL)
-	if err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("NewWorker: open sql.DB: %w", err)
-	}
-	// Conservative pool sizing for the worker side too.
-	// The 5-conn budget from shared.WorkerPoolMaxConns is
-	// for pgxpool; sqlc needs its own.
-	sqlDB.SetMaxOpenConns(int(shared.WorkerPoolMaxConns))
-	sqlDB.SetMaxIdleConns(int(shared.WorkerPoolMaxConns))
-	sqlDB.SetConnMaxLifetime(30 * time.Minute)
-	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	if err := sqlDB.PingContext(pingCtx); err != nil {
-		pool.Close()
-		_ = sqlDB.Close()
-		return nil, fmt.Errorf("NewWorker: ping sql.DB: %w", err)
 	}
 
 	queries := db.New(sqlDB)
@@ -117,7 +92,6 @@ func NewWorker(ctx context.Context, cfg *shared.WorkerConfig, logger *slog.Logge
 		Endpoint:        cfg.R2Endpoint,
 	})
 	if err != nil {
-		pool.Close()
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("NewWorker: r2 client: %w", err)
 	}
@@ -127,14 +101,12 @@ func NewWorker(ctx context.Context, cfg *shared.WorkerConfig, logger *slog.Logge
 		Password: cfg.RedisPassword,
 	})
 	if err != nil {
-		pool.Close()
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("NewWorker: asynq client: %w", err)
 	}
 
 	return &Worker{
-		DB:      pool,
-		SQLDB:   sqlDB,
+		DB:      sqlDB,
 		Queries: queries,
 		R2:      r2,
 		Asynq:   asynqClient,
@@ -146,16 +118,13 @@ func NewWorker(ctx context.Context, cfg *shared.WorkerConfig, logger *slog.Logge
 // Close releases every pooled resource. Called from
 // main on shutdown so the process exits cleanly under
 // SIGINT / SIGTERM. Order matters: asynq client first
-// (no shared resources), then DB pools.
+// (no shared resources), then the DB pool.
 func (w *Worker) Close() {
 	if w.Asynq != nil {
 		_ = w.Asynq.Close()
 	}
-	if w.SQLDB != nil {
-		_ = w.SQLDB.Close()
-	}
 	if w.DB != nil {
-		w.DB.Close()
+		_ = w.DB.Close()
 	}
 }
 

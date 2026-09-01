@@ -29,7 +29,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
-	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v4"
 
 	"github.com/pratamaWahyuadi/mokibox/api-gateway/middleware"
@@ -58,33 +57,31 @@ const (
 )
 
 // VideoHandler holds the dependencies for the upload
-// intent + confirm endpoints. SQLDB is the
-// database/sql handle used for the confirm transaction:
-// sqlc's Queries.WithTx requires a *sql.Tx, which only
-// *sql.DB can produce (via pgx/v5/stdlib). The user
-// handler still uses Queries directly via pgxpool, so
-// this file does not touch pgx.ErrNoRows semantics.
+// intent + confirm endpoints. DB is the *sql.DB pool
+// used for the confirm transaction: sqlc's
+// Queries.WithTx requires a *sql.Tx, which only
+// *sql.DB can produce (via pgx/v5/stdlib).
 type VideoHandler struct {
 	Queries *db.Queries
-	SQLDB   *sql.DB
+	DB      *sql.DB
 	R2      *shared.R2Client
 	Queue   *asynq.Client
 	Cfg     *shared.APIConfig
 }
 
 // NewVideoHandler builds a VideoHandler with all
-// dependencies injected. SQLDB must be the *sql.DB
+// dependencies injected. DB must be the *sql.DB
 // opened from DATABASE_URL via pgx/v5/stdlib so the
 // confirm transaction can call Queries.WithTx. A nil
-// SQLDB causes the constructor to return an error so
+// DB causes the constructor to return an error so
 // a misconfigured main.go fails fast at startup, not
 // on the first confirm.
-func NewVideoHandler(queries *db.Queries, sqldb *sql.DB, r2 *shared.R2Client, queue *asynq.Client, cfg *shared.APIConfig) (*VideoHandler, error) {
+func NewVideoHandler(queries *db.Queries, dbHandle *sql.DB, r2 *shared.R2Client, queue *asynq.Client, cfg *shared.APIConfig) (*VideoHandler, error) {
 	if queries == nil {
 		return nil, fmt.Errorf("NewVideoHandler: queries is nil")
 	}
-	if sqldb == nil {
-		return nil, fmt.Errorf("NewVideoHandler: sqldb is nil")
+	if dbHandle == nil {
+		return nil, fmt.Errorf("NewVideoHandler: db is nil")
 	}
 	if r2 == nil {
 		return nil, fmt.Errorf("NewVideoHandler: r2 is nil")
@@ -97,7 +94,7 @@ func NewVideoHandler(queries *db.Queries, sqldb *sql.DB, r2 *shared.R2Client, qu
 	}
 	return &VideoHandler{
 		Queries: queries,
-		SQLDB:   sqldb,
+		DB:      dbHandle,
 		R2:      r2,
 		Queue:   queue,
 		Cfg:     cfg,
@@ -185,10 +182,7 @@ func (h *VideoHandler) UploadIntent(c echo.Context) error {
 
 	if err != nil {
 		// Distinguish "no row" from a real DB failure.
-		// GetPendingVideoByUser is wired via *sql.DB so
-		// both sql.ErrNoRows (stdlib) and pgx.ErrNoRows
-		// (defence in depth) are checked.
-		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			videoID = uuid.New()
 			r2Key = uploadKey(user.ID, videoID)
 			inserted, ierr := h.Queries.InsertVideo(ctx, db.InsertVideoParams{
@@ -227,7 +221,7 @@ func (h *VideoHandler) UploadIntent(c echo.Context) error {
 				R2Key: r2Key,
 			})
 			if uerr != nil {
-				if errors.Is(uerr, sql.ErrNoRows) || errors.Is(uerr, pgx.ErrNoRows) {
+						if errors.Is(uerr, sql.ErrNoRows) {
 					// Concurrent state transition.
 					return shared.RespondError(c, shared.Wrap(shared.ErrVideoStatusConflict,
 						"video state changed concurrently"))
@@ -242,7 +236,7 @@ func (h *VideoHandler) UploadIntent(c echo.Context) error {
 			Title:       nullString(title),
 			Description: nullString(desc),
 		}); merr != nil {
-			if errors.Is(merr, sql.ErrNoRows) || errors.Is(merr, pgx.ErrNoRows) {
+				if errors.Is(merr, sql.ErrNoRows) {
 				// Same race: the row was promoted to
 				// PROCESSING between our two updates.
 				return shared.RespondError(c, shared.Wrap(shared.ErrVideoStatusConflict,
@@ -394,7 +388,7 @@ func (h *VideoHandler) ConfirmUpload(c echo.Context) error {
 	// form an atomic state transition. The whole confirm
 	// pipeline runs under one tx so an enqueue failure
 	// later can roll the row back to PENDING_UPLOAD.
-	tx, err := h.SQLDB.BeginTx(ctx, nil)
+	tx, err := h.DB.BeginTx(ctx, nil)
 	if err != nil {
 		slog.Error("BeginTx failed", "err", err, "user_id", user.ID, "video_id", videoID)
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "begin transaction"))
@@ -407,7 +401,7 @@ func (h *VideoHandler) ConfirmUpload(c echo.Context) error {
 	qtx := h.Queries.WithTx(tx)
 	video, err := qtx.GetVideoByIDForUpdate(ctx, videoID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "video not found"))
 		}
 		slog.Error("GetVideoByIDForUpdate failed", "err", err, "video_id", videoID)
@@ -457,7 +451,7 @@ func (h *VideoHandler) ConfirmUpload(c echo.Context) error {
 		R2Key:  video.R2Key,
 	})
 	if cerr != nil {
-		if errors.Is(cerr, sql.ErrNoRows) || errors.Is(cerr, pgx.ErrNoRows) {
+		if errors.Is(cerr, sql.ErrNoRows) {
 			// Race: another request mutated the row
 			// between our FOR UPDATE and the UPDATE
 			// (e.g. a concurrent confirm). Surface
