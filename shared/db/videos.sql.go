@@ -66,6 +66,27 @@ func (q *Queries) DecrementCommentsCount(ctx context.Context, id uuid.UUID) erro
 	return err
 }
 
+const decrementCommentsCountBy = `-- name: DecrementCommentsCountBy :exec
+UPDATE videos
+SET comments_count = GREATEST(comments_count - $2, 0)
+WHERE id = $1
+`
+
+type DecrementCommentsCountByParams struct {
+	ID            uuid.UUID `json:"id"`
+	CommentsCount int32     `json:"comments_count"`
+}
+
+// Phase 7.B: DeleteComment removes a whole subtree
+// (comment + replies via ON DELETE CASCADE), so the
+// counter must drop by the subtree size in one atomic
+// statement. Guarded by GREATEST so concurrent drift
+// never drives the counter negative (chk_videos_counters).
+func (q *Queries) DecrementCommentsCountBy(ctx context.Context, arg DecrementCommentsCountByParams) error {
+	_, err := q.db.ExecContext(ctx, decrementCommentsCountBy, arg.ID, arg.CommentsCount)
+	return err
+}
+
 const decrementCommentsForUser = `-- name: DecrementCommentsForUser :exec
 UPDATE videos
 SET comments_count = GREATEST(comments_count - 1, 0)

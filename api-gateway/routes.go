@@ -181,5 +181,42 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	api.GET("/videos/:id/status", vh.GetVideoStatus)
 	api.GET("/videos/:id/playlist.m3u8", vh.GetPlaylist)
 
+	// Phase 7.A: like / unlike / view tracking.
+	// Like and unlike mutate the denormalised
+	// likes_count inside a tx (insert/delete +
+	// counter + notification commit together).
+	// Both are idempotent and return the current
+	// counter. View tracking is a single atomic
+	// increment with no per-user dedup
+	// (FR-FEED-05). All three enforce the video
+	// visibility rule (404 on unauthorised).
+	sh, err := handlers.NewSocialHandler(d.Queries, d.DB)
+	if err != nil {
+		panic(fmt.Sprintf("api-gateway: NewSocialHandler: %v", err))
+	}
+	api.POST("/videos/:id/like", sh.LikeVideo)
+	api.DELETE("/videos/:id/like", sh.UnlikeVideo)
+	api.POST("/videos/:id/view", sh.TrackView)
+
+	// Phase 7.B: comments. Create + reply mutate
+	// comments_count inside a tx; delete removes the
+	// whole subtree and decrements by the recursive
+	// count. The list endpoint applies the same video
+	// visibility rule so a private video's comments
+	// never leak (404 on unauthorised).
+	api.POST("/videos/:id/comments", sh.CreateComment)
+	api.GET("/videos/:id/comments", sh.ListComments)
+	api.DELETE("/comments/:id", sh.DeleteComment)
+	api.POST("/comments/:id/reply", sh.ReplyComment)
+
+	// Phase 7.C: notification inbox. Read-only + a
+	// single UPDATE, so the handler only needs
+	// Queries (no *sql.DB). Payload is forwarded as
+	// opaque JSON produced by the follow/like/comment
+	// paths; this endpoint never inspects it.
+	nh := handlers.NewNotificationHandler(d.Queries)
+	api.GET("/notifications", nh.List)
+	api.PUT("/notifications/read-all", nh.MarkAllRead)
+
 	return e
 }
