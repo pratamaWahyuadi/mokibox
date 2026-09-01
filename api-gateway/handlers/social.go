@@ -36,6 +36,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -350,4 +352,378 @@ func (h *SocialHandler) TrackView(c echo.Context) error {
 		VideoID:    videoID,
 		ViewsCount: int(refreshed.ViewsCount),
 	})
+}
+
+// CommentObject is the on-the-wire shape of one
+// comment (planning/04_api_contracts.md section 2).
+// ParentID is null for top-level comments. User is the
+// author summary joined from users.
+type CommentObject struct {
+	ID        uuid.UUID    `json:"id"`
+	VideoID   uuid.UUID    `json:"video_id"`
+	UserID    uuid.UUID    `json:"user_id"`
+	ParentID  *uuid.UUID   `json:"parent_id"`
+	Content   string       `json:"content"`
+	CreatedAt string       `json:"created_at"`
+	User      *UserSummary `json:"user"`
+}
+
+// commentRequestBody is the JSON body accepted by
+// CreateComment and ReplyComment: {"content": "..."}.
+type commentRequestBody struct {
+	Content string `json:"content"`
+}
+
+// bindCommentContent decodes and validates the
+// {content} body: 1..commentContentMax visible
+// characters after trimming whitespace. Failures map
+// to 400 VALIDATION_ERROR with a field detail.
+func bindCommentContent(c echo.Context) (string, error) {
+	var body commentRequestBody
+	if err := c.Bind(&body); err != nil {
+		return "", shared.NewAPIError(shared.CodeValidationError, "invalid JSON body").
+			WithDetails(shared.FieldError{Field: "content", Message: "body must be JSON"})
+	}
+	content := strings.TrimSpace(body.Content)
+	if content == "" {
+		return "", shared.NewAPIError(shared.CodeValidationError, "content is required").
+			WithDetails(shared.FieldError{Field: "content", Message: "must be 1-1000 characters"})
+	}
+	if len([]rune(content)) > commentContentMax {
+		return "", shared.NewAPIError(shared.CodeValidationError, "content too long").
+			WithDetails(shared.FieldError{Field: "content", Message: fmt.Sprintf("must be at most %d characters", commentContentMax)})
+	}
+	return content, nil
+}
+
+// commentObjectFromRow maps a joined comment row
+// (GetCommentByIDRow / ListCommentsByVideoRow share
+// the same projection) into the wire shape.
+func commentObjectFromRow(id, videoID, userID uuid.UUID, parentID uuid.NullUUID,
+	content string, createdAt time.Time, username string,
+	displayName, avatarURL sql.NullString, isPrivate bool,
+) CommentObject {
+	out := CommentObject{
+		ID:        id,
+		VideoID:   videoID,
+		UserID:    userID,
+		Content:   content,
+		CreatedAt: formatVideoTime(createdAt),
+		User: &UserSummary{
+			ID:        userID,
+			Username:  username,
+			IsPrivate: isPrivate,
+		},
+	}
+	if parentID.Valid {
+		v := parentID.UUID
+		out.ParentID = &v
+	}
+	if displayName.Valid {
+		v := displayName.String
+		out.User.DisplayName = &v
+	}
+	if avatarURL.Valid {
+		v := avatarURL.String
+		out.User.AvatarURL = &v
+	}
+	return out
+}
+
+// CreateComment handles POST /api/videos/:id/comments.
+//
+// tx body (LLD section 10, issue B): InsertComment
+// (parent NULL) -> IncrementCommentsCount ->
+// notification to the video owner (skipped on
+// self-comment). All three commit together.
+func (h *SocialHandler) CreateComment(c echo.Context) error {
+	if h.Queries == nil || h.DB == nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "social handler not configured"))
+	}
+	user, videoID, ok := parseAuthVideoParam(c)
+	if !ok {
+		return nil
+	}
+	content, err := bindCommentContent(c)
+	if err != nil {
+		return shared.RespondError(c, err)
+	}
+	ctx := c.Request().Context()
+
+	video, err := h.assertVideoVisible(ctx, user.ID, videoID)
+	if err != nil {
+		return shared.RespondError(c, err)
+	}
+
+	tx, qtx, err := h.beginSocialTx(ctx)
+	if err != nil {
+		return shared.RespondError(c, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	comment, err := qtx.InsertComment(ctx, db.InsertCommentParams{
+		VideoID: videoID,
+		UserID:  user.ID,
+		Content: content,
+	})
+	if err != nil {
+		slog.Error("InsertComment failed", "err", err, "user_id", user.ID, "video_id", videoID)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "create comment"))
+	}
+	if err := qtx.IncrementCommentsCount(ctx, videoID); err != nil {
+		slog.Error("IncrementCommentsCount failed", "err", err, "video_id", videoID)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "update comments count"))
+	}
+	if user.ID != video.UserID { // never notify self-comment
+		nerr := insertSocialNotification(ctx, qtx, video.UserID, user.ID, "comment", map[string]string{
+			"username":   user.Username,
+			"video_id":   videoID.String(),
+			"comment_id": comment.ID.String(),
+		})
+		if nerr != nil {
+			slog.Error("insert comment notification failed", "err", nerr, "video_id", videoID)
+			return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "insert notification"))
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		slog.Error("comment tx commit failed", "err", err, "video_id", videoID)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "commit comment"))
+	}
+
+	row, err := h.Queries.GetCommentByID(ctx, comment.ID)
+	if err != nil {
+		slog.Error("GetCommentByID after insert failed", "err", err, "comment_id", comment.ID)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load comment"))
+	}
+	return shared.RespondCreated(c, commentObjectFromRow(
+		row.ID, row.VideoID, row.UserID, row.ParentID,
+		row.Content, row.CreatedAt, row.Username,
+		row.DisplayName, row.AvatarUrl, row.IsPrivate,
+	))
+}
+
+// ListComments handles GET /api/videos/:id/comments.
+// Flat list ordered created_at DESC, id DESC with
+// cursor pagination. The video visibility rule applies
+// (a private video's comment list must not leak).
+func (h *SocialHandler) ListComments(c echo.Context) error {
+	if h.Queries == nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "social handler not configured"))
+	}
+	user, videoID, ok := parseAuthVideoParam(c)
+	if !ok {
+		return nil
+	}
+	ctx := c.Request().Context()
+
+	if _, err := h.assertVideoVisible(ctx, user.ID, videoID); err != nil {
+		return shared.RespondError(c, err)
+	}
+
+	limit, err := parseLimit(c.QueryParam("limit"))
+	if err != nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrValidation, err.Error()))
+	}
+	cursorTS, cursorID, err := shared.DecodeCursor(c.QueryParam("cursor"))
+	if err != nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrValidation, "invalid cursor"))
+	}
+
+	params := db.ListCommentsByVideoParams{
+		VideoID:   videoID,
+		PageLimit: int32(limit),
+	}
+	if !cursorTS.IsZero() {
+		params.CursorCreated = sql.NullTime{Time: cursorTS, Valid: true}
+		params.CursorID = uuid.NullUUID{UUID: cursorID, Valid: true}
+	}
+	rows, err := h.Queries.ListCommentsByVideo(ctx, params)
+	if err != nil {
+		slog.Error("ListCommentsByVideo failed", "err", err, "video_id", videoID)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "list comments"))
+	}
+
+	items := make([]CommentObject, 0, len(rows))
+	for _, r := range rows {
+		items = append(items, commentObjectFromRow(
+			r.ID, r.VideoID, r.UserID, r.ParentID,
+			r.Content, r.CreatedAt, r.Username,
+			r.DisplayName, r.AvatarUrl, r.IsPrivate,
+		))
+	}
+	var nextCursor *string
+	if len(rows) == limit {
+		nc := shared.EncodeCursor(rows[len(rows)-1].CreatedAt, rows[len(rows)-1].ID)
+		nextCursor = &nc
+	}
+	return shared.RespondList(c, items, nextCursor)
+}
+
+// DeleteComment handles DELETE /api/comments/:id.
+// Owner-only; a non-owner gets 404 (anti-enumeration).
+//
+// tx body (LLD section 10, issue B): CountCommentSubtree
+// (recursive CTE counts this comment + every reply
+// underneath) -> DeleteCommentByID (ON DELETE CASCADE
+// removes the replies) -> DecrementCommentsCountBy the
+// subtree size. The counter and the row deletion commit
+// atomically so comments_count can never drift from the
+// physical row count on this path.
+func (h *SocialHandler) DeleteComment(c echo.Context) error {
+	if h.Queries == nil || h.DB == nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "social handler not configured"))
+	}
+	user, ok := middleware.UserFromContext(c)
+	if !ok || user == nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrUnauthorized, "no authenticated user"))
+	}
+	commentID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrValidation, "invalid comment id"))
+	}
+	ctx := c.Request().Context()
+
+	comment, err := h.Queries.GetCommentByID(ctx, commentID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "comment not found"))
+		}
+		slog.Error("GetCommentByID during delete failed", "err", err, "comment_id", commentID)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load comment"))
+	}
+	if comment.UserID != user.ID {
+		// Anti-enumeration: a non-owner deleting gets
+		// the same response as a missing comment.
+		return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "comment not found"))
+	}
+
+	tx, qtx, err := h.beginSocialTx(ctx)
+	if err != nil {
+		return shared.RespondError(c, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	subtree, err := qtx.CountCommentSubtree(ctx, commentID)
+	if err != nil {
+		slog.Error("CountCommentSubtree failed", "err", err, "comment_id", commentID)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "count comment subtree"))
+	}
+	if err := qtx.DeleteCommentByID(ctx, commentID); err != nil {
+		slog.Error("DeleteCommentByID failed", "err", err, "comment_id", commentID)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "delete comment"))
+	}
+	if subtree > 0 {
+		if err := qtx.DecrementCommentsCountBy(ctx, db.DecrementCommentsCountByParams{
+			ID:            comment.VideoID,
+			CommentsCount: int32(subtree),
+		}); err != nil {
+			slog.Error("DecrementCommentsCountBy failed", "err", err, "video_id", comment.VideoID, "subtree", subtree)
+			return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "update comments count"))
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		slog.Error("delete comment tx commit failed", "err", err, "comment_id", commentID)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "commit delete comment"))
+	}
+	return shared.RespondNoContent(c)
+}
+
+// ReplyComment handles POST /api/comments/:id/reply.
+//
+// The composite FK (parent_id, video_id) guarantees a
+// reply always lands in the same video as its parent.
+// Notification fan-out (dedup per user): the video
+// owner and the parent comment's author each get a
+// type=comment notification, unless the recipient is
+// the actor (self-reply) or already received one (owner
+// == parent author).
+func (h *SocialHandler) ReplyComment(c echo.Context) error {
+	if h.Queries == nil || h.DB == nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "social handler not configured"))
+	}
+	user, ok := middleware.UserFromContext(c)
+	if !ok || user == nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrUnauthorized, "no authenticated user"))
+	}
+	parentID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrValidation, "invalid comment id"))
+	}
+	content, err := bindCommentContent(c)
+	if err != nil {
+		return shared.RespondError(c, err)
+	}
+	ctx := c.Request().Context()
+
+	parent, err := h.Queries.GetCommentByID(ctx, parentID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "comment not found"))
+		}
+		slog.Error("GetCommentByID during reply failed", "err", err, "comment_id", parentID)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load parent comment"))
+	}
+
+	video, err := h.assertVideoVisible(ctx, user.ID, parent.VideoID)
+	if err != nil {
+		return shared.RespondError(c, err)
+	}
+
+	tx, qtx, err := h.beginSocialTx(ctx)
+	if err != nil {
+		return shared.RespondError(c, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	reply, err := qtx.InsertComment(ctx, db.InsertCommentParams{
+		VideoID:  parent.VideoID,
+		UserID:   user.ID,
+		ParentID: uuid.NullUUID{UUID: parentID, Valid: true},
+		Content:  content,
+	})
+	if err != nil {
+		slog.Error("InsertComment (reply) failed", "err", err, "parent_id", parentID)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "create reply"))
+	}
+	if err := qtx.IncrementCommentsCount(ctx, parent.VideoID); err != nil {
+		slog.Error("IncrementCommentsCount (reply) failed", "err", err, "video_id", parent.VideoID)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "update comments count"))
+	}
+
+	// Notification fan-out with dedup: notify the video
+	// owner and the parent comment author, skipping the
+	// actor and any recipient already notified.
+	recipients := map[uuid.UUID]struct{}{}
+	if video.UserID != user.ID {
+		recipients[video.UserID] = struct{}{}
+	}
+	if parent.UserID != user.ID {
+		recipients[parent.UserID] = struct{}{}
+	}
+	payload := map[string]string{
+		"username":   user.Username,
+		"video_id":   parent.VideoID.String(),
+		"comment_id": reply.ID.String(),
+	}
+	for recipient := range recipients {
+		if nerr := insertSocialNotification(ctx, qtx, recipient, user.ID, "comment", payload); nerr != nil {
+			slog.Error("insert reply notification failed", "err", nerr, "recipient", recipient)
+			return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "insert notification"))
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		slog.Error("reply tx commit failed", "err", err, "parent_id", parentID)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "commit reply"))
+	}
+
+	row, err := h.Queries.GetCommentByID(ctx, reply.ID)
+	if err != nil {
+		slog.Error("GetCommentByID after reply failed", "err", err, "comment_id", reply.ID)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load reply"))
+	}
+	return shared.RespondCreated(c, commentObjectFromRow(
+		row.ID, row.VideoID, row.UserID, row.ParentID,
+		row.Content, row.CreatedAt, row.Username,
+		row.DisplayName, row.AvatarUrl, row.IsPrivate,
+	))
 }

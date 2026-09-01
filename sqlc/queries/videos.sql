@@ -218,6 +218,16 @@ UPDATE videos
 SET comments_count = comments_count - 1
 WHERE id = $1 AND comments_count > 0;
 
+-- name: DecrementCommentsCountBy :exec
+-- Phase 7.B: DeleteComment removes a whole subtree
+-- (comment + replies via ON DELETE CASCADE), so the
+-- counter must drop by the subtree size in one atomic
+-- statement. Guarded by GREATEST so concurrent drift
+-- never drives the counter negative (chk_videos_counters).
+UPDATE videos
+SET comments_count = GREATEST(comments_count - $2, 0)
+WHERE id = $1;
+
 -- name: DecrementLikesForUser :exec
 -- Called by DeleteUserData to keep the denormalized
 -- counter accurate after a user is tombstoned.

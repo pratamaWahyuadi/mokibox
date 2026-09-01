@@ -198,5 +198,16 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	api.DELETE("/videos/:id/like", sh.UnlikeVideo)
 	api.POST("/videos/:id/view", sh.TrackView)
 
+	// Phase 7.B: comments. Create + reply mutate
+	// comments_count inside a tx; delete removes the
+	// whole subtree and decrements by the recursive
+	// count. The list endpoint applies the same video
+	// visibility rule so a private video's comments
+	// never leak (404 on unauthorised).
+	api.POST("/videos/:id/comments", sh.CreateComment)
+	api.GET("/videos/:id/comments", sh.ListComments)
+	api.DELETE("/comments/:id", sh.DeleteComment)
+	api.POST("/comments/:id/reply", sh.ReplyComment)
+
 	return e
 }
