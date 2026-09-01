@@ -192,6 +192,14 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	api.GET("/videos/:id/status", vh.GetVideoStatus)
 	api.GET("/videos/:id/playlist.m3u8", vh.GetPlaylist)
 
+	// Phase 8.B: delete video (owner only). The
+	// handler tombstones the row (status=DELETED +
+	// deleted_at=NOW()) and enqueues cleanup:video
+	// with ProcessIn(24h). 204 on success. Non-owner
+	// gets 404 (anti-enumeration), missing video
+	// also 404.
+	api.DELETE("/videos/:id", vh.DeleteVideo)
+
 	// Phase 7.A: like / unlike / view tracking.
 	// Like and unlike mutate the denormalised
 	// likes_count inside a tx (insert/delete +
