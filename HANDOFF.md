@@ -5,19 +5,21 @@ Regenerate per session via `git fetch && gh pr list && gh issue list --state ope
 
 ## Latest
 
-- **PR #45 `feature/phase-9` OPEN** — 5 commit atomic per issue (A..E):
+- **PR #45 `feature/phase-9` OPEN** — 9 commit (7 original + 2 followup):
   - `155b44c` phase-9.1: api-gateway main.go — slog + fail-fast verifier + 30s shutdown
   - `d2dad34` phase-9.2: central HTTPErrorHandler as safety net + `shared.ClassifyError` exported
   - `af9f94b` phase-9.3: rate limit middleware (per-user auth 60/min + per-IP webhook 30/min)
   - `2073a09` phase-9.4: production Dockerfile (distroless) + compose context fix
   - `3b6a438` phase-9.5: graceful shutdown phase visibility (slog per step)
-- **8 file changes**, +765/-106 (ground truth from `git diff --shortstat main..HEAD`).
-- **Verification**: `go build`/`vet`/`test` exit 0, `docker compose build api-gateway` succeeds,
-  image identity nonroot:nonroot, binary fail-fast verified.
-- **Verification gap (carried to fase 10)**: live HTTP smoke for `/healthz`,
-  `/api/videos/00000000-...` (404 envelope), and rate limit 429 require real
-  Zitadel OIDC issuer. Static checks cover wire contract; runtime path
-  verified by code reading.
+  - `049bf21` docs: [phase-9] handoff notes for fase 10
+  - `d743b92` docs: [phase-9] CONVENTIONS — docker build context + distroless notes
+  - `52d6763` phase-9.6: retry-with-backoff NewZitadelVerifier (60s budget)
+  - `9c4684c` phase-9.7: go-playground/validator wired + 4 c.Bind refactor
+- **15 file changes**, +1357/-194 (ground truth from `git diff --shortstat main..HEAD`).
+- **27 endpoints**: 25 JWT-protected `api.*` + 1 healthz + 1 webhook.
+- **No new routes** in fase 9 — issue 28 was wiring + production hardening,
+  not new features.
+- **Reviewer followup closed** (commit 8-9): cold-start race retry + LLD-mandated validator.
 
 ## Merged (state of main)
 
@@ -58,14 +60,20 @@ Regenerate per session via `git fetch && gh pr list && gh issue list --state ope
 - **Counter race** (carry-over fase 5-9): tidak ada `FOR UPDATE` di decrement.
   Defer ke fase 10 reconciliation.
 - **Orphan R2 risk** (carry-over fase 8): tracked issue #44, fase 10 reconciliation sweep.
-- **Verification gap on live HTTP smoke** (NEW fase 9): binary fail-fast tanpa Zitadel
-  infra up. PR body section "Verification gap" explains why integration smoke deferred
+- **Verification gap on live HTTP smoke** (carry-over fase 9): binary fail-fast tanpa
+  Zitadel infra up. PR body section "Verification gap" explains why integration smoke deferred
   to issue #30. Static checks + grep assertions + Docker build verify wire contract.
-- **Fail-fast verifier** (NEW fase 9): `denyAllVerifier` removed dari `main.go`. Misconfigured
-  ZITADEL_ISSUER_URL → container restart-loop sampai fixed. Doc trade-off di PR body.
+- **Fail-fast verifier + retry** (NEW fase 9 + fase 9.6): `denyAllVerifier` removed dari
+  `main.go`. Misconfigured ZITADEL_ISSUER_URL → container restart-loop. Cold-start race
+  absorbed by 60s retry budget. Trade-off documented.
+- **/healthz unreachable during retry** (NEW fase 9.6 caveat): retry-with-backoff absorbs
+  cold-start race but /healthz masih unreachable selama retry window (solver
+  liveness-vs-readiness split butuh srv.ListenAndServe sebelum verifier build — di luar
+  scope fase 9). Kalau fase 10 observe production issue, split ke /healthz (liveness) +
+  /readyz (readiness).
 - **Distroless image** (NEW fase 9): `gcr.io/distroless/static-debian12:nonroot`. Tidak punya
   shell — `docker exec ... sh` tidak akan jalan. Untuk debug live, harus buat debug image
-  terpisah atau pakai `kubectl debug`/`docker debug` (kalau Docker version support).
+  terpisah atau pakai `docker debug` (kalau Docker version support).
 - **Zero handler refactor** (NEW fase 9): handler fase 3-8 tetap pakai `shared.RespondError`.
   Central HTTPErrorHandler safety net untuk framework errors saja. Kalau fase 10 mau adopt
   `return err` idiom secara konsisten, refactor eksplisit dengan migration plan — jangan
@@ -83,19 +91,26 @@ Regenerate per session via `git fetch && gh pr list && gh issue list --state ope
 - **`golang.org/x/time` direct dependency** (NEW fase 9): dipromote dari indirect di fase 9.
   Tetap di track sebagai "production runtime dep", bukan "test-only" — kalau di-unrequire
   di fase 10, rate limit akan break.
+- **`go-playground/validator/v10` direct dependency** (NEW fase 9.7): tambah via `go get`,
+  promote via `go mod tidy`. Tag yang dipakai: required, omitempty, min, max, uuid, url.
+  Refactor 4 call site: uploadIntentRequest, confirmRequest, updateMeRequest,
+  commentRequestBody. Validator translation di `api-gateway/request_validator.go` —
+  kalau fase 10 tambah tag baru atau localization, edit di sana.
 - **Pre-commit verification** (Aturan #11): expected file list per issue ditulis sebelum
   `git add`, dicocokkan dengan `git status --porcelain`, dan `git log --stat -1` diverifikasi
-  setelah commit. Fase 9 mengikuti pattern ini: 5 commit, semua expected files match.
+  setelah commit. Fase 9 mengikuti pattern ini: 9 commit, semua expected files match.
 - **PR body post-submit edit** (carry-over): `gh api -X PATCH .../pulls/<num> --input <json>`
-  reliable; `gh pr edit --body-file` deprecated + exit 1 silent. Fase 9 tidak butuh edit.
+  reliable; `gh pr edit --body-file` deprecated + exit 1 silent. Fase 9 pakai pattern ini
+  2x (initial submit + followup update).
 - **PR body angka self-check** (per git-phase-workflow rule #10): angka breakdown touchpoint
   di PR body diverifikasi dengan `git diff --shortstat main..HEAD`. Fase 9 PR body section
-  "Commits" table juga catat perbedaan `git log --stat` per-commit sum (785/126) vs
-  `git diff --stat` (765/106) dengan jelas, supaya reviewer tidak bingung.
+  "Commits" table juga catat perbedaan `git log --stat` per-commit sum (1382/219) vs
+  `git diff --stat` (1357/194) dengan jelas, supaya reviewer tidak bingung.
 - **Live HTTP smoke recipe** (NEW fase 9): butuh `make up-zitadel` dulu + cert populate
   di `deploy/nginx/certs/` + binary boot dengan env lengkap. Issue #30 fase 10 menulis
   integration smoke script yang ngebukti /healthz 200 + /api/videos/.../404 envelope
-  + rate limit 429 — semua tiga skenario harus jalan end-to-end dengan Zitadel up.
+  + rate limit 429 + validator 400 envelope — semua skenario harus jalan end-to-end
+  dengan Zitadel up.
 
 ## Files touched fase 9 (for future reference)
 
