@@ -382,7 +382,14 @@ func (h *VideoHandler) GetPlaylist(c echo.Context) error {
 // Content-Type: application/vnd.apple.mpegurl.
 func (h *VideoHandler) serveMasterPlaylist(c echo.Context, hlsPrefix string, videoID uuid.UUID) error {
 	ctx := c.Request().Context()
-	masterKey := hlsPrefix + "master.m3u8"
+	// hls_prefix is stored WITHOUT a trailing slash (the worker
+	// builds it as "hls/<userID>/<videoID>" in transcode.go), so
+	// the separator must be added here. Concatenating directly
+	// produced "hls/<user>/<videoID>master.m3u8" - a key that
+	// never exists - making the playlist endpoint permanently
+	// 404. (Pre-existing bug since fase 6, exposed by the Fase
+	// 10 integration smoke; see the phase-10.5 commit.)
+	masterKey := hlsPrefix + "/master.m3u8"
 	body, err := h.R2.GetObject(ctx, masterKey, hlsVariantCap)
 	if err != nil {
 		if errors.Is(err, shared.ErrNotFound) {
@@ -405,7 +412,8 @@ func (h *VideoHandler) serveMasterPlaylist(c echo.Context, hlsPrefix string, vid
 // URI to a presigned R2 URL, and returns the body.
 func (h *VideoHandler) serveVariantPlaylist(c echo.Context, hlsPrefix string, videoID uuid.UUID, variant string) error {
 	ctx := c.Request().Context()
-	variantKey := hlsPrefix + variant + "/index.m3u8"
+	// Same trailing-slash contract as serveMasterPlaylist above.
+	variantKey := hlsPrefix + "/" + variant + "/index.m3u8"
 	body, err := h.R2.GetObject(ctx, variantKey, hlsVariantCap)
 	if err != nil {
 		if errors.Is(err, shared.ErrNotFound) {
