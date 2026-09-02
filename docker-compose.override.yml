@@ -1,0 +1,104 @@
+# =====================================================
+# docker-compose.override.yml - LOCAL-ONLY override
+# for Fase 10 issue #30 (integration smoke test).
+#
+# Auto-loaded by `docker compose up` so production
+# `docker-compose.yml` is NOT edited. To disable:
+#   docker compose --no-override-file up
+# or just delete this file.
+#
+# What this file changes vs production docker-compose.yml:
+#
+#  1. Attaches nginx + api-gateway to the `zitadel`
+#     network (an EXTERNAL network created by the
+#     sibling `zitadel-compose/` project). This is
+#     the cross-network bridge that lets nginx resolve
+#     the `zitadel-proxy` Traefik hostname.
+#
+#  2. Adds network aliases `auth.localhost` and
+#     `api.localhost` to the nginx container. Useful
+#     for in-Docker resolution from other services
+#     (e.g. Zitadel Actions V2 webhook calling back
+#     to api.localhost, or worker smoke using the
+#     same alias).
+#
+#  3. Mounts deploy/nginx/local.conf (HTTP-only,
+#     2-server-block config) at
+#     /etc/nginx/conf.d/default.conf, replacing the
+#     production TLS config. Cert volume mount is
+#     also removed since local.conf has no TLS.
+#
+#  4. Removes the host port 80 mapping from the
+#     Zitadel Traefik by NOT touching it - that
+#     mapping lives in zitadel-compose/docker-compose.yml
+#     (and gets remapped to host port 80 in
+#     zitadel-compose/.env). To prevent host port
+#     conflict with the MokiBox nginx, the test
+#     workflow is:
+#       - bring zitadel compose up first
+#       - bring MokiBox compose up (this file
+#         makes nginx the only host:80 entry)
+#     Host port 80 conflict is documented below.
+# =====================================================
+
+name: mokibox
+
+services:
+  # -------------------------------------------------
+  # nginx - attach to zitadel network + local-only
+  # config + network aliases for *.localhost
+  # -------------------------------------------------
+  nginx:
+    volumes:
+      # Replace the production default.conf with the
+      # local-only HTTP config. Same in-container path
+      # so the override is transparent.
+      - ./deploy/nginx/local.conf:/etc/nginx/conf.d/default.conf:ro
+      # Do NOT mount the certs directory - local.conf
+      # has no TLS. This also stops nginx from
+      # restart-looping on the missing production
+      # certs/ dir.
+    networks:
+      backend:
+        aliases:
+          - auth.localhost
+          - api.localhost
+      zitadel:
+        aliases:
+          - auth.localhost
+          - api.localhost
+
+  # -------------------------------------------------
+  # api-gateway - attach to zitadel network so it
+  # can resolve the Zitadel Traefik by hostname
+  # (used for any direct Zitadel API calls beyond
+  # what the JWT verifier needs; in practice the
+  # OIDC discovery is fetched once at boot so the
+  # network is only used for healthchecks + the
+  # first JWKS fetch).
+  # -------------------------------------------------
+  api-gateway:
+    networks:
+      backend: {}
+      zitadel: {}
+
+# =====================================================
+# Network declarations for the override.
+#
+# `backend` is the project-internal MokiBox network
+# (re-declared here so the override can attach to it
+# without redeclaring the whole top-level networks
+# block).
+#
+# `zitadel` is an EXTERNAL network created by the
+# sibling zitadel-compose/ project. We reference it
+# but do not own it; `docker compose up` here will
+# fail with a clear error if the Zitadel compose
+# has not been brought up first.
+# =====================================================
+networks:
+  backend:
+    name: mokibox_backend
+  zitadel:
+    name: zitadel
+    external: true
