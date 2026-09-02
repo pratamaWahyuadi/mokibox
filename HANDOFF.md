@@ -1,25 +1,60 @@
-# Handoff — Fase 9 → Fase 10
+# Handoff — Fase 10 (issue #30) → Fase 10 lanjutan
 
-State captured 2026-09-02 (post fase 9 PR #45, pre-merge).
+State captured 2026-09-03 (post PR #45 merged, fase-10 issue
+#30 branch feature/phase-10-integration-smoke).
 Regenerate per session via `git fetch && gh pr list && gh issue list --state open`.
 
 ## Latest
 
-- **PR #45 `feature/phase-9` OPEN** — 9 commit (7 original + 2 followup):
-  - `155b44c` phase-9.1: api-gateway main.go — slog + fail-fast verifier + 30s shutdown
-  - `d2dad34` phase-9.2: central HTTPErrorHandler as safety net + `shared.ClassifyError` exported
-  - `af9f94b` phase-9.3: rate limit middleware (per-user auth 60/min + per-IP webhook 30/min)
-  - `2073a09` phase-9.4: production Dockerfile (distroless) + compose context fix
-  - `3b6a438` phase-9.5: graceful shutdown phase visibility (slog per step)
-  - `049bf21` docs: [phase-9] handoff notes for fase 10
-  - `d743b92` docs: [phase-9] CONVENTIONS — docker build context + distroless notes
-  - `52d6763` phase-9.6: retry-with-backoff NewZitadelVerifier (60s budget)
-  - `9c4684c` phase-9.7: go-playground/validator wired + 4 c.Bind refactor
-- **15 file changes**, +1357/-194 (ground truth from `git diff --shortstat main..HEAD`).
-- **27 endpoints**: 25 JWT-protected `api.*` + 1 healthz + 1 webhook.
-- **No new routes** in fase 9 — issue 28 was wiring + production hardening,
-  not new features.
-- **Reviewer followup closed** (commit 8-9): cold-start race retry + LLD-mandated validator.
+- **PR #45 `feature/phase-9` MERGED** (`963cd7b`) — fase 9 production wiring complete.
+- **Branch `feature/phase-10-integration-smoke`** (issue #30 + 5 real bug fixes) — 7 commit:
+  - `6aa9dfd` phase-10.1: local *.localhost E2E environment (nginx local.conf
+    + docker-compose.override.yml + Zitadel denylist override)
+  - `2e78987` phase-10.2: **BUG FIX** NewZitadelVerifier issuer-URL parsing
+    (pre-existing sejak phase-3.1: URL dobel-scheme → OIDC discovery selalu gagal)
+  - `bde9372` phase-10.3: **BUG FIX** CheckToken Bearer prefix
+    (pre-existing: token tanpa prefix → ErrMissingToken → 401 untuk semua token valid)
+  - `b79fffd` phase-10.4: **BUG FIX** webhook dispatch aggregateID vs userID
+    (fase-8: admin-initiated deactivate men-tombstone user yang salah — fatal di production)
+  - `ace4279` phase-10.5: **BUG FIX** playlist handler path separator
+    (fase-6: key "videoID>master.m3u8" tanpa slash → playlist 404 permanen)
+  - `3ba993b` phase-10.6: **BUG FIX** playlist rewrite variant extraction + segment base
+    (fase-6: "variant=hls" untuk semua baris + trailing-slash check yang salah)
+  - phase-10.7: scripts/integration_test.sh + scripts/zitadel-override.example.yml
+- **Integration smoke: 15 PASS / 0 FAIL** (full user journey, live Zitadel).
+
+## Local E2E environment (issue #30, aktif di VPS ini)
+
+Cara menjalankan ulang oleh siapa pun:
+
+1. Zitadel stack (sibling `zitadel-compose/`, gitignored):
+   - `.env`: `ZITADEL_DOMAIN=auth.localhost`, `ZITADEL_EXTERNALPORT=80`,
+     `ZITADEL_EXTERNALSECURE=false`, `PROXY_HTTP_PUBLISHED_PORT=8081`.
+   - `docker-compose.override.yml` (copy dari
+     `scripts/zitadel-override.example.yml`): narrows
+     `ZITADEL_HTTPCLIENT_DENYLIST` supaya Actions V2 webhook bisa
+     menjangkau 172.16.0.0/12 (Docker bridge).
+   - `docker compose up -d` (first-init membuat instance fresh; admin
+     default: `zitadel-admin@zitadel.auth.localhost` / `Password1!`).
+2. MokiBox compose: `docker compose up -d` (docker-compose.override.yml
+   auto-load: nginx local.conf + cross-network attach + aliases
+   auth.localhost/api.localhost).
+3. Zitadel provisioning (sekali): Project `MokiBox` + Web app
+   (`mokibox_web`, redirect `http://api.localhost/callback`, BASIC auth +
+   generate secret) + API app (`api_app`); set `accessTokenType=1` (JWT)
+   via `PUT /management/v1/projects/{pid}/apps/{aid}/oidc_config`
+   `{"clientId":"...","authMethodType":1,"accessTokenType":1}`; 2 human
+   users test1/test2 + set password via
+   `POST /management/v1/users/{id}/password`; Actions V2 target
+   `http://api.localhost/api/webhooks/zitadel` + executions
+   (user.deactivated, user.removed). Semua ID/secret/signing key → `.env`.
+4. `bash scripts/integration_test.sh` — 15 assertions, exit 0 = all pass.
+
+Catatan headless login (password grant TIDAK didukung Zitadel):
+authorize → session v2 (login-client PAT + user password) →
+`POST /v2/oidc/auth_requests/{id}` (Bearer login-client PAT) →
+code → token (client_secret_basic). Fungsi `headless_login()` di
+integration_test.sh adalah referensi implementasinya.
 
 ## Merged (state of main)
 
