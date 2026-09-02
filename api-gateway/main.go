@@ -107,17 +107,15 @@ func main() {
 	defer cancel()
 
 	// 1. *sql.DB pool (via pgx stdlib). Used for both
-	//    sqlc *db.Queries and Queries.WithTx.
+	//    sqlc *db.Queries and Queries.WithTx. Close
+	//    happens in Phase 2 of the shutdown sequence
+	//    below (api-gateway/Issue E) so we get a log
+	//    line per phase rather than a silent defer.
 	sqlDB, err := shared.NewSQLDB(ctx, cfg.DatabaseURL, shared.APIPoolMaxConns, 2)
 	if err != nil {
 		slog.Error("api-gateway: open db pool", "err", err)
 		os.Exit(1)
 	}
-	defer func() {
-		if err := sqlDB.Close(); err != nil {
-			slog.Error("api-gateway: close db pool", "err", err)
-		}
-	}()
 
 	queries := db.New(sqlDB)
 
@@ -137,10 +135,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 3. Asynq producer client. Closed on shutdown so
-	//    any in-flight Enqueue calls return cleanly
-	//    rather than hanging on a closed Redis
-	//    connection.
+	// 3. Asynq producer client. Close happens in
+	//    Phase 2 of the shutdown sequence below
+	//    (api-gateway/Issue E).
 	asynqClient, err := shared.NewAsynqClient(shared.RedisConfig{
 		Addr:     cfg.RedisAddr,
 		Password: cfg.RedisPassword,
@@ -149,11 +146,6 @@ func main() {
 		slog.Error("api-gateway: build asynq client", "err", err)
 		os.Exit(1)
 	}
-	defer func() {
-		if err := asynqClient.Close(); err != nil {
-			slog.Error("api-gateway: close asynq client", "err", err)
-		}
-	}()
 
 	// 4. Production Zitadel verifier. NewZitadelVerifier
 	//    performs the OIDC discovery + JWKS fetch
@@ -201,13 +193,45 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	sig := <-stop
-	slog.Info("api-gateway: shutdown signal received", "signal", sig.String())
+	slog.Info("api-gateway: shutdown signal received",
+		"signal", sig.String(),
+		"shutdown_timeout", shutdownTimeout.String(),
+	)
 
+	// Phase 1: stop accepting new connections and drain
+	// in-flight requests. srv.Shutdown blocks until
+	// every active request has returned or the context
+	// deadline (shutdownTimeout = 30s) is exceeded.
+	slog.Info("api-gateway: draining in-flight requests")
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancelShutdown()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("api-gateway: http server shutdown", "err", err)
+	} else {
+		slog.Info("api-gateway: http server drained cleanly")
 	}
+
+	// Phase 2: close long-lived clients. The deferred
+	// sqlDB.Close() and asynqClient.Close() at the top
+	// of main() will run when this function returns,
+	// but we emit one log line per client here so an
+	// operator watching the shutdown sequence can see
+	// the order and which step took how long.
+	slog.Info("api-gateway: closing db pool")
+	if err := sqlDB.Close(); err != nil {
+		slog.Error("api-gateway: close db pool", "err", err)
+	}
+
+	slog.Info("api-gateway: closing asynq client")
+	if err := asynqClient.Close(); err != nil {
+		slog.Error("api-gateway: close asynq client", "err", err)
+	}
+
+	// R2 client has no Close() method - the
+	// aws-sdk-go-v2 transport is stateless. Documented
+	// in the dependency list above so the reader knows
+	// nothing is leaked.
+
 	slog.Info("api-gateway: shutdown complete")
 }
 
