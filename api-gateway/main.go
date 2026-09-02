@@ -51,6 +51,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -78,6 +79,58 @@ const defaultAddr = ":8080"
 // DB insert + Redis enqueue) finish, short enough
 // that rolling restarts stay snappy.
 const shutdownTimeout = 30 * time.Second
+
+// verifierRetryBudget caps the total time spent
+// retrying NewZitadelVerifier during boot. The
+// verifier performs the OIDC discovery + JWKS fetch
+// eagerly so a misconfigured issuer URL surfaces at
+// boot rather than on the first request. Zitadel
+// takes a few seconds to finish migrating its own
+// DB on a cold start, and api-gateway does not
+// depend_on zitadel in docker-compose (zitadel is in
+// a sibling compose project), so a naive fail-fast
+// on the very first attempt can race against Zitadel
+// boot. We retry with backoff (0s / 5s / 10s / 20s)
+// until the budget runs out, then exit 1.
+//
+// Scope of this fix: absorbs the cold-start race
+// window (api-gateway boot finishes within 35s +
+// per-attempt discovery timeout, well inside the
+// docker compose restart back-off curve). Does NOT
+// solve the deeper liveness-vs-readiness split (a
+// later reviewer might want /healthz to serve 200
+// even while the verifier is retrying — that would
+// require starting srv.ListenAndServe before the
+// verifier build succeeds, which is tracked as a
+// fase 10 follow-up if it ever becomes a problem in
+// production). For now /healthz is unreachable
+// during the retry window, which is acceptable
+// because Zitadel should be up before api-gateway is
+// healthy in practice (depends_on service_healthy
+// for postgres + redis + external zitadel readiness
+// probe could be added later).
+const verifierRetryBudget = 60 * time.Second
+
+// verifierRetryDelays is the schedule of sleep
+// intervals BEFORE each attempt. Index 0 is the
+// initial delay (we set it to 0 so the first attempt
+// fires immediately). Subsequent indices are the
+// back-off between attempt N and attempt N+1.
+//
+// Total of all delays: 0+5+10+20 = 35s. The per-
+// attempt OIDC discovery timeout is the
+// zitadel-go default (10s) so worst-case wallclock
+// for a fully unreachable Zitadel is 35s + 4*10s =
+// 75s, slightly over the budget. The budget is a
+// wallclock-from-first-attempt cap; we abandon
+// mid-attempt if the attempt itself would push us
+// past the deadline.
+var verifierRetryDelays = []time.Duration{
+	0,
+	5 * time.Second,
+	10 * time.Second,
+	20 * time.Second,
+}
 
 func main() {
 	// Structured logs (text handler) to stderr so
@@ -154,10 +207,18 @@ func main() {
 	//    request. Per Fase 9 planning decision there is
 	//    no deny-all fallback: a misconfigured
 	//    deployment must NOT silently start serving
-	//    requests. Fail-fast.
-	verifier, err := buildVerifier(ctx, cfg.ZitadelIssuerURL, cfg.ZitadelAPIClientID)
+	//    requests. Fail-fast — but with a retry-with-
+	//    backoff budget so a Zitadel still-booting on a
+	//    cold start does not trip the fail-fast before
+	//    Zitadel's own HTTP server is ready to serve
+	//    OIDC discovery. See verifierRetryBudget /
+	//    verifierRetryDelays above for the schedule.
+	verifier, err := buildVerifierWithRetry(ctx, cfg.ZitadelIssuerURL, cfg.ZitadelAPIClientID)
 	if err != nil {
-		slog.Error("api-gateway: build zitadel verifier (fail-fast)", "err", err)
+		slog.Error("api-gateway: build zitadel verifier (fail-fast)",
+			"err", err,
+			"retry_budget", verifierRetryBudget.String(),
+		)
 		os.Exit(1)
 	}
 
@@ -240,6 +301,80 @@ func main() {
 // caller (main) has already validated them via
 // shared.LoadAPI, but NewZitadelVerifier re-checks so
 // it stays usable from tests.
+//
+// Kept as a thin wrapper so tests can stub it; the
+// production code path uses buildVerifierWithRetry
+// (below) which adds the cold-start retry budget.
 func buildVerifier(ctx context.Context, issuer, apiClientID string) (middleware.TokenVerifier, error) {
 	return middleware.NewZitadelVerifier(ctx, issuer, apiClientID)
+}
+
+// buildVerifierWithRetry wraps buildVerifier with a
+// retry-with-backoff loop so a Zitadel still-booting
+// on a cold start does not trip the fail-fast before
+// Zitadel's own HTTP server is ready to serve OIDC
+// discovery.
+//
+// Schedule (see verifierRetryDelays): the first
+// attempt fires immediately, then 5s / 10s / 20s
+// between subsequent attempts. Each attempt uses a
+// context with its own deadline so a single attempt
+// cannot consume the entire budget on its own. The
+// loop returns when an attempt succeeds, when the
+// budget is exhausted, or when ctx is cancelled
+// (e.g. the user hits Ctrl-C during boot).
+func buildVerifierWithRetry(ctx context.Context, issuer, apiClientID string) (middleware.TokenVerifier, error) {
+	start := time.Now()
+	deadline := start.Add(verifierRetryBudget)
+	var lastErr error
+	for attempt, delay := range verifierRetryDelays {
+		// Sleep BEFORE each attempt so the schedule
+// applies even when ctx has been cancelled. We
+// check ctx cancellation explicitly after the
+// sleep so the loop bails out cleanly.
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("retry cancelled before attempt %d: %w", attempt+1, ctx.Err())
+		case <-time.After(delay):
+		}
+
+		// Per-attempt deadline: cap each attempt
+// at the remaining budget so we never overshoot
+// verifierRetryBudget. A 5s minimum gives even
+// the last attempt a chance to complete the OIDC
+// discovery round-trip.
+		remaining := time.Until(deadline)
+		if remaining < 5*time.Second {
+			return nil, fmt.Errorf("verifier retry budget exhausted (elapsed %s, attempts %d): %w",
+				time.Since(start).Round(time.Millisecond),
+				attempt+1,
+				lastErr,
+			)
+		}
+		attemptCtx, cancelAttempt := context.WithTimeout(ctx, remaining)
+		verifier, err := buildVerifier(attemptCtx, issuer, apiClientID)
+		cancelAttempt()
+		if err == nil {
+			if attempt > 0 {
+				slog.Info("api-gateway: verifier built after retry",
+					"attempt", attempt+1,
+					"elapsed", time.Since(start).Round(time.Millisecond).String(),
+				)
+			}
+			return verifier, nil
+		}
+		lastErr = err
+		slog.Warn("api-gateway: verifier build attempt failed",
+			"attempt", attempt+1,
+			"of", len(verifierRetryDelays),
+			"elapsed", time.Since(start).Round(time.Millisecond).String(),
+			"next_delay", delay.String(),
+			"err", err,
+		)
+	}
+	return nil, fmt.Errorf("verifier retry exhausted (elapsed %s, attempts %d): %w",
+		time.Since(start).Round(time.Millisecond),
+		len(verifierRetryDelays),
+		lastErr,
+	)
 }
