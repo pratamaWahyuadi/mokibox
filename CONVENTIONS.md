@@ -74,7 +74,70 @@ This split is a design decision documented in fase 6 PR #40 Deviations.
 - Inline the check in each handler (verbose but explicit), OR
 - Extract a private helper like `h.assertCanSeeVideo(ctx, viewerID, videoID) error` that returns the appropriate sentinel error or nil. Used by `user_follow.go:assertCanSeeFollowList` for the follow-list case in fase 6.
 
-Pick ONE and stay consistent across handlers. Mixing both styles is hard to read.
+- Pick ONE and stay consistent across handlers. Mixing both styles is hard to read.
+
+### Docker build context for multi-service Go module (single `go.mod` at repo root)
+
+MokiBox is a single Go module rooted at the repo root (`go.mod` is at
+`./go.mod`, not `./api-gateway/go.mod`). Every service binary
+(`./api-gateway`, `./transcoder-worker`) is a subdirectory of the module
+and is built as `./<subdir>` from the repo-root context. Every
+service's Dockerfile therefore MUST have:
+
+```yaml
+build:
+  context: .                          # repo root, NOT ./api-gateway
+  dockerfile: api-gateway/Dockerfile   # path relative to context
+```
+
+Setting `context: ./api-gateway` (or `./transcoder-worker`) breaks the
+build with:
+
+```
+ERROR: failed to calculate checksum of ref ... "/go.sum": not found
+```
+
+because the subdir does not have its own `go.sum` — the module is at
+the parent. The api-gateway stub Dockerfile (fase 0-8, `echo 'binary
+not yet built' && sleep 3600`) accidentally worked with
+`context: ./api-gateway` because the stub did not need `go.mod` /
+`go.sum`. Fase 9 replaced that stub with a real multi-stage build;
+the compose `context:` had to be updated in the same commit or the
+build fails immediately.
+
+Whenever you add a new service that needs Go build context from the
+repo root, set `context: .` + relative `dockerfile:` path. Reference:
+transcoder-worker was already on this pattern in fase 5; api-gateway
+joined in fase 9 (PR #45 commit `2073a09`).
+
+### Distroless runtime image: no shell, no package manager
+
+Fase 9 (PR #45 commit `2073a09`) moved `mokibox-api-gateway` to
+`gcr.io/distroless/static-debian12:nonroot`. The image is intentionally
+minimal:
+
+  - No shell (`docker exec ... sh` returns "executable file not found")
+  - No package manager (`apk`, `apt` not available)
+  - No glibc (binary must be `CGO_ENABLED=0`)
+  - Non-root user only (UID 65532)
+
+Practical consequences:
+
+  - **Cannot `docker exec` for live debugging.** Container is opaque
+    from outside; you can only read logs + inspect the process list.
+    For deep debugging build a debug variant image
+    (`FROM golang:1.25.5-alpine` + `apk add ...` + `gosu`) or use
+    `docker debug` if Docker version supports it.
+  - **Binary must be statically linked.** `CGO_ENABLED=0` in the
+    builder stage. `go build` without CGO is fine for our deps
+    (Echo, pgx stdlib, asynq, etc.).
+  - **SIGTERM hits PID 1 directly** because there is no shell wrapper.
+    This is what makes the 30s graceful shutdown wired in
+    `api-gateway/main.go` actually fire.
+
+Reference: `api-gateway/Dockerfile` (fase 9) and
+`mokibox-go-shared` SKILL.md "Docker build context untuk multi-package
+Go module" section.
 
 ## Anti-Patterns (Project-Specific)
 
