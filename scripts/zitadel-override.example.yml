@@ -1,0 +1,33 @@
+# =====================================================
+# Example copy of the LOCAL-ONLY docker-compose override
+# for the sibling zitadel-compose/ project (Fase 10,
+# issue #30). zitadel-compose/ itself is gitignored in
+# the MokiBox repo, so this example is kept here so the
+# setup is reproducible without asking anyone.
+#
+# To use: copy this file to
+#   ../zitadel-compose/docker-compose.override.yml
+# (next to the zitadel docker-compose.yml) and restart:
+#   cd ../zitadel-compose && docker compose up -d
+#
+# What it changes: Zitadel's HTTPClient.DenyList is an
+# SSRF guard for Actions V2 targets. By default it blocks
+# all private CIDRs (10/8, 172.16/12, 192.168/16, 127/8,
+# ...). The MokiBox webhook target
+# (http://api.localhost/api/webhooks/zitadel) resolves
+# inside the Docker network to a 172.16.0.0/12 address,
+# so the default deny-list rejects it with
+# "Errors.Target.DeniedURL ... address is denied by
+# '172.16.0.0/12'". This LOCAL override narrows the list
+# to loopback/link-local/metadata ranges only, allowing
+# the Docker bridge networks.
+#
+# DO NOT use in production: the default deny-list exists
+# to stop Actions V2 targets from reaching internal
+# infrastructure (SSRF protection).
+# =====================================================
+
+services:
+  zitadel-api:
+    environment:
+      ZITADEL_HTTPCLIENT_DENYLIST: "localhost,127.0.0.0/8,169.254.0.0/16,::1/128,fe80::/10"
