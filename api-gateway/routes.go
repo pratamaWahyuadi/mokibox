@@ -49,8 +49,10 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/labstack/echo/v4"
+	"golang.org/x/time/rate"
 
 	"github.com/hibiken/asynq"
 
@@ -125,15 +127,41 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	// commit can insert the middleware without touching
 	// this file.
 	wh := handlers.NewWebhookHandler(d.Queries, d.DB, d.Queue, d.WebhookSigningKey)
-	e.POST("/api/webhooks/zitadel", wh.Handle)
+	webhookRateLimit, err := middleware.NewRateLimitWebhook(middleware.RateLimitConfig{
+		Rate:          rate.Limit(0.5), // 30 per minute
+		Burst:         30,
+		TTL:           10 * time.Minute,
+		SweepInterval: 5 * time.Minute,
+	})
+	if err != nil {
+		panic(fmt.Sprintf("api-gateway: NewRateLimitWebhook: %v", err))
+	}
+	e.POST("/api/webhooks/zitadel", wh.Handle, webhookRateLimit)
 
 	// Authenticated API group. Everything under /api/*
 	// (except the webhook) requires a valid Zitadel JWT
 	// and resolves to a *db.User on the Echo context.
-	api := e.Group("/api", middleware.Authenticate(middleware.AuthenticateConfig{
-		Verifier: d.AuthVerifier,
-		Queries:  d.Queries,
-	}))
+	// A per-user rate limit (60/min, burst 60) is applied
+	// AFTER Authenticate so the user id is available on
+	// the context; auth-failure paths short-circuit before
+	// the rate limit runs (an attacker cannot exhaust a
+	// victim's bucket via invalid tokens).
+	authRateLimit, err := middleware.NewRateLimitAuth(middleware.RateLimitConfig{
+		Rate:          rate.Limit(1), // 60 per minute
+		Burst:         60,
+		TTL:           10 * time.Minute,
+		SweepInterval: 5 * time.Minute,
+	})
+	if err != nil {
+		panic(fmt.Sprintf("api-gateway: NewRateLimitAuth: %v", err))
+	}
+	api := e.Group("/api",
+		middleware.Authenticate(middleware.AuthenticateConfig{
+			Verifier: d.AuthVerifier,
+			Queries:  d.Queries,
+		}),
+		authRateLimit,
+	)
 
 	uh := handlers.NewUserHandler(d.Queries, d.R2, d.Queue, d.Cfg)
 	api.GET("/users/me", uh.GetMe)
