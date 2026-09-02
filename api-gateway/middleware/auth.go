@@ -32,6 +32,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
+	"strconv"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -293,13 +295,69 @@ func NewZitadelVerifier(ctx context.Context, issuerURL, apiClientID string) (Tok
 	if apiClientID == "" {
 		return nil, errors.New("NewZitadelVerifier: apiClientID is empty")
 	}
+	z, err := zitadelFromIssuerURL(issuerURL)
+	if err != nil {
+		return nil, err
+	}
 	authZ, err := authorization.New(
 		ctx,
-		zitadel.New(issuerURL),
+		z,
 		oauth.DefaultJWTAuthorization(apiClientID),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("zitadel authorization.New: %w", err)
 	}
 	return &zitadelTokenVerifier{authZ: authZ}, nil
+}
+
+// zitadelFromIssuerURL translates a full issuer URL
+// (e.g. "http://auth.localhost" or "https://auth.example.com")
+// into the zitadel.New arguments the SDK expects.
+//
+// The SDK's zitadel.New() takes a DOMAIN, not a URL:
+// passing the full URL makes it build a broken origin
+// ("https://http//host/...") that never resolves. This
+// pre-existing bug (since phase-3.1) was masked because
+// every previous smoke used a deny-all stub verifier and
+// the production issuer was always HTTPS-with-default-port
+// where the wrong domain string only failed at runtime.
+// The Fase 10 integration smoke (issue #30) is the first
+// run against an HTTP issuer, exposing the bug as a
+// crash-loop at startup.
+//
+// Mapping rules (must keep Origin() == issuerURL so the
+// JWT iss-claim check passes):
+//
+//   - http scheme  -> WithInsecure(port). Port "" becomes
+//     "80" so buildOrigin omits the explicit :80.
+//   - https scheme -> default TLS (port 443). WithPort is
+//     only applied when a non-default port is present.
+func zitadelFromIssuerURL(issuerURL string) (*zitadel.Zitadel, error) {
+	u, err := url.Parse(issuerURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse issuer url: %w", err)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return nil, fmt.Errorf("invalid issuer url %q: empty host", issuerURL)
+	}
+	port := u.Port()
+	switch u.Scheme {
+	case "http":
+		if port == "" {
+			port = "80"
+		}
+		return zitadel.New(host, zitadel.WithInsecure(port)), nil
+	case "https":
+		if port == "" || port == "443" {
+			return zitadel.New(host), nil
+		}
+		p, err := strconv.ParseUint(port, 10, 16)
+		if err != nil {
+			return nil, fmt.Errorf("invalid issuer port %q: %w", port, err)
+		}
+		return zitadel.New(host, zitadel.WithPort(uint16(p))), nil
+	default:
+		return nil, fmt.Errorf("unsupported issuer url scheme %q (want http or https): %s", u.Scheme, issuerURL)
+	}
 }
