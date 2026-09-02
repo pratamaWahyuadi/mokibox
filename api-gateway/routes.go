@@ -113,6 +113,16 @@ func NewRouter(d RouterDeps) *echo.Echo {
 // slips past that path.
 	e.HTTPErrorHandler = HTTPErrorHandler
 
+	// Request body validator. Per LLD section 12
+// (Fase 9), wire go-playground/validator/v10 as the
+// Echo validator. Handlers that take a JSON body
+// call c.Validate(&req) after c.Bind(&req); failures
+// are translated by RequestValidator into the
+// canonical shared.APIError{CodeValidationError,
+// Details:[]FieldError} envelope. See
+// request_validator.go for the translation rules.
+	e.Validator = NewRequestValidator()
+
 	// Health probe (no auth, no auth middleware). Kept
 	// trivial so the orchestrator's docker healthcheck
 	// can hit it cheaply.
