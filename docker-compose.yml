@@ -91,9 +91,17 @@ services:
   # the separate zitadel-compose project.
   # -------------------------------------------------
   api-gateway:
+    # Build context MUST be the repo root (.) not
+    # ./api-gateway: the Dockerfile copies go.mod /
+    # go.sum from the context root and the binary
+    # imports the shared/ package at
+    # github.com/pratamaWahyuadi/mokibox/shared.
+    # See mokibox-go-shared SKILL.md "Docker build
+    # context untuk multi-package Go module" for the
+    # full pitfall description and symptom.
     build:
-      context: ./api-gateway
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: api-gateway/Dockerfile
     image: mokibox-api-gateway:dev
     container_name: mokibox-api-gateway
     restart: unless-stopped
