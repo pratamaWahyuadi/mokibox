@@ -102,6 +102,15 @@ type RouterDeps struct {
 func NewRouter(d RouterDeps) *echo.Echo {
 	e := echo.New()
 
+	// Central HTTPErrorHandler safety net for Echo
+// framework errors (404, 405, body-bind failure)
+// and any error that reaches Echo without going
+// through shared.RespondError. See error_handler.go
+// for the full contract. Phase 3-8 handlers continue
+// to use shared.RespondError; this only catches what
+// slips past that path.
+	e.HTTPErrorHandler = HTTPErrorHandler
+
 	// Health probe (no auth, no auth middleware). Kept
 	// trivial so the orchestrator's docker healthcheck
 	// can hit it cheaply.
