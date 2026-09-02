@@ -270,8 +270,19 @@ type zitadelTokenVerifier struct {
 // Zitadel subject (the `sub` claim). An empty subject
 // together with a non-nil error is treated by the
 // middleware as 401.
+//
+// rawToken arrives WITHOUT the "Bearer " prefix (the
+// middleware's extractBearer strips it), but zitadel-go's
+// Authorizer.CheckAuthorization expects the full header
+// value including the prefix: its internal
+// checkForEmptyorMalformedToken does CutPrefix(t, "Bearer ")
+// and returns ErrMissingToken when the prefix is absent -
+// which would 401 every valid token. Re-attach the prefix
+// before delegating. (Pre-existing bug since phase-3.1,
+// exposed by the Fase 10 integration smoke; see the
+// phase-10.3 commit for the full write-up.)
 func (v *zitadelTokenVerifier) CheckToken(ctx context.Context, rawToken string) (string, error) {
-	authCtx, err := v.authZ.CheckAuthorization(ctx, rawToken)
+	authCtx, err := v.authZ.CheckAuthorization(ctx, "Bearer "+rawToken)
 	if err != nil {
 		return "", err
 	}
