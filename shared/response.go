@@ -84,7 +84,7 @@ func RespondNoContent(c echo.Context) error {
 //     original error is logged but never sent to the
 //     client.
 func RespondError(c echo.Context, err error) error {
-	status, code, message, details := classifyError(err)
+	status, code, message, details := ClassifyError(err)
 	// Log the original error (or the APIError's cause)
 	// before it is collapsed. The response below may be
 	// a generic "internal server error" so the log is
@@ -126,11 +126,18 @@ type errorBody struct {
 	Details []FieldError `json:"details,omitempty"`
 }
 
-// classifyError is the single point that translates an
+// ClassifyError is the single point that translates an
 // arbitrary error into the (status, code, message, details)
-// tuple used by RespondError. It is unexported because
-// callers must always go through RespondError.
-func classifyError(err error) (int, ErrorCode, string, []FieldError) {
+// tuple used by RespondError. It is exported so the
+// api-gateway HTTPErrorHandler can reuse the same mapping
+// when it has to handle errors that did NOT go through
+// RespondError (e.g. Echo framework errors like 404 /
+// method-not-allowed / body-bind failures).
+//
+// Handlers should still go through RespondError so the
+// envelope is written once; HTTPErrorHandler is the
+// safety net for everything else.
+func ClassifyError(err error) (int, ErrorCode, string, []FieldError) {
 	if err == nil {
 		return http.StatusInternalServerError, CodeInternalError, "internal server error", nil
 	}

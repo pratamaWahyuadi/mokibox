@@ -129,10 +129,18 @@ func (h *UserHandler) GetMe(c echo.Context) error {
 // updateMeRequest is the body of PUT /api/users/me.
 // All fields are optional. Per API contract, `username`
 // is intentionally absent - it is immutable.
+//
+// Length bounds (display_name max 100, bio max 500,
+// avatar_url max 500) are pragmatic ceilings for the
+// single-VPS deployment. Phase 10 issue #31 (security
+// hardening) may revisit these against the API
+// contract if stricter values are needed; the
+// validator/v10 tag-based approach means adjusting
+// limits is a one-line struct field change.
 type updateMeRequest struct {
-	DisplayName *string `json:"display_name"`
-	Bio         *string `json:"bio"`
-	AvatarURL   *string `json:"avatar_url"`
+	DisplayName *string `json:"display_name" validate:"omitempty,max=100"`
+	Bio         *string `json:"bio"          validate:"omitempty,max=500"`
+	AvatarURL   *string `json:"avatar_url"   validate:"omitempty,url,max=500"`
 	IsPrivate   *bool   `json:"is_private"`
 }
 
@@ -141,10 +149,10 @@ type updateMeRequest struct {
 // are skipped by the query (it uses sqlc.narg / COALESCE
 // internally) so partial updates are supported.
 //
-// Field length validation is deliberately minimal in
-// phase 3 - the spec calls for "all optional" with no
-// upper bound. Phase 10 will revisit if a stricter
-// validator is added.
+// Field length validation is delegated to
+// validator/v10 via the struct tags on
+// updateMeRequest. The handler stays focused on
+// mapping validated fields to the sqlc query.
 func (h *UserHandler) UpdateMe(c echo.Context) error {
 	user, ok := middleware.UserFromContext(c)
 	if !ok || user == nil {
@@ -154,6 +162,9 @@ func (h *UserHandler) UpdateMe(c echo.Context) error {
 	var req updateMeRequest
 	if err := c.Bind(&req); err != nil {
 		return shared.RespondError(c, shared.Wrap(shared.ErrValidation, "invalid JSON body"))
+	}
+	if err := c.Validate(&req); err != nil {
+		return shared.RespondError(c, err)
 	}
 
 	updated, err := h.Queries.UpdateUserProfile(c.Request().Context(), db.UpdateUserProfileParams{

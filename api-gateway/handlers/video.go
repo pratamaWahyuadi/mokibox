@@ -108,8 +108,8 @@ func NewVideoHandler(queries *db.Queries, dbHandle *sql.DB, r2 *shared.R2Client,
 // characters - we are conservative here and accept
 // either nil or empty string).
 type uploadIntentRequest struct {
-	Title       *string `json:"title"`
-	Description *string `json:"description"`
+	Title       *string `json:"title" validate:"required,max=200"`
+	Description *string `json:"description" validate:"omitempty,max=5000"`
 }
 
 // uploadIntentResponse is the on-the-wire shape of
@@ -157,20 +157,27 @@ func (h *VideoHandler) UploadIntent(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return shared.RespondError(c, shared.Wrap(shared.ErrValidation, "invalid JSON body"))
 	}
-
-	title, titleOK := normaliseOptional(req.Title)
-	if !titleOK {
+	// c.Validate runs the validator/v10 struct tag
+// rules declared on uploadIntentRequest. On
+// failure it returns *shared.APIError already
+// translated to the canonical envelope shape, so
+// shared.RespondError can serialise it directly.
+	if err := c.Validate(&req); err != nil {
+		return shared.RespondError(c, err)
+	}
+	title := strings.TrimSpace(*req.Title)
+	if title == "" {
+		// Belt-and-braces: validator 'required'
+// passes when Title is a non-nil pointer to
+// "", but a whitespace-only title is also not
+// what the contract means by "title is
+// required". Reject explicitly.
 		return shared.RespondError(c, shared.NewAPIError(shared.CodeValidationError, "title is required").
 			WithDetails(shared.FieldError{Field: "title", Message: "must be between 1 and 200 characters"}))
 	}
-	if len(title) > 200 {
-		return shared.RespondError(c, shared.NewAPIError(shared.CodeValidationError, "title too long").
-			WithDetails(shared.FieldError{Field: "title", Message: "must be between 1 and 200 characters"}))
-	}
-	desc, _ := normaliseOptional(req.Description)
-	if len(desc) > 5000 {
-		return shared.RespondError(c, shared.NewAPIError(shared.CodeValidationError, "description too long").
-			WithDetails(shared.FieldError{Field: "description", Message: "must be at most 5000 characters"}))
+	desc := ""
+	if req.Description != nil {
+		desc = strings.TrimSpace(*req.Description)
 	}
 
 	ctx := c.Request().Context()
@@ -286,21 +293,6 @@ func (h *VideoHandler) UploadIntent(c echo.Context) error {
 	return shared.RespondOK(c, resp)
 }
 
-// normaliseOptional trims whitespace from an optional
-// string field and reports whether a non-empty value
-// is present. The contract says title is required and
-// description is optional; we treat "missing" and
-// "empty after trim" identically so a whitespace-only
-// title is rejected with the same validation error as
-// a missing one.
-func normaliseOptional(p *string) (string, bool) {
-	if p == nil {
-		return "", false
-	}
-	s := strings.TrimSpace(*p)
-	return s, s != ""
-}
-
 // uploadKey is the canonical R2 key for the raw upload
 // of a given video. Path layout matches LLD_PLAN
 // section 7 and the API contract example exactly:
@@ -311,9 +303,12 @@ func uploadKey(userID, videoID uuid.UUID) string {
 
 // confirmRequest is the body of POST /api/videos/confirm.
 // video_id and r2_key are both required and non-empty.
+// The validate tags delegate bounds checking to the
+// go-playground/validator/v10 instance installed in
+// NewRouter (see request_validator.go).
 type confirmRequest struct {
-	VideoID *string `json:"video_id"`
-	R2Key   *string `json:"r2_key"`
+	VideoID *string `json:"video_id" validate:"required,uuid"`
+	R2Key   *string `json:"r2_key"   validate:"required,min=1"`
 }
 
 // confirmResponse is the on-the-wire shape of confirm's
@@ -367,18 +362,22 @@ func (h *VideoHandler) ConfirmUpload(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return shared.RespondError(c, shared.Wrap(shared.ErrValidation, "invalid JSON body"))
 	}
-	if req.VideoID == nil || strings.TrimSpace(*req.VideoID) == "" {
-		return shared.RespondError(c, shared.NewAPIError(shared.CodeValidationError, "video_id is required").
-			WithDetails(shared.FieldError{Field: "video_id", Message: "must be a non-empty UUID"}))
+	// Struct-tag validation via validator/v10.
+	// `required` covers the nil-pointer case,
+	// `uuid` covers the parse-failure case, and
+	// `min=1` covers the empty-string case.
+	if err := c.Validate(&req); err != nil {
+		return shared.RespondError(c, err)
 	}
 	videoID, err := uuid.Parse(*req.VideoID)
 	if err != nil {
+		// Defence in depth: validator's `uuid` tag
+		// should already have caught this. If it
+		// did not (e.g. validator version mismatch)
+// we still fail safely rather than passing a
+// malformed UUID down the stack.
 		return shared.RespondError(c, shared.NewAPIError(shared.CodeValidationError, "invalid video_id").
 			WithDetails(shared.FieldError{Field: "video_id", Message: "must be a valid UUID"}))
-	}
-	if req.R2Key == nil || strings.TrimSpace(*req.R2Key) == "" {
-		return shared.RespondError(c, shared.NewAPIError(shared.CodeValidationError, "r2_key is required").
-			WithDetails(shared.FieldError{Field: "r2_key", Message: "must be a non-empty string"}))
 	}
 	bodyR2Key := strings.TrimSpace(*req.R2Key)
 

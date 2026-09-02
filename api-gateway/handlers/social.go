@@ -370,28 +370,36 @@ type CommentObject struct {
 
 // commentRequestBody is the JSON body accepted by
 // CreateComment and ReplyComment: {"content": "..."}.
+// The validate tag enforces 1..commentContentMax
+// characters before the trim, which means a body of
+// 1000 spaces would pass — we still TrimSpace in
+// bindCommentContent and reject whitespace-only
+// results as belt-and-braces.
 type commentRequestBody struct {
-	Content string `json:"content"`
+	Content string `json:"content" validate:"required,min=1,max=1000"`
 }
 
 // bindCommentContent decodes and validates the
 // {content} body: 1..commentContentMax visible
-// characters after trimming whitespace. Failures map
-// to 400 VALIDATION_ERROR with a field detail.
+// characters after trimming whitespace. The
+// required/length checks delegate to validator/v10
+// via the struct tag on commentRequestBody; this
+// helper only adds the post-trim whitespace check
+// (validator's `required` does not see through a
+// whitespace-only value).
 func bindCommentContent(c echo.Context) (string, error) {
 	var body commentRequestBody
 	if err := c.Bind(&body); err != nil {
 		return "", shared.NewAPIError(shared.CodeValidationError, "invalid JSON body").
 			WithDetails(shared.FieldError{Field: "content", Message: "body must be JSON"})
 	}
+	if err := c.Validate(&body); err != nil {
+		return "", err
+	}
 	content := strings.TrimSpace(body.Content)
 	if content == "" {
 		return "", shared.NewAPIError(shared.CodeValidationError, "content is required").
-			WithDetails(shared.FieldError{Field: "content", Message: "must be 1-1000 characters"})
-	}
-	if len([]rune(content)) > commentContentMax {
-		return "", shared.NewAPIError(shared.CodeValidationError, "content too long").
-			WithDetails(shared.FieldError{Field: "content", Message: fmt.Sprintf("must be at most %d characters", commentContentMax)})
+			WithDetails(shared.FieldError{Field: "content", Message: "must be 1-1000 non-whitespace characters"})
 	}
 	return content, nil
 }

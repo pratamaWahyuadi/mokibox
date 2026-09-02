@@ -1,55 +1,138 @@
-# Handoff — Fase 8 → Fase 9
+# Handoff — Fase 9 → Fase 10
 
-State captured 2026-09-02 (post fase 8, pre-merge PR #43). Regenerate per session via `git fetch && gh pr list && gh issue list --state open`.
+State captured 2026-09-02 (post fase 9 PR #45, pre-merge).
+Regenerate per session via `git fetch && gh pr list && gh issue list --state open`.
 
 ## Latest
 
-- **PR #43 `feature/phase-8` OPEN** (menunggu review/merge) — 2 commit:
-  - `b9eebce` phase-8.1: DELETE /api/users/me + DeleteUserData tx + user.removed webhook wiring — `AccountHandler` baru di `api-gateway/handlers/account.go`, `WebhookHandler` extended dengan `DB`+`Queue`
-  - `551dab6` phase-8.2: DELETE /api/videos/:id owner-only + `MarkVideoDeleted` + `cleanup:video` `ProcessIn(24h)` — method baru di `VideoHandler` (existing `video.go`)
-- **Smoke fase 8 PASS** keduanya (`scripts/smoketest/phase8_{delete_user,delete_video}`) via in-network Docker pattern yang sama dengan fase 6-7.
-- **20 routes** di `api-gateway/routes.go` (counter `grep -c "^\\s*api\\." api-gateway/routes.go`).
+- **PR #45 `feature/phase-9` OPEN** — 9 commit (7 original + 2 followup):
+  - `155b44c` phase-9.1: api-gateway main.go — slog + fail-fast verifier + 30s shutdown
+  - `d2dad34` phase-9.2: central HTTPErrorHandler as safety net + `shared.ClassifyError` exported
+  - `af9f94b` phase-9.3: rate limit middleware (per-user auth 60/min + per-IP webhook 30/min)
+  - `2073a09` phase-9.4: production Dockerfile (distroless) + compose context fix
+  - `3b6a438` phase-9.5: graceful shutdown phase visibility (slog per step)
+  - `049bf21` docs: [phase-9] handoff notes for fase 10
+  - `d743b92` docs: [phase-9] CONVENTIONS — docker build context + distroless notes
+  - `52d6763` phase-9.6: retry-with-backoff NewZitadelVerifier (60s budget)
+  - `9c4684c` phase-9.7: go-playground/validator wired + 4 c.Bind refactor
+- **15 file changes**, +1357/-194 (ground truth from `git diff --shortstat main..HEAD`).
+- **27 endpoints**: 25 JWT-protected `api.*` + 1 healthz + 1 webhook.
+- **No new routes** in fase 9 — issue 28 was wiring + production hardening,
+  not new features.
+- **Reviewer followup closed** (commit 8-9): cold-start race retry + LLD-mandated validator.
 
-## Merged
+## Merged (state of main)
 
-- PR #42 `6f51d7d` phase-7 (3 commit: like/unlike/view, comment/reply, notification list/mark-all-read).
-- PR #41 `69bac5c` refactor/pool-consolidation — single `*sql.DB` pool via pgx stdlib; `RouterDeps.SQLDB` → `RouterDeps.DB`; sentinel tunggal `sql.ErrNoRows`. Fase 7+8 dibangun di atas ini.
-- PR #40 phase-6, #38 phase-5, #37 phase-4, #36 zitadel split.
+- PR #43 (`65e0e12`) phase-8 merged — DELETE /api/users/me + DELETE /api/videos/:id + cleanup:video
+- PR #42 phase-7, #41 refactor pool-consolidation, #40 phase-6, dst
 
 ## Alive Branches (JANGAN dijadikan basis)
 
-- `feature/phase-8` — menunggu merge PR #43.
-- `feature/phase-0..7` — history; tip-nya merge commit, jangan branch dari sini.
-- `refactor/pool-consolidation` — sudah merged; boleh dihapus lokal/remote.
+- `feature/phase-9` — menunggu review/merge PR #45.
+- `feature/phase-0..8` — history; tip-nya merge commit, jangan branch dari sini.
+- `refactor/pool-consolidation` — sudah merged.
 
 ## Open Items
 
 ### Issues GH
 
-- PR #43 body sudah include checklist issue #26 + #27 dengan `Closes #26, #27` (auto-close saat merge).
+- PR #45 body includes checklist issue #28 dengan `Closes #28` (auto-close saat merge).
 - Belum disentuh:
-  - #28 Fase 9 (api-gateway main, error handler, rate limit, Dockerfile)
-  - #29, #30, #31 (fase 10: hardening + integration smoke + unit tests)
-  - #39 FFmpeg timeout-kill verification (fase 10)
+  - #29 Fase 10: Unit tests shared utils dan worker
+  - #30 Fase 10: Integration smoke test script
+  - #31 Fase 10: Security hardening checklist
+  - #39 Fase 10: Verify FFmpeg timeout-kill path in worker
+  - #44 Fase 10: R2 orphan reconciliation sweeper untuk delete-account dual-write
 
 ### Risiko yang ditunda
 
-- **Counter race** di likes/comments/views: tx tidak pakai `SELECT ... FOR UPDATE`. `GREATEST(..., 0)` mencegah negatif; drift kecil ditoleransi. Fase 10 punya reconciliation job. **Tetap tidak fix di fase 8** — delete-user decrement self-locks target video rows; drift window kecil.
+- **Counter race** (carry-over fase 5-8 + fase 9): tx tidak pakai `SELECT ... FOR UPDATE`
+  di decrement. `GREATEST(..., 0)` absorbs. Fase 10 reconciliation job.
+  Fase 9 TIDAK fix ini.
+- **Live HTTP smoke verification gap** (NEW dari fase 9): fail-fast verifier di Issue A
+  + distroless image di Issue D = binary tidak bisa boot tanpa Zitadel infra yang up.
+  Issue #30 (integration smoke) menutup gap ini dengan Zitadel real di zitadel-compose.
+- **mokibox-nginx restart-loop** (pre-existing): cert belum di-populate di `deploy/nginx/certs/`.
+  Fase 9 BUKAN touchpoint nginx. Tinggalkan sebagai known issue di HANDOFF.
 
-## Decisions & gotchas for fase 9+
+## Decisions & gotchas for fase 10+
 
-- **Counter race** (carry-over fase 5-8): tidak ada `FOR UPDATE` di decrement. Defer ke fase 10 reconciliation.
-- **Orphan R2 risk pada delete-account** (NEW dari fase 8 QA): `DeleteUserData` adalah dual-write (DB tx commit → enqueue `cleanup:objects` ke Redis non-transactional). Jika proses crash antara commit dan enqueue, video rows sudah hard-deleted → tidak ada row DB yang menunjuk ke R2 key. Object R2 jadi orphan permanen. `DeleteVideo` lebih aman (row tetap `status=DELETED`, bisa di-sweep via `ListVideosEligibleForCleanup`). **Carry-over ke fase 10**: (a) cron / scheduler yang enqueue `cleanup:video` untuk row `DELETED` yang >24h tanpa task pending; (b) **R2 reconciliation sweep** — bandingkan `uploads/<userID>/` di R2 vs users aktif, hapus orphan yang owner-nya tombstoned. Tracked sebagai **issue [#44](https://github.com/pratamaWahyuadi/mokibox/issues/44)**.
-- **Route count ground truth** (NEW): cara hitung konsisten via `grep -c "^\s*api\." api-gateway/routes.go` (= 25 di feature/phase-8) + `grep -c "^\s*e\." api-gateway/routes.go` (= 2). **Total = 27 routes** (25 di JWT-protected `api.*` group + 2 di root `e.*`: GET /healthz + POST /api/webhooks/zitadel). Pre-fase-8 main = 23 api.* + 2 e.* = 25. Fase 8 menambah 2 routes (DELETE /api/users/me, DELETE /api/videos/:id). Doc-block `routes.go` line 15-42 list 27 entries, konsisten dengan grep. **JANGAN pakai klaim "N routes baru" dari PR sebelumnya** — selalu grep ulang sebagai ground truth. Fase 6 PR #40 hitung "15 total" + fase 7 PR #42 hitung "+9 routes" adalah cara hitung historis yang tidak konsisten dengan counter grep; treated sebagai artefak historis.
-- **Session invalidation post-tombstone**: BUKAN concern fase 8. Tombstone + Zitadel sign-out adalah tanggung jawab client. Konfirmasi user via clarify.
-- **Worker `HandleCleanupVideo` sudah lengkap** (fase 5) — tidak perlu perubahan worker di fase 8. Sudah handle re-enqueue jika grace belum elapsed + hls prefix DeletePrefix + idempotent R2 delete.
-- **Spec gap LLD vs acceptance criteria**: tidak ada di fase 8 (semua spec sudah covered oleh query sqlc yang ada). `MarkVideoDeleted`, `ListVideoKeysByUser`, `DeleteVideosByUser`, `DeleteFollowsByFollower`, `DeleteFollowsByFollowee`, `DeleteLikesByUser`, `DeleteCommentsByUser`, `DeleteNotificationsForUser`, `DeleteNotificationsByActor`, `TombstoneUser`, `DecrementLikesForUser`, `DecrementCommentsForUser` semua sudah ada di `shared/db/*.sql.go` dari fase 1-7.
-- **Anti-enumeration untuk non-owner delete video**: API contract membolehkan 403/404, CONVENTIONS.md mandate 404. Konfirmasi user via clarify — pakai 404. Konsisten dengan GetVideoDetail, LikeVideo, dsb.
-- **Webhook user.removed untuk missing local user** (NEW dari fase 8 QA): jika Zitadel kirim event untuk user yang belum pernah hit API kita, `handleUserRemoved` lookup `errUserNotFound` → return 200 `{"status":"processed"}` (graceful no-op, Zitadel stop retry). Tidak 500. Lihat `webhook.go` line ~213-216.
-- **Dockerfile production + nginx cert**: pre-existing. `mokibox-nginx` restart-loop karena `deploy/nginx/certs/` belum di-populate (sudah ada caveat di CONVENTIONS.md). Fase 9 (Dockerfile api-gateway) bukan touchpoint nginx cert. Tinggalkan sebagai known issue.
-- **Single-pool assertion**: `grep -rn "pgx\\.ErrNoRows" api-gateway transcoder-worker --include="*.go"` HARUS 0. Verified post-fase-8: 0 matches. Bonus: `grep -rn "pgxpool\\." api-gateway transcoder-worker --include="*.go"` HARUS 0 — verified 0 matches.
-- **Pre-commit verification** (Aturan #11): expected file list per issue ditulis sebelum `git add`, dicocokkan dengan `git status --porcelain`, dan `git log --stat -1` diverifikasi setelah commit. Fase 8 clean (4 + 3 files, semua match expected).
-- **Smoke DSN**: smokes pakai superuser via `docker exec mokibox-postgres printenv POSTGRES_PASSWORD` karena role `tiktok_api` password-nya placeholder `***` di `.env`. Recipe sudah ada di `scripts/smoketest/phase8_*/main.go`. Redis password = `change-me-redis` (hard-coded di `docker-compose.yml`, BUKAN di `.env`).
-- **PR review pattern `Closes #N`**: pakai `--body-file` via `gh pr create` (md file), dengan `Closes #26, #27` per baris agar GitHub auto-link.
-- **PR body post-submit edit**: `gh api -X PATCH /repos/<owner>/repo/pulls/<num> --input <json>` dengan JSON wrapper `{"body": "..."}` (BUKAN `-f body=@file`). Pattern ini reliable; `gh pr edit --body-file` deprecated + exit 1 silent.
-- **Handoff prompt**: `prompts/PHASE-9-PROMPT.md` (untracked) sudah ditulis dengan carry-over + scope + 5 pertanyaan klarifikasi untuk di-`clarify` sebelum eksekusi.
+- **Counter race** (carry-over fase 5-9): tidak ada `FOR UPDATE` di decrement.
+  Defer ke fase 10 reconciliation.
+- **Orphan R2 risk** (carry-over fase 8): tracked issue #44, fase 10 reconciliation sweep.
+- **Verification gap on live HTTP smoke** (carry-over fase 9): binary fail-fast tanpa
+  Zitadel infra up. PR body section "Verification gap" explains why integration smoke deferred
+  to issue #30. Static checks + grep assertions + Docker build verify wire contract.
+- **Fail-fast verifier + retry** (NEW fase 9 + fase 9.6): `denyAllVerifier` removed dari
+  `main.go`. Misconfigured ZITADEL_ISSUER_URL → container restart-loop. Cold-start race
+  absorbed by 60s retry budget. Trade-off documented.
+- **/healthz unreachable during retry** (NEW fase 9.6 caveat): retry-with-backoff absorbs
+  cold-start race but /healthz masih unreachable selama retry window (solver
+  liveness-vs-readiness split butuh srv.ListenAndServe sebelum verifier build — di luar
+  scope fase 9). Kalau fase 10 observe production issue, split ke /healthz (liveness) +
+  /readyz (readiness).
+- **Distroless image** (NEW fase 9): `gcr.io/distroless/static-debian12:nonroot`. Tidak punya
+  shell — `docker exec ... sh` tidak akan jalan. Untuk debug live, harus buat debug image
+  terpisah atau pakai `docker debug` (kalau Docker version support).
+- **Zero handler refactor** (NEW fase 9): handler fase 3-8 tetap pakai `shared.RespondError`.
+  Central HTTPErrorHandler safety net untuk framework errors saja. Kalau fase 10 mau adopt
+  `return err` idiom secara konsisten, refactor eksplisit dengan migration plan — jangan
+  half-half.
+- **`shared.ClassifyError`** (NEW fase 9): exported (dulu `classifyError` unexported).
+  Internal call site `RespondError` updated. Kalau fase 10 bikin wrapper error baru,
+  tambahkan mapping di `shared/errors.go` `httpStatusFor` + `codeFor`, JANGAN duplicate
+  logic di tempat lain.
+- **Rate limit per-process `sync.Map`** (NEW fase 9): janitor 5 menit sweep TTL 10 menit.
+  Multi-instance deployment (kalau fase 10 atau production scale): per-instance counter,
+  bukan global. Untuk global rate limit butuh Redis-backed counter — di luar scope fase 9.
+- **Dockerfile `context: .`** (NEW fase 9): pitfall `mokibox-go-shared` SKILL.md section
+  "Docker build context untuk multi-package Go module" menjelaskan kenapa. Kalau ada service
+  baru di compose yang juga butuh `go.mod`/`go.sum` dari root, ULANGI pattern `context: .`.
+- **`golang.org/x/time` direct dependency** (NEW fase 9): dipromote dari indirect di fase 9.
+  Tetap di track sebagai "production runtime dep", bukan "test-only" — kalau di-unrequire
+  di fase 10, rate limit akan break.
+- **`go-playground/validator/v10` direct dependency** (NEW fase 9.7): tambah via `go get`,
+  promote via `go mod tidy`. Tag yang dipakai: required, omitempty, min, max, uuid, url.
+  Refactor 4 call site: uploadIntentRequest, confirmRequest, updateMeRequest,
+  commentRequestBody. Validator translation di `api-gateway/request_validator.go` —
+  kalau fase 10 tambah tag baru atau localization, edit di sana.
+- **Pre-commit verification** (Aturan #11): expected file list per issue ditulis sebelum
+  `git add`, dicocokkan dengan `git status --porcelain`, dan `git log --stat -1` diverifikasi
+  setelah commit. Fase 9 mengikuti pattern ini: 9 commit, semua expected files match.
+- **PR body post-submit edit** (carry-over): `gh api -X PATCH .../pulls/<num> --input <json>`
+  reliable; `gh pr edit --body-file` deprecated + exit 1 silent. Fase 9 pakai pattern ini
+  2x (initial submit + followup update).
+- **PR body angka self-check** (per git-phase-workflow rule #10): angka breakdown touchpoint
+  di PR body diverifikasi dengan `git diff --shortstat main..HEAD`. Fase 9 PR body section
+  "Commits" table juga catat perbedaan `git log --stat` per-commit sum (1382/219) vs
+  `git diff --stat` (1357/194) dengan jelas, supaya reviewer tidak bingung.
+- **Live HTTP smoke recipe** (NEW fase 9): butuh `make up-zitadel` dulu + cert populate
+  di `deploy/nginx/certs/` + binary boot dengan env lengkap. Issue #30 fase 10 menulis
+  integration smoke script yang ngebukti /healthz 200 + /api/videos/.../404 envelope
+  + rate limit 429 + validator 400 envelope — semua skenario harus jalan end-to-end
+  dengan Zitadel up.
+
+## Files touched fase 9 (for future reference)
+
+```
+api-gateway/Dockerfile              (+97 / -13)
+api-gateway/error_handler.go        (+185 / -0, new)
+api-gateway/main.go                 (+221 / -102)  // A + E
+api-gateway/middleware/ratelimit.go (+290 / -0, new)
+api-gateway/routes.go               (+47 / -0)
+docker-compose.yml                  (+12 / -2)
+go.mod                              (+2 / -2)  // promote golang.org/x/time
+shared/response.go                  (+17 / -1)  // classifyError -> ClassifyError
+```
+
+## Handoff prompt
+
+`prompts/PHASE-10-PROMPT.md` (untracked) akan ditulis setelah fase 9 PR #45 merged,
+sebelum fase 10 agent mulai kerja. Pattern carry-over dari fase 9 → fase 10 yang
+WAJIB di-promote ke prompt berikutnya:
+- Verification gap on live HTTP smoke (binary fail-fast tanpa Zitadel infra)
+- Distroless image no-shell caveat
+- Per-process rate limit (bukan global) — kalau production scale, butuh Redis-backed
+- Single-pool `*sql.DB` + `sql.ErrNoRows` only (carry dari fase 7-9)
+- Counter race (carry dari fase 5-9)
+- Orphan R2 reconciliation (issue #44)
