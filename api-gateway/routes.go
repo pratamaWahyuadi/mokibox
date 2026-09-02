@@ -29,6 +29,17 @@
 //   - GET  /api/videos/:id                   (auth)
 //   - GET  /api/videos/:id/status            (auth)
 //   - GET  /api/videos/:id/playlist.m3u8     (auth+token)
+//   - DELETE /api/videos/:id                 (auth, owner only)
+//   - POST /api/videos/:id/like              (auth)
+//   - DELETE /api/videos/:id/like            (auth)
+//   - POST /api/videos/:id/view              (auth)
+//   - POST /api/videos/:id/comments          (auth)
+//   - GET  /api/videos/:id/comments          (auth)
+//   - DELETE /api/comments/:id               (auth, owner only)
+//   - POST /api/comments/:id/reply           (auth)
+//   - GET  /api/notifications                (auth)
+//   - PUT  /api/notifications/read-all       (auth)
+//   - DELETE /api/users/me                   (auth)
 //
 // Phase 9 finalises the global HTTP error handler, the
 // body validator, and the production main.go that
@@ -104,7 +115,7 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	// route is registered without it now so a future
 	// commit can insert the middleware without touching
 	// this file.
-	wh := handlers.NewWebhookHandler(d.Queries, d.WebhookSigningKey)
+	wh := handlers.NewWebhookHandler(d.Queries, d.DB, d.Queue, d.WebhookSigningKey)
 	e.POST("/api/webhooks/zitadel", wh.Handle)
 
 	// Authenticated API group. Everything under /api/*
@@ -181,6 +192,14 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	api.GET("/videos/:id/status", vh.GetVideoStatus)
 	api.GET("/videos/:id/playlist.m3u8", vh.GetPlaylist)
 
+	// Phase 8.B: delete video (owner only). The
+	// handler tombstones the row (status=DELETED +
+	// deleted_at=NOW()) and enqueues cleanup:video
+	// with ProcessIn(24h). 204 on success. Non-owner
+	// gets 404 (anti-enumeration), missing video
+	// also 404.
+	api.DELETE("/videos/:id", vh.DeleteVideo)
+
 	// Phase 7.A: like / unlike / view tracking.
 	// Like and unlike mutate the denormalised
 	// likes_count inside a tx (insert/delete +
@@ -217,6 +236,19 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	nh := handlers.NewNotificationHandler(d.Queries)
 	api.GET("/notifications", nh.List)
 	api.PUT("/notifications/read-all", nh.MarkAllRead)
+
+	// Phase 8.A: self-service account deletion.
+	// Single route, single tx, no R2 in the request
+	// path (cleanup:objects is enqueued after the tx
+	// commits, not before). 204 on success; the
+	// tombstone keeps the UNIQUE(id) intact so a
+	// stale JWT cannot create a fresh local row via
+	// the get-or-create path.
+	ah, err := handlers.NewAccountHandler(d.Queries, d.DB, d.Queue)
+	if err != nil {
+		panic(fmt.Sprintf("api-gateway: NewAccountHandler: %v", err))
+	}
+	api.DELETE("/users/me", ah.DeleteMe)
 
 	return e
 }

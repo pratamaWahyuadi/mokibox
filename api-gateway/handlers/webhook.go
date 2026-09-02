@@ -42,6 +42,7 @@ import (
 	"log/slog"
 
 	"github.com/google/uuid"
+	"github.com/hibiken/asynq"
 	"github.com/labstack/echo/v4"
 
 	"github.com/zitadel/zitadel-go/v3/pkg/actions"
@@ -60,26 +61,33 @@ const (
 )
 
 // WebhookHandler holds the dependencies the
-// /api/webhooks/zitadel endpoint needs. Phase 3 only
-// uses Queries to call DeactivateUser. R2 / Queue are
-// not consumed here - phase 8 (delete account) will
-// pull in DeleteUserData, which itself needs R2
-// cleanup and the Asynq client. Keeping the field
-// on the struct now means phase 8 can add them
-// without changing the constructor signature.
+// /api/webhooks/zitadel endpoint needs. Phase 8
+// extends the struct with DB and Queue so the
+// user.removed branch can call DeleteUserData
+// (which itself needs the *sql.DB to open the
+// tombstone tx and the Asynq client to enqueue
+// the R2 cleanup task).
 type WebhookHandler struct {
 	Queries    *db.Queries
+	DB         *sql.DB
+	Queue      *asynq.Client
 	SigningKey string
 }
 
-// NewWebhookHandler returns a WebhookHandler with the
-// given dependencies. signingKey is the
+// NewWebhookHandler returns a WebhookHandler with
+// the given dependencies. signingKey is the
 // ZITADEL_TARGET_SIGNING_KEY; an empty value means
-// signature verification is impossible and the handler
-// will reject every request (defence in depth - the
-// env loader also rejects an empty value at startup).
-func NewWebhookHandler(queries *db.Queries, signingKey string) *WebhookHandler {
-	return &WebhookHandler{Queries: queries, SigningKey: signingKey}
+// signature verification is impossible and the
+// handler will reject every request (defence in
+// depth - the env loader also rejects an empty
+// value at startup).
+func NewWebhookHandler(queries *db.Queries, dbHandle *sql.DB, queue *asynq.Client, signingKey string) *WebhookHandler {
+	return &WebhookHandler{
+		Queries:    queries,
+		DB:         dbHandle,
+		Queue:      queue,
+		SigningKey: signingKey,
+	}
 }
 
 // zitadelActionV2Event is the subset of the Actions V2
@@ -171,19 +179,49 @@ func (h *WebhookHandler) Handle(c echo.Context) error {
 	case EventUserDeactivated:
 		return h.handleUserDeactivated(ctx, c, evt.UserID)
 	case EventUserRemoved:
-		// DEVIATION: full implementation lives in phase 8
-		// (DeleteUserData: tombstone + delete rows +
-		// enqueue R2 cleanup). Phase 3 only logs the
-		// event and returns 500 so a real Zitadel
-		// webhook is not silently dropped on the floor.
-		slog.Error("user.removed received but DeleteUserData is phase 8 TODO",
-			"userID", evt.UserID, "remote", c.RealIP())
-		return shared.RespondError(c, shared.Wrap(shared.ErrInternal,
-			fmt.Sprintf("user.removed handler not implemented in phase 3 (userID=%s)", evt.UserID)))
+		return h.handleUserRemoved(ctx, c, evt.UserID)
 	default:
 		return shared.RespondError(c, shared.Wrap(shared.ErrWebhookEvent,
 			fmt.Sprintf("event_type %q is not supported", evt.EventType)))
 	}
+}
+
+// handleUserRemoved maps the Zitadel Actions V2
+// user.removed event to DeleteUserData. The flow:
+//
+//  1. Look up the local user id (Zitadel sub ->
+//     *db.User.ID). Missing -> 200 ack so Zitadel
+//     stops retrying (the same rationale as the
+//     deactivated branch).
+//  2. Call DeleteUserData(ctx, Queries, DB, Queue,
+//     userID). All tombstone + row delete + R2
+//     enqueue work happens there; this handler is
+//     a thin shim.
+//
+// If DB or Queue is nil (degraded wiring in tests
+// that only exercise user.deactivated) we return
+// 500 rather than crash on a nil pointer.
+func (h *WebhookHandler) handleUserRemoved(ctx context.Context, c echo.Context, zitadelSub string) error {
+	if h.DB == nil || h.Queue == nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal,
+			"webhook missing DB/Queue for user.removed"))
+	}
+	userID, err := lookupUserIDByZitadelID(ctx, h.Queries, zitadelSub)
+	if err != nil {
+		if errors.Is(err, errUserNotFound) {
+			// No local row to tombstone; ack the
+			// webhook so Zitadel stops retrying.
+			return shared.RespondOK(c, map[string]string{"status": "processed"})
+		}
+		slog.Error("user.removed lookup failed", "err", err, "sub", zitadelSub)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "lookup user"))
+	}
+
+	if err := DeleteUserData(ctx, h.Queries, h.DB, h.Queue, userID); err != nil {
+		slog.Error("user.removed DeleteUserData failed", "err", err, "user_id", userID)
+		return shared.RespondError(c, err)
+	}
+	return shared.RespondOK(c, map[string]string{"status": "processed"})
 }
 
 // errUserNotFound is the sentinel returned by

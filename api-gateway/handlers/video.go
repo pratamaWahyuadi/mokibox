@@ -508,6 +508,97 @@ func (h *VideoHandler) ConfirmUpload(c echo.Context) error {
 	})
 }
 
+// DeleteVideo handles DELETE /api/videos/:id.
+//
+// Behaviour (per LLD section 11 + API contract
+// section 4):
+//   - Only the OWNER can delete. Non-owner ->
+//     404 (anti-enumeration; same as the rest
+//     of the social surface, NOT 403).
+//   - status -> 'DELETED', deleted_at -> NOW()
+//     via MarkVideoDeleted (the row stays for
+//     24h so a quick undelete is possible).
+//   - cleanup:video task is enqueued with
+//     ProcessIn(24h) so the worker hard-deletes
+//     the row + R2 objects after the grace.
+//   - 204 No Content on success.
+//
+// Idempotency: deleting a video that is already
+// DELETED is a no-op success. The MarkVideoDeleted
+// query is :one and gated on user_id so the
+// second call still returns 204 (the row matches
+// the WHERE), but the deleted_at timestamp is
+// refreshed in practice. We treat this as
+// acceptable for a tombstone - the cleanup task
+// re-enqueue is suppressed when status is
+// already DELETED.
+func (h *VideoHandler) DeleteVideo(c echo.Context) error {
+	if h.Queries == nil || h.Queue == nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "video handler not configured"))
+	}
+	user, videoID, ok := parseAuthVideoParam(c)
+	if !ok {
+		return nil
+	}
+	ctx := c.Request().Context()
+
+	// Load the video first so we can apply the
+	// anti-enumeration rule: a non-owner never
+	// sees a 403/404 distinction.
+	video, err := h.Queries.GetVideoByID(ctx, videoID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "video not found"))
+		}
+		slog.Error("DeleteVideo: load video", "err", err, "video_id", videoID)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load video"))
+	}
+	if video.UserID != user.ID {
+		// Anti-enumeration: collapse to 404 so
+		// an attacker cannot probe video ids.
+		return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "video not found"))
+	}
+	if video.Status == "DELETED" {
+		// Already tombstoned. Skip the UPDATE
+		// and the re-enqueue; the prior
+		// cleanup:video is still in flight.
+		return c.NoContent(204)
+	}
+
+	updated, err := h.Queries.MarkVideoDeleted(ctx, db.MarkVideoDeletedParams{
+		ID:     videoID,
+		UserID: user.ID,
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// Race: someone else just
+			// tombstoned it. Treat as 204.
+			return c.NoContent(204)
+		}
+		slog.Error("DeleteVideo: MarkVideoDeleted", "err", err, "video_id", videoID)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "mark video deleted"))
+	}
+
+	// Enqueue the 24h cleanup. The worker's
+	// HandleCleanupVideo re-checks status +
+	// deleted_at and either hard-deletes or
+	// re-enqueues itself if the grace has not
+	// elapsed yet.
+	cleanupDelay := 24 * time.Hour
+	if _, err := shared.EnqueueCleanupVideo(h.Queue, shared.CleanupVideoPayload{
+		VideoID: updated.ID.String(),
+	}, asynq.ProcessIn(cleanupDelay)); err != nil {
+		// Per LLD the 24h grace lets the worker
+		// re-enqueue on its own if it misses a
+		// tick; we log warn rather than fail
+		// the request so the tombstone sticks
+		// even if the queue is briefly down.
+		slog.Warn("DeleteVideo: enqueue cleanup:video",
+			"err", err, "video_id", videoID)
+	}
+	return c.NoContent(204)
+}
+
 // nullString wraps a plain string in sql.NullString so
 // the sqlc InsertVideo query can carry empty titles
 // through the database/sql interface. Title and
