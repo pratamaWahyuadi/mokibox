@@ -171,7 +171,7 @@ func (w *Worker) HandleTranscode(ctx context.Context, t *asynq.Task) error {
 		// already set) and ask cleanup to remove
 		// the raw key. The user will see the
 		// status flip on next /videos/:id/status.
-		if _, ferr := w.Queries.MarkVideoFailed(ctx, videoID); ferr != nil {
+		if ferr := w.markFailedDetached(videoID); ferr != nil {
 			w.Logger.Error("transcode handler: mark failed (post-budget)", "err", ferr, "video_id", videoID)
 		}
 		if _, qerr := shared.EnqueueCleanupObjects(w.Asynq, shared.CleanupObjectsPayload{
@@ -233,7 +233,7 @@ func (w *Worker) HandleTranscode(ctx context.Context, t *asynq.Task) error {
 			// Permanent: do not retry, mark FAILED,
 			// clean up the raw key so R2 doesn't
 			// keep accumulating hostile uploads.
-			if _, ferr := w.Queries.MarkVideoFailed(ctx, videoID); ferr != nil {
+			if ferr := w.markFailedDetached(videoID); ferr != nil {
 				w.Logger.Error("transcode handler: mark failed (invalid media)", "err", ferr, "video_id", videoID)
 			}
 			if _, qerr := shared.EnqueueCleanupObjects(w.Asynq, shared.CleanupObjectsPayload{
@@ -254,7 +254,7 @@ func (w *Worker) HandleTranscode(ctx context.Context, t *asynq.Task) error {
 	if err := ValidateMedia(probe, size); err != nil {
 		// Same permanent branch as ProbeFile's own
 		// validation error.
-		if _, ferr := w.Queries.MarkVideoFailed(ctx, videoID); ferr != nil {
+		if ferr := w.markFailedDetached(videoID); ferr != nil {
 			w.Logger.Error("transcode handler: mark failed (validate)", "err", ferr, "video_id", videoID)
 		}
 		if _, qerr := shared.EnqueueCleanupObjects(w.Asynq, shared.CleanupObjectsPayload{
@@ -428,6 +428,30 @@ func (w *Worker) HandleTranscode(ctx context.Context, t *asynq.Task) error {
 	return nil
 }
 
+// markFailedDetached marks the video FAILED using a context
+// DETACHED from the per-task timeout. Terminal-state DB
+// writes must never inherit an expired task context: when
+// TRANSCODE_TIMEOUT fires mid-attempt, the task ctx is
+// already deadline-exceeded, so a MarkVideoFailed through
+// it fails too and the row stays stuck in PROCESSING with
+// a full retry budget - permanently invisible to both the
+// user and the 24h cleanup job.
+//
+// Exposed live by the phase-10 timeout-kill smoke (issue
+// #39): attempt 3 was killed at the R2 download, and the
+// post-budget MarkVideoFailed logged
+// "mark failed (post-budget): context deadline exceeded"
+// while the row kept status=PROCESSING retry_count=3.
+//
+// 30s is generous for a single-row UPDATE and still bounds
+// a pathological DB so the worker cannot hang on it.
+func (w *Worker) markFailedDetached(videoID uuid.UUID) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := w.Queries.MarkVideoFailed(ctx, videoID)
+	return err
+}
+
 // handleTransient centralises the "retry if budget
 // remains, otherwise mark FAILED" decision so every
 // transient failure site in HandleTranscode looks the
@@ -439,7 +463,7 @@ func (w *Worker) handleTransient(ctx context.Context, v db.Video, op string) err
 	// at the start of this attempt, so v.RetryCount
 	// here is "attempts made including this one".
 	if v.RetryCount >= MaxRetries {
-		if _, err := w.Queries.MarkVideoFailed(ctx, v.ID); err != nil {
+		if err := w.markFailedDetached(v.ID); err != nil {
 			w.Logger.Error("transcode handler: mark failed (post-budget)", "err", err, "video_id", v.ID)
 		}
 		if _, err := shared.EnqueueCleanupObjects(w.Asynq, shared.CleanupObjectsPayload{Keys: []string{v.R2Key}}); err != nil {
