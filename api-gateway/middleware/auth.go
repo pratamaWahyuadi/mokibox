@@ -64,6 +64,23 @@ type TokenVerifier interface {
 	CheckToken(ctx context.Context, rawToken string) (sub string, err error)
 }
 
+// UserStore is the narrow data-access interface the auth
+// middleware needs: resolve-or-insert the local users row
+// for a verified Zitadel subject. It is defined here
+// (consumer side, per accept-interfaces-return-structs)
+// so tests can drive the get-or-create flow - including
+// the ON CONFLICT race - with a stub instead of a live
+// Postgres. *db.Queries satisfies it without changes.
+type UserStore interface {
+	// GetUserByZitadelID loads the users row for a Zitadel
+	// subject. sql.ErrNoRows means "first login".
+	GetUserByZitadelID(ctx context.Context, zitadelID string) (db.User, error)
+	// CreateUser inserts a new row. sql.ErrNoRows means a
+	// concurrent insert won the race (ON CONFLICT DO
+	// NOTHING); the caller re-selects.
+	CreateUser(ctx context.Context, arg db.CreateUserParams) (db.User, error)
+}
+
 // VerifierFactory builds a TokenVerifier from a context.
 // It exists so main.go can pass in the live
 // *authorization.Authorizer (which itself needs a context
@@ -114,7 +131,7 @@ func newUsername() (string, error) {
 // single row; in that case CreateUser returns
 // sql.ErrNoRows and we re-select. This keeps the
 // get-or-create path race-free without taking a row lock.
-func getOrCreateUser(ctx context.Context, q *db.Queries, sub string) (db.User, error) {
+func getOrCreateUser(ctx context.Context, q UserStore, sub string) (db.User, error) {
 	existing, err := q.GetUserByZitadelID(ctx, sub)
 	if err == nil {
 		return existing, nil
@@ -162,9 +179,10 @@ type AuthenticateConfig struct {
 	// startup (zitadel.New + oauth.DefaultJWTAuthorization
 	// in main.go) and shared across requests.
 	Verifier TokenVerifier
-	// Queries is the sqlc-bound *db.Queries used to read
-	// and insert the local users row.
-	Queries *db.Queries
+	// Queries is the data-access interface used to read
+	// and insert the local users row. *db.Queries (sqlc)
+	// satisfies it; tests use a stub UserStore.
+	Queries UserStore
 }
 
 // Authenticate returns an Echo middleware that validates

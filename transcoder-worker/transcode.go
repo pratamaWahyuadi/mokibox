@@ -308,20 +308,7 @@ func (w *Worker) HandleTranscode(ctx context.Context, t *asynq.Task) error {
 		}
 		indexPath := filepath.Join(variantDir, "index.m3u8")
 		segmentPattern := filepath.Join(variantDir, "segment_%04d.ts")
-		args := []string{
-			"-y",
-			"-i", sourcePath,
-			"-vf", "scale=-2:" + strings.TrimSuffix(v.Dir, "p"),
-			"-c:v", "libx264",
-			"-preset", "veryfast",
-			"-crf", "23",
-			"-c:a", "aac",
-			"-b:a", "128k",
-			"-hls_time", "6",
-			"-hls_playlist_type", "vod",
-			"-hls_segment_filename", segmentPattern,
-			indexPath,
-		}
+		args := buildVariantArgs(sourcePath, indexPath, segmentPattern, v)
 		if err := w.runFFmpeg(ctx, args, workDir); err != nil {
 			w.Logger.Error("transcode handler: ffmpeg variant", "err", err, "variant", v.Dir, "video_id", videoID)
 			cleanupOnFailure()
@@ -343,15 +330,7 @@ func (w *Worker) HandleTranscode(ctx context.Context, t *asynq.Task) error {
 
 	// Thumbnail: one frame from second 1.
 	thumbPath := filepath.Join(workDir, filepath.Base(thumbnailKey))
-	thumbArgs := []string{
-		"-y",
-		"-i", sourcePath,
-		"-ss", "00:00:01",
-		"-frames:v", "1",
-		"-vf", "scale=480:-1",
-		thumbPath,
-	}
-	if err := w.runFFmpeg(ctx, thumbArgs, workDir); err != nil {
+	if err := w.runFFmpeg(ctx, buildThumbnailArgs(sourcePath, thumbPath), workDir); err != nil {
 		w.Logger.Error("transcode handler: ffmpeg thumb", "err", err, "video_id", videoID)
 		cleanupOnFailure()
 		return w.handleTransient(ctx, incremented, "ffmpeg thumb")
@@ -487,6 +466,45 @@ func (w *Worker) handleTransient(ctx context.Context, v db.Video, op string) err
 	w.Logger.Info("transcode handler: re-enqueued for retry",
 		"video_id", v.ID, "op", op, "retry_count", v.RetryCount, "delay", retryDelayFor(v.RetryCount))
 	return nil
+}
+
+// buildVariantArgs assembles the ffmpeg argv for one HLS
+// variant encode. Pure function so the flags (codec, preset,
+// CRF, HLS segmentation) can be unit-tested without running
+// ffmpeg. The output playlist path must be the LAST arg.
+func buildVariantArgs(sourcePath, indexPath, segmentPattern string, v struct {
+	Dir        string
+	Resolution string
+	Bandwidth  int
+}) []string {
+	return []string{
+		"-y",
+		"-i", sourcePath,
+		"-vf", "scale=-2:" + strings.TrimSuffix(v.Dir, "p"),
+		"-c:v", "libx264",
+		"-preset", "veryfast",
+		"-crf", "23",
+		"-c:a", "aac",
+		"-b:a", "128k",
+		"-hls_time", "6",
+		"-hls_playlist_type", "vod",
+		"-hls_segment_filename", segmentPattern,
+		indexPath,
+	}
+}
+
+// buildThumbnailArgs assembles the ffmpeg argv for the
+// single-frame JPEG thumbnail (frame at 00:00:01, width
+// scaled to 480).
+func buildThumbnailArgs(sourcePath, thumbPath string) []string {
+	return []string{
+		"-y",
+		"-i", sourcePath,
+		"-ss", "00:00:01",
+		"-frames:v", "1",
+		"-vf", "scale=480:-1",
+		thumbPath,
+	}
 }
 
 // runFFmpeg wraps exec.CommandContext with sane
