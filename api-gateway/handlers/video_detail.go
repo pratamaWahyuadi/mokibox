@@ -382,7 +382,14 @@ func (h *VideoHandler) GetPlaylist(c echo.Context) error {
 // Content-Type: application/vnd.apple.mpegurl.
 func (h *VideoHandler) serveMasterPlaylist(c echo.Context, hlsPrefix string, videoID uuid.UUID) error {
 	ctx := c.Request().Context()
-	masterKey := hlsPrefix + "master.m3u8"
+	// hls_prefix is stored WITHOUT a trailing slash (the worker
+	// builds it as "hls/<userID>/<videoID>" in transcode.go), so
+	// the separator must be added here. Concatenating directly
+	// produced "hls/<user>/<videoID>master.m3u8" - a key that
+	// never exists - making the playlist endpoint permanently
+	// 404. (Pre-existing bug since fase 6, exposed by the Fase
+	// 10 integration smoke; see the phase-10.5 commit.)
+	masterKey := hlsPrefix + "/master.m3u8"
 	body, err := h.R2.GetObject(ctx, masterKey, hlsVariantCap)
 	if err != nil {
 		if errors.Is(err, shared.ErrNotFound) {
@@ -405,7 +412,8 @@ func (h *VideoHandler) serveMasterPlaylist(c echo.Context, hlsPrefix string, vid
 // URI to a presigned R2 URL, and returns the body.
 func (h *VideoHandler) serveVariantPlaylist(c echo.Context, hlsPrefix string, videoID uuid.UUID, variant string) error {
 	ctx := c.Request().Context()
-	variantKey := hlsPrefix + variant + "/index.m3u8"
+	// Same trailing-slash contract as serveMasterPlaylist above.
+	variantKey := hlsPrefix + "/" + variant + "/index.m3u8"
 	body, err := h.R2.GetObject(ctx, variantKey, hlsVariantCap)
 	if err != nil {
 		if errors.Is(err, shared.ErrNotFound) {
@@ -473,9 +481,25 @@ func RewriteMasterPlaylist(body []byte, apiBaseURL string, videoID uuid.UUID, se
 			continue
 		}
 		// Relative - rewrite to API endpoint with
-		// a fresh token. Preserve the variant name
-		// so "480p/index.m3u8" -> ".../playlist.m3u8?variant=480p".
-		variant := strings.SplitN(trimmed, "/", 2)[0]
+		// a fresh token. The worker writes the variant
+		// URIs as ABSOLUTE R2 KEYS (no scheme), e.g.
+		//   hls/<userID>/<videoID>/<variant>/index.m3u8
+		// so the variant name is the second-to-last
+		// path segment. A naive first-segment split
+		// produced "variant=hls" for every line (the
+		// phase-10.6 fix).
+		parts := strings.Split(strings.TrimSuffix(trimmed, "/"), "/")
+		variant := ""
+		if len(parts) >= 2 {
+			variant = parts[len(parts)-2]
+		}
+		if variant == "" {
+			// Unexpected URI shape; leave the line
+			// untouched rather than emit a broken URL.
+			out.WriteString(line)
+			out.WriteByte('\n')
+			continue
+		}
 		newURI := fmt.Sprintf("%s/api/videos/%s/playlist.m3u8?variant=%s&token=%s",
 			apiBaseURL, videoID, variant, token)
 		out.WriteString(newURI)
@@ -500,14 +524,17 @@ func RewriteVariantPlaylist(ctx context.Context, r2 *shared.R2Client, body []byt
 	if r2 == nil {
 		return nil, fmt.Errorf("RewriteVariantPlaylist: r2 client is nil")
 	}
-	if !strings.HasSuffix(hlsPrefix, "/") {
-		// Defence in depth: the column is set by
-		// the worker with a trailing slash, but
-		// if a future caller drops it the rewrite
-		// would silently break. Refuse.
-		return nil, fmt.Errorf("rewriteVariantPlaylist: hls_prefix %q missing trailing slash", hlsPrefix)
+	if !strings.HasSuffix(hlsPrefix, "/") && !strings.HasPrefix(hlsPrefix, "hls/") {
+		// Defence in depth: refuse prefixes that are neither
+		// the worker's canonical "hls/..." shape nor carry a
+		// trailing slash. The canonical worker value has NO
+		// trailing slash ("hls/<userID>/<videoID>"), so the
+		// separator is appended below. (The old check demanded
+		// a trailing slash based on a wrong comment about the
+		// worker format - phase-10.6 fix.)
+		return nil, fmt.Errorf("rewriteVariantPlaylist: hls_prefix %q is not a canonical hls key prefix", hlsPrefix)
 	}
-	segmentBase := hlsPrefix + variant + "/"
+	segmentBase := hlsPrefix + "/" + variant + "/"
 	var out bytes.Buffer
 	scanner := bufio.NewScanner(bytes.NewReader(body))
 	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)

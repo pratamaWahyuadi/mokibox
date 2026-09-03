@@ -160,8 +160,33 @@ func (h *WebhookHandler) Handle(c echo.Context) error {
 	if evt.EventType == "" {
 		return shared.RespondError(c, shared.Wrap(shared.ErrValidation, "missing event_type"))
 	}
-	if evt.UserID == "" {
-		return shared.RespondError(c, shared.Wrap(shared.ErrValidation, "missing userID"))
+	// Target user resolution. Zitadel Actions V2 events carry
+	// TWO id-ish fields with very different meanings (verified
+	// against a live v4.16.0 payload capture during the Fase 10
+	// integration smoke, see phase-10.4 commit):
+	//
+	//   - aggregateID: the id of the aggregate the event belongs
+	//     to - for user.* events this is the AFFECTED user
+	//     (the one being deactivated / removed).
+	//   - userID: the ACTOR who triggered the event. For
+	//     self-actored events (user.human.added during
+	//     registration) actor == affected, which is why the
+	//     field names were interchangeable in every pre-fase-10
+	//     example. For admin-initiated actions (an IAM_OWNER
+	//     deactivating a user via the Management API) userID is
+	//     the ADMIN's id - dispatching on it tombstoned the
+	//     wrong account.
+	//
+	// We therefore dispatch on aggregateID and only fall back
+	// to userID for older payload shapes where aggregateID is
+	// absent (none observed on v4.16, but the fallback keeps
+	// the handler robust).
+	targetUser := evt.AggregateID
+	if targetUser == "" {
+		targetUser = evt.UserID
+	}
+	if targetUser == "" {
+		return shared.RespondError(c, shared.Wrap(shared.ErrValidation, "missing aggregateID/userID"))
 	}
 
 	// Audit log: capture the raw body + event_type so
@@ -169,6 +194,7 @@ func (h *WebhookHandler) Handle(c echo.Context) error {
 	// re-deriving the payload from Zitadel.
 	slog.Info("zitadel webhook accepted",
 		"event_type", evt.EventType,
+		"aggregateID", evt.AggregateID,
 		"userID", evt.UserID,
 		"sequence", evt.Sequence.String(),
 		"remote", c.RealIP(),
@@ -177,9 +203,9 @@ func (h *WebhookHandler) Handle(c echo.Context) error {
 	ctx := c.Request().Context()
 	switch evt.EventType {
 	case EventUserDeactivated:
-		return h.handleUserDeactivated(ctx, c, evt.UserID)
+		return h.handleUserDeactivated(ctx, c, targetUser)
 	case EventUserRemoved:
-		return h.handleUserRemoved(ctx, c, evt.UserID)
+		return h.handleUserRemoved(ctx, c, targetUser)
 	default:
 		return shared.RespondError(c, shared.Wrap(shared.ErrWebhookEvent,
 			fmt.Sprintf("event_type %q is not supported", evt.EventType)))
