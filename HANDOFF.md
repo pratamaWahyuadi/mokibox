@@ -50,6 +50,27 @@ Cara menjalankan ulang oleh siapa pun:
    (user.deactivated, user.removed). Semua ID/secret/signing key → `.env`.
 4. `bash scripts/integration_test.sh` — 15 assertions, exit 0 = all pass.
 
+### Dua pola OIDC client (Web vs SPA) — pelajaran penting
+
+| App | application_type | auth_method_type | Token exchange | Untuk |
+|---|---|---|---|---|
+| `mokibox_web` | 0 (Web) | 1 (BASIC) | client_secret_basic (confidential) | CLI/server-side test |
+| `mokibox_spa` | 1 (User Agent/SPA) | 2 (NONE) | PKCE S256 murni, TANPA secret | production frontend browser |
+
+Gotcha: **app tipe Web di Zitadel v4 selalu diperlakukan confidential** —
+token endpoint menolak PKCE tanpa secret (`invalid_client: empty client
+secret`) walau auth method NONE tercatat. Untuk client public (SPA/Native)
+HARUS buat app dengan `application_type=1` (User Agent) atau 2 (Native)
++ `auth_methodType=2` (NONE). Enum v1: appType 0=Web, 1=UserAgent, 2=Native;
+authMethodType 0=BASIC, 1=POST, 2=NONE (beda dari asumsi awal saya:
+0 bukan NONE!). application_type tidak bisa diubah setelah create —
+harus recreate app. `mokibox_spa` dibuat via
+`POST /management/v1/projects/{pid}/apps/oidc` dengan
+`appType:1, authMethodType:2, devMode:true, accessTokenType:1`
+(client id: `389059418009960450`, disimpan di `.env` sebagai
+`ZITADEL_SPA_CLIENT_ID`). Step 1b di integration_test.sh membuktikan
+pola SPA end-to-end (login → JWT → api-gateway 200).
+
 Catatan headless login (password grant TIDAK didukung Zitadel):
 authorize → session v2 (login-client PAT + user password) →
 `POST /v2/oidc/auth_requests/{id}` (Bearer login-client PAT) →

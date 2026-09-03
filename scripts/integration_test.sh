@@ -142,6 +142,46 @@ else
 fi
 
 # =====================================================
+# STEP 1b: SPA-pattern login (public client, PKCE S256,
+#          NO client secret) - production frontend flow.
+#          Uses the ZITADEL_SPA_CLIENT_ID app (User Agent
+#          type, auth method NONE, devMode). Proves the
+#          browser-client pattern works end-to-end without
+#          a confidential secret.
+# =====================================================
+step 1b "SPA login (PKCE S256, public client, no secret)"
+SPA_CLIENT_ID="$(envget ZITADEL_SPA_CLIENT_ID)"
+if [[ -n "$SPA_CLIENT_ID" && "$SPA_CLIENT_ID" != "replace-me" ]]; then
+  VERIFIER=$(head -c 48 /dev/urandom | basenc --base64url | tr -d '=' | head -c 64)
+  CHALLENGE=$(printf '%s' "$VERIFIER" | openssl dgst -sha256 -binary | basenc --base64url | tr -d '=')
+  LOC=$(curl -sS -o /dev/null -w '%{redirect_url}' \
+    "$AUTH/oauth/v2/authorize?client_id=$SPA_CLIENT_ID&response_type=code&scope=openid+profile&redirect_uri=$(printf %s "$REDIRECT_URI" | sed 's|/|%2F|g;s|:|%3A|g')&state=spa&code_challenge=$CHALLENGE&code_challenge_method=S256")
+  ARID=$(printf %s "$LOC" | grep -oE 'authRequest=[A-Za-z0-9_]+' | cut -d= -f2)
+  SRESP=$(curl -sS -X POST "$AUTH/v2/sessions" -H "Content-Type: application/json" -H "Accept: application/json" \
+    -H "Authorization: Bearer $LCPAT" \
+    -d '{"checks":{"user":{"loginName":"test1"},"password":{"password":"MokiTest1-A"}}}')
+  SCB=$(curl -sS -X POST "$AUTH/v2/oidc/auth_requests/$ARID" -H "Content-Type: application/json" -H "Accept: application/json" \
+    -H "Authorization: Bearer $LCPAT" \
+    -d "{\"session\":{\"sessionId\":\"$(printf %s "$SRESP" | jq -r .sessionId)\",\"sessionToken\":\"$(printf %s "$SRESP" | jq -r .sessionToken)\"}}")
+  SCODE=$(printf %s "$SCB" | jq -r .callbackUrl | grep -oE 'code=[^&]+' | cut -d= -f2)
+  STR=$(curl -sS -X POST "$AUTH/oauth/v2/token" -H "Content-Type: application/x-www-form-urlencoded" \
+    --data-urlencode "grant_type=authorization_code" \
+    --data-urlencode "code=$SCODE" \
+    --data-urlencode "client_id=$SPA_CLIENT_ID" \
+    --data-urlencode "redirect_uri=$REDIRECT_URI" \
+    --data-urlencode "code_verifier=$VERIFIER")
+  STOKEN=$(printf %s "$STR" | jq -r .access_token)
+  if [[ -n "$STOKEN" && "$STOKEN" != "null" ]] && [[ "$(printf %s "$STOKEN" | cut -d. -f2 | wc -c)" -gt 100 ]]; then
+    SC=$(code GET "$API/api/users/me" "$STOKEN")
+    if [[ "$SC" == "200" ]]; then
+      pass "SPA token via PKCE (no secret) accepted by api-gateway (200)"
+    else fail "SPA token rejected by api-gateway (http=$SC)"; fi
+  else fail "SPA PKCE token exchange (err: $(printf %s "$STR" | jq -r .error))"; fi
+else
+  note "ZITADEL_SPA_CLIENT_ID not set; skipping SPA-pattern check"
+fi
+
+# =====================================================
 # STEP 2: GET /api/users/me
 # =====================================================
 step 2 "GET /api/users/me"
@@ -259,6 +299,19 @@ else note "skipped (video not READY)"; fail "step 9 skipped"; fi
 #          public accounts' videos too, not only follows.
 # =====================================================
 step 10 "own-video exclusion: test1 feed must NOT contain it"
+# Rerun-ability: a previous run may have left test2
+# deactivated in Zitadel (step 12 deactivates it). Reactivate
+# via the admin session so the login below succeeds.
+ADMINSESS_PREP=$(curl -sS -X POST "$AUTH/v2/sessions" -H "Content-Type: application/json" -H "Accept: application/json" \
+  -H "Authorization: Bearer $LCPAT" \
+  -d '{"checks":{"user":{"loginName":"zitadel-admin@zitadel.auth.localhost"},"password":{"password":"Password1!"}}}' \
+  | jq -r .sessionToken)
+T2_ZID=$(docker exec zitadel-postgres-1 psql -U postgres -d zitadel -At -c \
+  "SELECT id FROM projections.login_names3_users WHERE user_name='test2';" 2>/dev/null)
+curl -sS -X POST "$AUTH/management/v1/users/$T2_ZID/_reactivate" \
+  -H "Authorization: Bearer $ADMINSESS_PREP" -H "Accept: application/json" >/dev/null 2>&1
+docker exec mokibox-postgres psql -U postgres -d tiktok -At -c \
+  "UPDATE users SET is_active=true, deleted_at=NULL WHERE zitadel_id='$T2_ZID';" >/dev/null 2>&1
 T2=$(headless_login "test2" "MokiTest2-B")
 if [[ -z "$T2" || "$T2" == "null" ]]; then
   fail "login test2 (needed for step 11)"; T2=""
