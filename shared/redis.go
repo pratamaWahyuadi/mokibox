@@ -272,3 +272,28 @@ func EnqueueWithDelay(client *asynq.Client, task *asynq.Task, d time.Duration) (
 	}
 	return client.Enqueue(task, asynq.ProcessIn(d))
 }
+
+// NewReconcileTickTask builds the *asynq.Task for a
+// reconcile:tick job (issue #44).
+func NewReconcileTickTask(payload ReconcileTickPayload) (*asynq.Task, error) {
+	return marshalTask(TypeReconcileTick, payload)
+}
+
+// EnqueueReconcileTick is the canonical producer-side
+// helper for reconcile:tick. Used by the worker's periodic
+// ticker and by `make reconcile-once` (via the
+// phase5_enqueue-style smoke helper).
+func EnqueueReconcileTick(client *asynq.Client, payload ReconcileTickPayload, opts ...asynq.Option) (*asynq.TaskInfo, error) {
+	if payload.BatchSize <= 0 {
+		return nil, fmt.Errorf("EnqueueReconcileTick: BatchSize must be > 0")
+	}
+	task, err := NewReconcileTickTask(payload)
+	if err != nil {
+		return nil, fmt.Errorf("EnqueueReconcileTick: build task: %w", err)
+	}
+	info, err := client.Enqueue(task, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("EnqueueReconcileTick: enqueue: %w", err)
+	}
+	return info, nil
+}

@@ -245,6 +245,55 @@ func (c *R2Client) DeleteObjects(ctx context.Context, keys []string) error {
 	return nil
 }
 
+// ListObjectsByPrefix returns every object key under the
+// given prefix, paginating ListObjectsV2 (R2 returns at
+// most 1000 keys per call). Used by the issue #44
+// reconciliation sweeper to cross-check what R2 still
+// holds for tombstoned users.
+//
+// maxKeys caps the total number of keys returned so a
+// pathological prefix (or a bug in the caller) cannot
+// make the sweeper buffer the whole bucket in memory.
+// maxKeys <= 0 means unlimited.
+//
+// Guards mirror DeletePrefix: the prefix MUST be non-empty,
+// end with "/" (so "uploads/u1/" cannot match "uploads/u11/"),
+// and not be slash-only (that would list the entire bucket).
+func (c *R2Client) ListObjectsByPrefix(ctx context.Context, prefix string, maxKeys int) ([]string, error) {
+	if prefix == "" {
+		return nil, fmt.Errorf("ListObjectsByPrefix: prefix is empty")
+	}
+	if !strings.HasSuffix(prefix, "/") {
+		return nil, fmt.Errorf("ListObjectsByPrefix: prefix %q must end with '/'", prefix)
+	}
+	if strings.Trim(prefix, "/") == "" {
+		return nil, fmt.Errorf("ListObjectsByPrefix: prefix %q is too broad (would match bucket root)", prefix)
+	}
+
+	var keys []string
+	pager := s3.NewListObjectsV2Paginator(c.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(c.bucket),
+		Prefix: aws.String(prefix),
+	})
+	for pager.HasMorePages() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("ListObjectsByPrefix: list under %q: %w", prefix, mapR2Error("ListObjectsByPrefix", prefix, err))
+		}
+		for _, obj := range page.Contents {
+			key := aws.ToString(obj.Key)
+			if key == "" {
+				continue
+			}
+			keys = append(keys, key)
+			if maxKeys > 0 && len(keys) >= maxKeys {
+				return keys, nil
+			}
+		}
+	}
+	return keys, nil
+}
+
 // DeletePrefix removes every object whose key starts
 // with prefix. It is used by the worker cleanup path
 // to remove all HLS + thumbnail outputs under a video's

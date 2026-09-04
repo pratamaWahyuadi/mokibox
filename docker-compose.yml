@@ -183,6 +183,14 @@ services:
       R2_BUCKET:           ${R2_BUCKET}
       R2_ENDPOINT:         ${R2_ENDPOINT}
       TRANSCODE_TIMEOUT:   ${TRANSCODE_TIMEOUT}
+      # R2 orphan reconciliation (issue #44). The worker
+      # enqueues reconcile:tick on this cadence (default 1h)
+      # and examines up to RECONCILE_BATCH tombstoned users
+      # per tick. DRY_RUN=true logs orphan candidates without
+      # enqueuing cleanup.
+      RECONCILE_INTERVAL:   ${RECONCILE_INTERVAL:-1h}
+      RECONCILE_BATCH:     ${RECONCILE_BATCH:-100}
+      RECONCILE_DRY_RUN:   ${RECONCILE_DRY_RUN:-false}
     depends_on:
       postgres:
         condition: service_healthy
