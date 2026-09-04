@@ -181,3 +181,15 @@ vet: ## Run go vet.
 clean: ## Remove ./bin and Go test cache.
 	rm -rf $(BIN_DIR)
 	$(GO) clean -testcache
+
+# -----------------------------------------------------------
+# Reconciliation (issue #44)
+# -----------------------------------------------------------
+
+.PHONY: reconcile-once
+reconcile-once: ## Enqueue one R2 orphan reconciliation sweep now (batch 100, not dry-run).
+	$(GO) run ./scripts/smoketest/reconcile_enqueue -batch 100 -dry-run=false
+
+.PHONY: reconcile-once-dry
+reconcile-once-dry: ## Enqueue one reconciliation sweep in DRY-RUN mode (log only, no cleanup).
+	$(GO) run ./scripts/smoketest/reconcile_enqueue -batch 100 -dry-run=true

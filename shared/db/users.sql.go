@@ -194,6 +194,53 @@ func (q *Queries) GetUserProfileWithStats(ctx context.Context, arg GetUserProfil
 	return i, err
 }
 
+const listUsersEligibleForReconcile = `-- name: ListUsersEligibleForReconcile :many
+SELECT id
+FROM users
+WHERE is_active = FALSE
+  AND deleted_at IS NOT NULL
+  AND deleted_at < NOW() - INTERVAL '24 hours'
+ORDER BY deleted_at ASC
+LIMIT $1
+`
+
+// Issue #44 (phase-10): candidates for the R2 orphan
+// reconciliation sweeper. A user is eligible when:
+//   - tombstoned (is_active = FALSE) AND deleted_at set
+//     (chk_users_deleted_at guarantees the pair), AND
+//   - the 24h delete-account grace has elapsed, so the
+//     post-commit cleanup:objects enqueue had every
+//     chance to run; anything left in R2 after it is an
+//     orphan from a lost enqueue / worker outage.
+//
+// Active users are never returned - the sweeper refuses
+// to operate on them by construction, and corrupt rows
+// (is_active=FALSE but deleted_at NULL, or vice versa)
+// are excluded here and left to admin review (per issue
+// #44 Out of Scope).
+func (q *Queries) ListUsersEligibleForReconcile(ctx context.Context, limit int32) ([]uuid.UUID, error) {
+	rows, err := q.db.QueryContext(ctx, listUsersEligibleForReconcile, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const tombstoneUser = `-- name: TombstoneUser :one
 UPDATE users
 SET is_active     = FALSE,

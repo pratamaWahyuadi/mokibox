@@ -36,6 +36,15 @@ const (
 	// more than 24h ago. The worker fetches the row,
 	// removes the R2 objects, then hard-deletes the row.
 	TypeCleanupVideo = "cleanup:video"
+
+	// TypeReconcileTick runs one R2 orphan reconciliation
+	// sweep (issue #44): find tombstoned users whose R2
+	// prefixes still hold objects (lost between the
+	// delete-account commit and the cleanup:objects
+	// enqueue) and schedule their deletion. Enqueued
+	// periodically by the worker's ticker (RECONCILE_INTERVAL)
+	// and manually via `make reconcile-once`.
+	TypeReconcileTick = "reconcile:tick"
 )
 
 // TranscodeVideoPayload is the body of a transcode:video
@@ -58,4 +67,17 @@ type CleanupObjectsPayload struct {
 // task. VideoID identifies the row to finalise.
 type CleanupVideoPayload struct {
 	VideoID string `json:"video_id"`
+}
+
+// ReconcileTickPayload is the body of a reconcile:tick
+// task (issue #44). All fields come from the worker config
+// so a manual `make reconcile-once` run can override the
+// batch size and dry-run flag without touching .env.
+type ReconcileTickPayload struct {
+	// BatchSize caps the number of tombstoned users
+	// examined this tick (default 100).
+	BatchSize int `json:"batch_size"`
+	// DryRun logs orphan candidates without enqueuing
+	// cleanup:objects.
+	DryRun bool `json:"dry_run"`
 }

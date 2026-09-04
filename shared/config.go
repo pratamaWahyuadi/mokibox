@@ -82,6 +82,15 @@ type WorkerConfig struct {
 	// Hard timeout per transcode job (worker kills the
 	// process if it exceeds this).
 	TranscodeTimeout time.Duration
+
+	// Reconcile config (issue #44, phase-10). The worker
+	// runs an R2 orphan reconciliation sweep on this
+	// cadence, examining up to ReconcileBatch tombstoned
+	// users per tick. DryRun logs candidates without
+	// enqueueing cleanup.
+	ReconcileInterval time.Duration
+	ReconcileBatch    int
+	ReconcileDryRun   bool
 }
 
 // LoadAPI reads the environment variables required by
@@ -160,6 +169,20 @@ func LoadWorker() (*WorkerConfig, error) {
 	}
 	c.TranscodeTimeout = timeout
 
+	// Issue #44 reconciliation cadence. Default 1h per the
+	// issue's Action criteria; batch 100 users per tick to
+	// avoid a thundering herd on a large backlog.
+	ri, err := envDuration("RECONCILE_INTERVAL", time.Hour)
+	if err != nil {
+		return nil, err
+	}
+	c.ReconcileInterval = ri
+	c.ReconcileBatch, err = envInt("RECONCILE_BATCH", 100)
+	if err != nil {
+		return nil, err
+	}
+	c.ReconcileDryRun = os.Getenv("RECONCILE_DRY_RUN") == "true"
+
 	if err := requireFields(
 		"WORKER_DATABASE_URL", c.WorkerDatabaseURL,
 		"REDIS_ADDR", c.RedisAddr,
@@ -189,6 +212,26 @@ func envDuration(name string, def time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("invalid duration for %s=%q: %w", name, v, err)
 	}
 	return d, nil
+}
+
+// envInt parses an int env var, falling back to def when
+// unset. Same fail-loud policy as envDuration: a
+// present-but-invalid value is an error, and a
+// non-positive value is rejected because every current
+// caller uses it as a size/budget (never 0 or negative).
+func envInt(name string, def int) (int, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid int for %s=%q: %w", name, v, err)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("invalid int for %s=%q: must be > 0", name, v)
+	}
+	return n, nil
 }
 
 // requireFields returns the first missing field as a wrapped

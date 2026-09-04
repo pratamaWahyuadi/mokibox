@@ -1,0 +1,32 @@
+-- =====================================================
+-- 002_reconcile_users_grant.sql - phase 10, issue #44.
+--
+-- The R2 orphan reconciliation sweeper runs inside the
+-- transcoder-worker and needs the list of tombstoned users
+-- (is_active=false, deleted_at set, past the 24h grace)
+-- to cross-check their R2 prefixes. The worker's DB role
+-- (tiktok_worker) is deliberately restricted to the videos
+-- table (SEC-03 restricted role), so the first live run
+-- of the sweeper failed with:
+--
+--   ERROR: permission denied for table users
+--   (SQLSTATE 42501)
+--
+-- Per the user's design decision (session 2026-09-04,
+-- option: column-level least privilege) the grant covers
+-- ONLY the three columns the eligibility query reads:
+--   - id            (compose R2 prefixes, task payload)
+--   - is_active     (eligibility predicate)
+--   - deleted_at    (eligibility predicate + grace window)
+--
+-- The worker can NOT read username / display_name / bio /
+-- avatar_url / zitadel_id: tombstoned rows null out the
+-- PII columns anyway (TombstoneUser), but the
+-- column-level grant keeps the boundary explicit and
+-- survives future schema edits that add PII columns.
+--
+-- Forward-only (per CONVENTIONS.md); applied manually via
+-- the documented psql pipe, never edited post-merge.
+-- =====================================================
+
+GRANT SELECT (id, is_active, deleted_at) ON users TO tiktok_worker;

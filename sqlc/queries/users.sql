@@ -78,3 +78,25 @@ SELECT
 FROM users u
 WHERE u.id = $1
 LIMIT 1;
+
+-- name: ListUsersEligibleForReconcile :many
+-- Issue #44 (phase-10): candidates for the R2 orphan
+-- reconciliation sweeper. A user is eligible when:
+--   - tombstoned (is_active = FALSE) AND deleted_at set
+--     (chk_users_deleted_at guarantees the pair), AND
+--   - the 24h delete-account grace has elapsed, so the
+--     post-commit cleanup:objects enqueue had every
+--     chance to run; anything left in R2 after it is an
+--     orphan from a lost enqueue / worker outage.
+-- Active users are never returned - the sweeper refuses
+-- to operate on them by construction, and corrupt rows
+-- (is_active=FALSE but deleted_at NULL, or vice versa)
+-- are excluded here and left to admin review (per issue
+-- #44 Out of Scope).
+SELECT id
+FROM users
+WHERE is_active = FALSE
+  AND deleted_at IS NOT NULL
+  AND deleted_at < NOW() - INTERVAL '24 hours'
+ORDER BY deleted_at ASC
+LIMIT $1;

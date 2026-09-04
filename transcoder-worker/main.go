@@ -138,6 +138,7 @@ func (w *Worker) registerHandlers(mux *asynq.ServeMux) {
 	mux.HandleFunc(shared.TypeTranscodeVideo, w.HandleTranscode)
 	mux.HandleFunc(shared.TypeCleanupObjects, w.HandleCleanupObjects)
 	mux.HandleFunc(shared.TypeCleanupVideo, w.HandleCleanupVideo)
+	mux.HandleFunc(shared.TypeReconcileTick, w.HandleReconcileTick)
 }
 
 // run blocks until ctx is cancelled or the asynq server
@@ -162,6 +163,14 @@ func (w *Worker) run(ctx context.Context) error {
 		"transcode_timeout", w.Cfg.TranscodeTimeout.String(),
 		"r2_bucket", w.Cfg.R2Bucket,
 	)
+
+	// Reconciliation sweeper (issue #44): a ticker in this
+	// process enqueues reconcile:tick on the configured
+	// cadence; the asynq server above consumes it in its
+	// own processing slot, so a slow sweep never blocks
+	// transcode/cleanup tasks. Cancelled with the root
+	// context on shutdown.
+	go w.runReconcileTicker(ctx)
 
 	if err := srv.Run(mux); err != nil {
 		// asynq.Server.Run returns the error that
