@@ -127,6 +127,30 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # Hardening (SEC-02, issue #31). The gateway processes
+    # unauthenticated traffic (JWTs, webhooks with HMAC) but
+    # never untrusted media, so the sandbox is tight but a
+    # notch below the worker's (no read_only tmpfs dance -
+    # the binary needs no writable paths at all beyond
+    # what the OS provides, and distroless has no shell to
+    # protect anyway):
+    #   - read_only root FS: the gateway never writes to
+    #     disk (stateless; logs go to stdout)
+    #   - cap_drop ALL + no-new-privileges
+    #   - pids_limit 200 bounds a request-storm fork burst
+    #   - mem_limit 512m + cpus 1.0 bounds the whole
+    #     service on the single VPS
+    #   - user left to the image (distroless nonroot,
+    #     UID 65532); an explicit user: key here would
+    #     conflict with the image's own USER directive
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 200
+    mem_limit: 512m
+    cpus: "1.0"
     networks:
       - backend
 
@@ -210,6 +234,41 @@ services:
       - ./deploy/nginx/certs:/etc/nginx/certs:ro
     depends_on:
       - api-gateway
+    # Hardening (SEC-02, issue #31). Nginx is the only
+    # internet-facing service. The docker-entrypoint needs
+    # CHOWN (it chowns /var/cache/nginx to the nginx worker
+    # UID 101 at startup) and the root master needs
+    # SETGID/SETUID/NET_BIND_SERVICE (bind :80/:443, drop
+    # to worker user), so those four stay; everything else
+    # the default image caps are dropped:
+    #   - cap_drop [AUDIT_WRITE, DAC_OVERRIDE, FOWNER,
+    #     FSETID, KILL, MKNOD, NET_RAW, SETFCAP, SETPCAP,
+    #     SYS_CHROOT]
+    #   - no-new-privileges
+    #   - read_only root FS + tmpfs for nginx runtime
+    #     writes (/var/cache/nginx, /var/run, /var/log)
+    #   - pids_limit + mem_limit bound a request storm
+    cap_drop:
+      - AUDIT_WRITE
+      - DAC_OVERRIDE
+      - FOWNER
+      - FSETID
+      - KILL
+      - MKNOD
+      - NET_RAW
+      - SETFCAP
+      - SETPCAP
+      - SYS_CHROOT
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:size=64M,mode=1777
+      - /var/run:size=16M,mode=1777
+      - /var/log/nginx:size=32M,mode=1777
+    pids_limit: 100
+    mem_limit: 256m
+    cpus: "0.5"
     networks:
       - backend
 
