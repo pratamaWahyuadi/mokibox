@@ -171,7 +171,7 @@ func (w *Worker) HandleTranscode(ctx context.Context, t *asynq.Task) error {
 		// already set) and ask cleanup to remove
 		// the raw key. The user will see the
 		// status flip on next /videos/:id/status.
-		if _, ferr := w.Queries.MarkVideoFailed(ctx, videoID); ferr != nil {
+		if ferr := w.markFailedDetached(videoID); ferr != nil {
 			w.Logger.Error("transcode handler: mark failed (post-budget)", "err", ferr, "video_id", videoID)
 		}
 		if _, qerr := shared.EnqueueCleanupObjects(w.Asynq, shared.CleanupObjectsPayload{
@@ -233,7 +233,7 @@ func (w *Worker) HandleTranscode(ctx context.Context, t *asynq.Task) error {
 			// Permanent: do not retry, mark FAILED,
 			// clean up the raw key so R2 doesn't
 			// keep accumulating hostile uploads.
-			if _, ferr := w.Queries.MarkVideoFailed(ctx, videoID); ferr != nil {
+			if ferr := w.markFailedDetached(videoID); ferr != nil {
 				w.Logger.Error("transcode handler: mark failed (invalid media)", "err", ferr, "video_id", videoID)
 			}
 			if _, qerr := shared.EnqueueCleanupObjects(w.Asynq, shared.CleanupObjectsPayload{
@@ -254,7 +254,7 @@ func (w *Worker) HandleTranscode(ctx context.Context, t *asynq.Task) error {
 	if err := ValidateMedia(probe, size); err != nil {
 		// Same permanent branch as ProbeFile's own
 		// validation error.
-		if _, ferr := w.Queries.MarkVideoFailed(ctx, videoID); ferr != nil {
+		if ferr := w.markFailedDetached(videoID); ferr != nil {
 			w.Logger.Error("transcode handler: mark failed (validate)", "err", ferr, "video_id", videoID)
 		}
 		if _, qerr := shared.EnqueueCleanupObjects(w.Asynq, shared.CleanupObjectsPayload{
@@ -308,20 +308,7 @@ func (w *Worker) HandleTranscode(ctx context.Context, t *asynq.Task) error {
 		}
 		indexPath := filepath.Join(variantDir, "index.m3u8")
 		segmentPattern := filepath.Join(variantDir, "segment_%04d.ts")
-		args := []string{
-			"-y",
-			"-i", sourcePath,
-			"-vf", "scale=-2:" + strings.TrimSuffix(v.Dir, "p"),
-			"-c:v", "libx264",
-			"-preset", "veryfast",
-			"-crf", "23",
-			"-c:a", "aac",
-			"-b:a", "128k",
-			"-hls_time", "6",
-			"-hls_playlist_type", "vod",
-			"-hls_segment_filename", segmentPattern,
-			indexPath,
-		}
+		args := buildVariantArgs(sourcePath, indexPath, segmentPattern, v)
 		if err := w.runFFmpeg(ctx, args, workDir); err != nil {
 			w.Logger.Error("transcode handler: ffmpeg variant", "err", err, "variant", v.Dir, "video_id", videoID)
 			cleanupOnFailure()
@@ -343,15 +330,7 @@ func (w *Worker) HandleTranscode(ctx context.Context, t *asynq.Task) error {
 
 	// Thumbnail: one frame from second 1.
 	thumbPath := filepath.Join(workDir, filepath.Base(thumbnailKey))
-	thumbArgs := []string{
-		"-y",
-		"-i", sourcePath,
-		"-ss", "00:00:01",
-		"-frames:v", "1",
-		"-vf", "scale=480:-1",
-		thumbPath,
-	}
-	if err := w.runFFmpeg(ctx, thumbArgs, workDir); err != nil {
+	if err := w.runFFmpeg(ctx, buildThumbnailArgs(sourcePath, thumbPath), workDir); err != nil {
 		w.Logger.Error("transcode handler: ffmpeg thumb", "err", err, "video_id", videoID)
 		cleanupOnFailure()
 		return w.handleTransient(ctx, incremented, "ffmpeg thumb")
@@ -449,6 +428,30 @@ func (w *Worker) HandleTranscode(ctx context.Context, t *asynq.Task) error {
 	return nil
 }
 
+// markFailedDetached marks the video FAILED using a context
+// DETACHED from the per-task timeout. Terminal-state DB
+// writes must never inherit an expired task context: when
+// TRANSCODE_TIMEOUT fires mid-attempt, the task ctx is
+// already deadline-exceeded, so a MarkVideoFailed through
+// it fails too and the row stays stuck in PROCESSING with
+// a full retry budget - permanently invisible to both the
+// user and the 24h cleanup job.
+//
+// Exposed live by the phase-10 timeout-kill smoke (issue
+// #39): attempt 3 was killed at the R2 download, and the
+// post-budget MarkVideoFailed logged
+// "mark failed (post-budget): context deadline exceeded"
+// while the row kept status=PROCESSING retry_count=3.
+//
+// 30s is generous for a single-row UPDATE and still bounds
+// a pathological DB so the worker cannot hang on it.
+func (w *Worker) markFailedDetached(videoID uuid.UUID) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := w.Queries.MarkVideoFailed(ctx, videoID)
+	return err
+}
+
 // handleTransient centralises the "retry if budget
 // remains, otherwise mark FAILED" decision so every
 // transient failure site in HandleTranscode looks the
@@ -460,7 +463,7 @@ func (w *Worker) handleTransient(ctx context.Context, v db.Video, op string) err
 	// at the start of this attempt, so v.RetryCount
 	// here is "attempts made including this one".
 	if v.RetryCount >= MaxRetries {
-		if _, err := w.Queries.MarkVideoFailed(ctx, v.ID); err != nil {
+		if err := w.markFailedDetached(v.ID); err != nil {
 			w.Logger.Error("transcode handler: mark failed (post-budget)", "err", err, "video_id", v.ID)
 		}
 		if _, err := shared.EnqueueCleanupObjects(w.Asynq, shared.CleanupObjectsPayload{Keys: []string{v.R2Key}}); err != nil {
@@ -487,6 +490,45 @@ func (w *Worker) handleTransient(ctx context.Context, v db.Video, op string) err
 	w.Logger.Info("transcode handler: re-enqueued for retry",
 		"video_id", v.ID, "op", op, "retry_count", v.RetryCount, "delay", retryDelayFor(v.RetryCount))
 	return nil
+}
+
+// buildVariantArgs assembles the ffmpeg argv for one HLS
+// variant encode. Pure function so the flags (codec, preset,
+// CRF, HLS segmentation) can be unit-tested without running
+// ffmpeg. The output playlist path must be the LAST arg.
+func buildVariantArgs(sourcePath, indexPath, segmentPattern string, v struct {
+	Dir        string
+	Resolution string
+	Bandwidth  int
+}) []string {
+	return []string{
+		"-y",
+		"-i", sourcePath,
+		"-vf", "scale=-2:" + strings.TrimSuffix(v.Dir, "p"),
+		"-c:v", "libx264",
+		"-preset", "veryfast",
+		"-crf", "23",
+		"-c:a", "aac",
+		"-b:a", "128k",
+		"-hls_time", "6",
+		"-hls_playlist_type", "vod",
+		"-hls_segment_filename", segmentPattern,
+		indexPath,
+	}
+}
+
+// buildThumbnailArgs assembles the ffmpeg argv for the
+// single-frame JPEG thumbnail (frame at 00:00:01, width
+// scaled to 480).
+func buildThumbnailArgs(sourcePath, thumbPath string) []string {
+	return []string{
+		"-y",
+		"-i", sourcePath,
+		"-ss", "00:00:01",
+		"-frames:v", "1",
+		"-vf", "scale=480:-1",
+		thumbPath,
+	}
 }
 
 // runFFmpeg wraps exec.CommandContext with sane

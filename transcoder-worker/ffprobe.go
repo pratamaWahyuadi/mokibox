@@ -167,12 +167,18 @@ func ProbeFile(ctx context.Context, filePath string) (ffprobeResult, error) {
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		// ffprobe exits non-zero for missing files,
-		// malformed containers, and "no streams
-		// found". All of these are user input
-		// problems from the worker's perspective, so
-		// we surface them as ErrInvalidMedia so the
-		// handler can short-circuit to MarkVideoFailed.
-		return ffprobeResult{}, fmt.Errorf("%w: ffprobe %s: %s", ErrInvalidMedia, filePath, stderr.String())
+		// malformed containers, and "no streams found".
+		// All of these are user input problems from the
+		// worker's perspective, so they surface as
+		// ErrInvalidMedia and the handler short-circuits
+		// to MarkVideoFailed. The original error is
+		// preserved in the message: for a ctx deadline
+		// kill it names "context deadline exceeded" /
+		// "signal: killed", so an operator reading the
+		// log can distinguish a killed probe from a
+		// corrupt file (found by probe_kill_test.go, PR
+		// #47 review discussion, issue #39 residual gap).
+		return ffprobeResult{}, fmt.Errorf("%w: ffprobe %s: %v: %s", ErrInvalidMedia, filePath, err, stderr.String())
 	}
 	var r ffprobeResult
 	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
