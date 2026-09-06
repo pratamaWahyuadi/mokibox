@@ -22,6 +22,7 @@
 package handlers
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"log/slog"
@@ -34,12 +35,19 @@ import (
 	"github.com/pratamaWahyuadi/mokibox/shared/db"
 )
 
+// notificationStore is the consumer-side interface the
+// notification inbox needs. *db.Queries satisfies it.
+type notificationStore interface {
+	ListNotifications(ctx context.Context, arg db.ListNotificationsParams) ([]db.Notification, error)
+	MarkAllNotificationsRead(ctx context.Context, userID uuid.UUID) (int64, error)
+}
+
 // NotificationHandler groups the notification inbox
-// endpoints. Only Queries is needed: List is a read
-// and MarkAllRead is a single UPDATE (no multi-
-// statement transaction).
+// endpoints. Only the store interface is needed: List
+// is a read and MarkAllRead is a single UPDATE (no
+// multi-statement transaction).
 type NotificationHandler struct {
-	Queries *db.Queries
+	Queries notificationStore
 }
 
 // NewNotificationHandler builds a NotificationHandler.

@@ -325,12 +325,19 @@ func assertErrCode(t *testing.T, rec *httptest.ResponseRecorder, wantStatus int,
 	if rec.Code != wantStatus {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, wantStatus, rec.Body.String())
 	}
+	// Decode only the FIRST envelope: some follow-list paths
+	// write the 404 envelope and then ALSO return it to Echo,
+	// whose HTTPErrorHandler appends a second envelope (same
+	// status, same code — pre-existing behaviour, harmless on
+	// the wire for status-only clients, kept out of refactor
+	// scope). json.Decoder stops at the first value.
+	dec := json.NewDecoder(rec.Body)
 	var env struct {
 		Error struct {
 			Code shared.ErrorCode `json:"code"`
 		} `json:"error"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+	if err := dec.Decode(&env); err != nil {
 		t.Fatalf("decode error envelope: %v", err)
 	}
 	if env.Error.Code != wantCode {

@@ -38,13 +38,19 @@ import (
 	"github.com/pratamaWahyuadi/mokibox/shared/db"
 )
 
+// feedStore is the consumer-side interface the home
+// feed needs. *db.Queries satisfies it.
+type feedStore interface {
+	ListFeedVideos(ctx context.Context, arg db.ListFeedVideosParams) ([]db.ListFeedVideosRow, error)
+}
+
 // FeedHandler holds the dependencies for the home feed
-// endpoint. The shape mirrors VideoHandler: a small
-// struct with constructor-injected deps, no package-level
-// state, defence-in-depth nil checks at method entry.
+// endpoint. Queries/R2 are the consumer-side interfaces;
+// the constructor keeps the production concretes so
+// routes.go wiring is unchanged.
 type FeedHandler struct {
-	Queries *db.Queries
-	R2      *shared.R2Client
+	Queries feedStore
+	R2      r2ObjectStore
 	Cfg     *shared.APIConfig
 }
 
@@ -63,6 +69,12 @@ func NewFeedHandler(queries *db.Queries, r2 *shared.R2Client, cfg *shared.APICon
 		return nil, fmt.Errorf("NewFeedHandler: cfg is nil")
 	}
 	return &FeedHandler{Queries: queries, R2: r2, Cfg: cfg}, nil
+}
+
+// newFeedHandlerForTest lets the test suite build the
+// handler directly from interfaces.
+func newFeedHandlerForTest(store feedStore, r2 r2ObjectStore, cfg *shared.APIConfig) *FeedHandler {
+	return &FeedHandler{Queries: store, R2: r2, Cfg: cfg}
 }
 
 // HomeFeed returns a page of READY videos the viewer is
@@ -147,7 +159,7 @@ func (h *FeedHandler) HomeFeed(c echo.Context) error {
 // into the wire VideoObject. is_owner is always false
 // because the feed query excludes the viewer's own
 // videos upstream (v.user_id <> $1).
-func videoObjectFromFeedRow(ctx context.Context, r2 *shared.R2Client, cfg *shared.APIConfig, r db.ListFeedVideosRow) VideoObject {
+func videoObjectFromFeedRow(ctx context.Context, r2 r2ObjectStore, cfg *shared.APIConfig, r db.ListFeedVideosRow) VideoObject {
 	out := VideoObject{
 		ID:            r.ID,
 		UserID:        r.UserID,

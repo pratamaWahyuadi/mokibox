@@ -60,18 +60,35 @@ const (
 	EventUserRemoved     = "user.removed"
 )
 
+// webhookStore is the consumer-side interface the
+// webhook handlers need: resolve the local user by
+// Zitadel sub and deactivate them. *db.Queries
+// satisfies it.
+type webhookStore interface {
+	GetUserByZitadelID(ctx context.Context, zitadelID string) (db.User, error)
+	DeactivateUser(ctx context.Context, id uuid.UUID) (db.User, error)
+}
+
 // WebhookHandler holds the dependencies the
-// /api/webhooks/zitadel endpoint needs. Phase 8
-// extends the struct with DB and Queue so the
-// user.removed branch can call DeleteUserData
-// (which itself needs the *sql.DB to open the
-// tombstone tx and the Asynq client to enqueue
-// the R2 cleanup task).
+// /api/webhooks/zitadel endpoint needs. The user.removed
+// branch delegates to the exported DeleteUserData
+// adapter (concrete pair), which is itself covered by
+// the account tests; the interface fields keep the
+// handler's own paths (lookup, deactivate, signature)
+// stubbable.
 type WebhookHandler struct {
-	Queries    *db.Queries
+	Queries    webhookStore
 	DB         *sql.DB
 	Queue      *asynq.Client
 	SigningKey string
+
+	// queriesConcrete keeps the *db.Queries the
+	// user.removed branch hands to the exported
+	// DeleteUserData adapter (which takes the concrete
+	// pair so webhook.go's pre-refactor call site is
+	// unchanged). Nil in tests that do not exercise
+	// user.removed.
+	queriesConcrete *db.Queries
 }
 
 // NewWebhookHandler returns a WebhookHandler with
@@ -83,11 +100,21 @@ type WebhookHandler struct {
 // value at startup).
 func NewWebhookHandler(queries *db.Queries, dbHandle *sql.DB, queue *asynq.Client, signingKey string) *WebhookHandler {
 	return &WebhookHandler{
-		Queries:    queries,
-		DB:         dbHandle,
-		Queue:      queue,
-		SigningKey: signingKey,
+		Queries:         queries,
+		DB:              dbHandle,
+		Queue:           queue,
+		SigningKey:      signingKey,
+		queriesConcrete: queries,
 	}
+}
+
+// newWebhookHandlerForTest lets the test suite build
+// the handler directly from the interface (DB/Queue
+// stay concrete: only the user.removed branch uses
+// them, and that branch delegates to the tested
+// DeleteUserData adapter).
+func newWebhookHandlerForTest(store webhookStore, signingKey string) *WebhookHandler {
+	return &WebhookHandler{Queries: store, SigningKey: signingKey}
 }
 
 // zitadelActionV2Event is the subset of the Actions V2
@@ -243,7 +270,7 @@ func (h *WebhookHandler) handleUserRemoved(ctx context.Context, c echo.Context, 
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "lookup user"))
 	}
 
-	if err := DeleteUserData(ctx, h.Queries, h.DB, h.Queue, userID); err != nil {
+	if err := DeleteUserData(ctx, h.queriesConcrete, h.DB, h.Queue, userID); err != nil {
 		slog.Error("user.removed DeleteUserData failed", "err", err, "user_id", userID)
 		return shared.RespondError(c, err)
 	}
@@ -269,7 +296,7 @@ var errUserNotFound = errors.New("local user not found")
 // The handler runs against a *sql.DB (pgx stdlib), so
 // a missing row surfaces as sql.ErrNoRows from
 // QueryRowContext().Scan().
-func lookupUserIDByZitadelID(ctx context.Context, q *db.Queries, sub string) (uuid.UUID, error) {
+func lookupUserIDByZitadelID(ctx context.Context, q webhookStore, sub string) (uuid.UUID, error) {
 	row, err := q.GetUserByZitadelID(ctx, sub)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
