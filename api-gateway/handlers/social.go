@@ -24,6 +24,13 @@
 // owners). Every unauthorised access collapses to 404
 // (anti-enumeration, per API contract asumsi 6).
 //
+// Testability (the handler-testability refactor): the struct
+// fields are consumer-side interfaces, not *db.Queries/
+// *sql.DB concretes. The constructor still accepts the
+// concrete production pair and adapts them, so routes.go
+// wiring is unchanged; unit tests build the handler directly
+// with stubs.
+//
 // Sentinel: missing rows surface as sql.ErrNoRows only
 // (single *sql.DB pool since the pool-consolidation
 // refactor; pgx.ErrNoRows never matches here).
@@ -51,25 +58,69 @@ import (
 // 1..1000 visible characters per LLD section 10 issue B.
 const commentContentMax = 1000
 
-// SocialHandler groups the like / view / comment /
-// reply endpoints. Dependencies are injected via the
-// constructor; DB is the single *sql.DB pool used to
-// open transactions (Queries.WithTx binds to the same
-// pool).
-type SocialHandler struct {
-	Queries *db.Queries
-	DB      *sql.DB
+// socialStore is the consumer-side read interface social.go
+// needs OUTSIDE the tx paths: load a video (visibility +
+// refresh-after-commit), load a joined comment row, page
+// comments, and check the follow edge. *db.Queries satisfies
+// it without changes.
+type socialStore interface {
+	visibilityStore
+	GetCommentByID(ctx context.Context, id uuid.UUID) (db.GetCommentByIDRow, error)
+	ListCommentsByVideo(ctx context.Context, arg db.ListCommentsByVideoParams) ([]db.ListCommentsByVideoRow, error)
+	IncrementViews(ctx context.Context, id uuid.UUID) error
 }
 
-// NewSocialHandler builds a SocialHandler. Both
-// dependencies are required: Queries for reads and
-// in-tx writes, DB for BeginTx. A nil on either is
-// a wiring bug and refuses construction early.
+// socialTxStore is the consumer-side interface the social tx
+// body needs once a querier is bound to the transaction:
+// insert/delete a like row, bump the counters, insert
+// comments, and insert notifications. *db.Queries (as bound
+// by Queries.WithTx) satisfies it.
+type socialTxStore interface {
+	InsertLike(ctx context.Context, arg db.InsertLikeParams) (db.Like, error)
+	DeleteLike(ctx context.Context, arg db.DeleteLikeParams) (db.Like, error)
+	IncrementLikesCount(ctx context.Context, id uuid.UUID) error
+	DecrementLikesCount(ctx context.Context, id uuid.UUID) error
+	IncrementCommentsCount(ctx context.Context, id uuid.UUID) error
+	InsertComment(ctx context.Context, arg db.InsertCommentParams) (db.Comment, error)
+	DeleteCommentByID(ctx context.Context, id uuid.UUID) error
+	CountCommentSubtree(ctx context.Context, id uuid.UUID) (int32, error)
+	DecrementCommentsCountBy(ctx context.Context, arg db.DecrementCommentsCountByParams) error
+	InsertNotification(ctx context.Context, arg db.InsertNotificationParams) (db.Notification, error)
+}
+
+// SocialHandler groups the like / view / comment /
+// reply endpoints. Fields are interfaces so unit tests can
+// inject stubs; the constructor adapts the production
+// concrete pair.
+type SocialHandler struct {
+	Queries socialStore
+	Run     txRunner[socialTxStore]
+}
+
+// NewSocialHandler builds a SocialHandler from the production
+// concrete pair. Both are required: Queries for reads and
+// in-tx writes, DB for BeginTx. A nil on either is a wiring
+// bug and refuses construction early. The tx runner binds
+// the same Queries to each transaction it opens, so reads
+// and writes share the single *sql.DB pool.
 func NewSocialHandler(queries *db.Queries, dbHandle *sql.DB) (*SocialHandler, error) {
 	if queries == nil || dbHandle == nil {
 		return nil, fmt.Errorf("NewSocialHandler: queries and db must be non-nil")
 	}
-	return &SocialHandler{Queries: queries, DB: dbHandle}, nil
+	return &SocialHandler{
+		Queries: queries,
+		Run: NewSQLTxRunner(dbHandle, func(tx *sql.Tx) socialTxStore {
+			return queries.WithTx(tx)
+		}),
+	}, nil
+}
+
+// newSocialHandlerForTest is the test-side constructor used
+// by social_test.go: it takes the interfaces directly so
+// stubs can drive the full request path. Production code
+// (routes.go) keeps calling NewSocialHandler.
+func newSocialHandlerForTest(store socialStore, runner txRunner[socialTxStore]) *SocialHandler {
+	return &SocialHandler{Queries: store, Run: runner}
 }
 
 // LikeObject is the wire shape for like/unlike
@@ -88,69 +139,11 @@ type viewObject struct {
 	ViewsCount int       `json:"views_count"`
 }
 
-// assertVideoVisible fetches the video and applies the
-// phase-6 detail visibility rule:
-//   - owner: any status is visible.
-//   - non-owner: status READY + active owner +
-//     follower when the owner is private.
-//
-// Any failure collapses to ErrNotFound (anti-enumeration);
-// infrastructure failures surface as ErrInternal. Returns
-// the video row on success so callers don't re-fetch.
-func (h *SocialHandler) assertVideoVisible(ctx context.Context, viewerID, videoID uuid.UUID) (db.Video, error) {
-	video, err := h.Queries.GetVideoByID(ctx, videoID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return db.Video{}, shared.Wrap(shared.ErrNotFound, "video not found")
-		}
-		slog.Error("GetVideoByID during social visibility failed", "err", err, "video_id", videoID)
-		return db.Video{}, shared.Wrap(shared.ErrInternal, "load video")
-	}
-	if video.UserID == viewerID {
-		return video, nil // owner bypasses all checks
-	}
-	if video.Status != "READY" {
-		return db.Video{}, shared.Wrap(shared.ErrNotFound, "video not found")
-	}
-	owner, uerr := h.Queries.GetUserByID(ctx, video.UserID)
-	if uerr != nil {
-		if errors.Is(uerr, sql.ErrNoRows) {
-			return db.Video{}, shared.Wrap(shared.ErrNotFound, "video not found")
-		}
-		slog.Error("GetUserByID during social visibility failed", "err", uerr, "user_id", video.UserID)
-		return db.Video{}, shared.Wrap(shared.ErrInternal, "load owner")
-	}
-	if !owner.IsActive {
-		return db.Video{}, shared.Wrap(shared.ErrNotFound, "video not found")
-	}
-	if owner.IsPrivate {
-		following, ferr := h.Queries.IsFollowing(ctx, db.IsFollowingParams{
-			FollowerID: viewerID,
-			FolloweeID: video.UserID,
-		})
-		if ferr != nil {
-			slog.Error("IsFollowing during social visibility failed", "err", ferr, "viewer", viewerID, "owner", video.UserID)
-			return db.Video{}, shared.Wrap(shared.ErrInternal, "load follow state")
-		}
-		if !following {
-			return db.Video{}, shared.Wrap(shared.ErrNotFound, "video not found")
-		}
-	}
-	return video, nil
-}
-
-// beginSocialTx opens a tx and binds a sqlc querier to
-// it. On error it returns ErrInternal already wrapped;
-// the caller must defer tx.Rollback() (a no-op after
-// Commit).
-func (h *SocialHandler) beginSocialTx(ctx context.Context) (*sql.Tx, *db.Queries, error) {
-	tx, err := h.DB.BeginTx(ctx, nil)
-	if err != nil {
-		slog.Error("social BeginTx failed", "err", err)
-		return nil, nil, shared.Wrap(shared.ErrInternal, "begin transaction")
-	}
-	return tx, h.Queries.WithTx(tx), nil
-}
+// beginSocialTx opened a raw tx + bound querier. It is
+// replaced by the h.Run(txRunner) pattern above; the runner
+// owns begin/bind/commit/rollback so the handler body is
+// pure business logic (and stubbable without a real
+// *sql.DB). Removed as part of the testability refactor.
 
 // insertSocialNotification marshals a notification
 // payload and inserts one row. Returns nil on success;
@@ -158,7 +151,7 @@ func (h *SocialHandler) beginSocialTx(ctx context.Context) (*sql.Tx, *db.Queries
 // fatal (in-tx, so a non-nil return aborts the whole
 // mutation - per LLD the notification is atomic with
 // the counter update).
-func insertSocialNotification(ctx context.Context, qtx *db.Queries, userID, actorID uuid.UUID, notifType string, payload map[string]string) error {
+func insertSocialNotification(ctx context.Context, qtx socialTxStore, userID, actorID uuid.UUID, notifType string, payload map[string]string) error {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal notification payload: %w", err)
@@ -172,22 +165,22 @@ func insertSocialNotification(ctx context.Context, qtx *db.Queries, userID, acto
 	return err
 }
 
-// parseAuthVideoParam resolves the authenticated user
-// and the :id video path param, mapping failures to
-// 401 / 400. Returns ok=false after writing the error
-// response.
-func parseAuthVideoParam(c echo.Context) (*db.User, uuid.UUID, bool) {
+// parseAuthVideoParam resolves the authenticated user and
+// the :id video path param. Failures are returned as
+// already-wrapped sentinel errors (401 / 400) so the caller
+// has a single respond point; it no longer writes the
+// response itself (which used to force `_ = RespondError`
+// discards at the call sites).
+func parseAuthVideoParam(c echo.Context) (*db.User, uuid.UUID, error) {
 	user, ok := middleware.UserFromContext(c)
 	if !ok || user == nil {
-		_ = shared.RespondError(c, shared.Wrap(shared.ErrUnauthorized, "no authenticated user"))
-		return nil, uuid.Nil, false
+		return nil, uuid.Nil, shared.Wrap(shared.ErrUnauthorized, "no authenticated user")
 	}
 	videoID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		_ = shared.RespondError(c, shared.Wrap(shared.ErrValidation, "invalid video id"))
-		return nil, uuid.Nil, false
+		return nil, uuid.Nil, shared.Wrap(shared.ErrValidation, "invalid video id")
 	}
-	return user, videoID, true
+	return user, videoID, nil
 }
 
 // LikeVideo handles POST /api/videos/:id/like.
@@ -201,57 +194,52 @@ func parseAuthVideoParam(c echo.Context) (*db.User, uuid.UUID, bool) {
 // Idempotent: liking an already-liked video returns
 // 200 with the current count and no counter change.
 func (h *SocialHandler) LikeVideo(c echo.Context) error {
-	if h.Queries == nil || h.DB == nil {
+	if h.Queries == nil || h.Run == nil {
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "social handler not configured"))
 	}
-	user, videoID, ok := parseAuthVideoParam(c)
-	if !ok {
-		return nil
+	user, videoID, err := parseAuthVideoParam(c)
+	if err != nil {
+		return shared.RespondError(c, err)
 	}
 	ctx := c.Request().Context()
 
-	video, err := h.assertVideoVisible(ctx, user.ID, videoID)
+	video, err := assertVideoOwnerOrVisible(ctx, h.Queries, user.ID, videoID)
 	if err != nil {
 		return shared.RespondError(c, err)
 	}
 
-	tx, qtx, err := h.beginSocialTx(ctx)
-	if err != nil {
-		return shared.RespondError(c, err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	// InsertLike returns a row only when this request
-	// inserted a NEW like (ON CONFLICT DO NOTHING).
-	// sql.ErrNoRows = already liked -> skip the
-	// increment + the notification.
-	_, lerr := qtx.InsertLike(ctx, db.InsertLikeParams{UserID: user.ID, VideoID: videoID})
-	switch {
-	case lerr == nil:
-		if err := qtx.IncrementLikesCount(ctx, videoID); err != nil {
-			slog.Error("IncrementLikesCount failed", "err", err, "video_id", videoID)
-			return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "update likes count"))
-		}
-		if user.ID != video.UserID { // never notify self-like
-			nerr := insertSocialNotification(ctx, qtx, video.UserID, user.ID, "like", map[string]string{
-				"username": user.Username,
-				"video_id": videoID.String(),
-			})
-			if nerr != nil {
-				slog.Error("insert like notification failed", "err", nerr, "video_id", videoID, "owner", video.UserID)
-				return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "insert notification"))
+	err = h.Run.Run(ctx, func(qtx socialTxStore) error {
+		// InsertLike returns a row only when this request
+		// inserted a NEW like (ON CONFLICT DO NOTHING).
+		// sql.ErrNoRows = already liked -> skip the
+		// increment + the notification.
+		_, lerr := qtx.InsertLike(ctx, db.InsertLikeParams{UserID: user.ID, VideoID: videoID})
+		switch {
+		case lerr == nil:
+			if err := qtx.IncrementLikesCount(ctx, videoID); err != nil {
+				slog.Error("IncrementLikesCount failed", "err", err, "video_id", videoID)
+				return shared.Wrap(shared.ErrInternal, "update likes count")
 			}
+			if user.ID != video.UserID { // never notify self-like
+				nerr := insertSocialNotification(ctx, qtx, video.UserID, user.ID, "like", map[string]string{
+					"username": user.Username,
+					"video_id": videoID.String(),
+				})
+				if nerr != nil {
+					slog.Error("insert like notification failed", "err", nerr, "video_id", videoID, "owner", video.UserID)
+					return shared.Wrap(shared.ErrInternal, "insert notification")
+				}
+			}
+		case errors.Is(lerr, sql.ErrNoRows):
+			// Idempotent re-like: nothing to do.
+		default:
+			slog.Error("InsertLike failed", "err", lerr, "user_id", user.ID, "video_id", videoID)
+			return shared.Wrap(shared.ErrInternal, "insert like")
 		}
-	case errors.Is(lerr, sql.ErrNoRows):
-		// Idempotent re-like: nothing to do.
-	default:
-		slog.Error("InsertLike failed", "err", lerr, "user_id", user.ID, "video_id", videoID)
-		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "insert like"))
-	}
-
-	if err := tx.Commit(); err != nil {
-		slog.Error("like tx commit failed", "err", err, "video_id", videoID)
-		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "commit like"))
+		return nil
+	})
+	if err != nil {
+		return shared.RespondError(c, err)
 	}
 
 	refreshed, ferr := h.Queries.GetVideoByID(ctx, videoID)
@@ -271,42 +259,37 @@ func (h *SocialHandler) LikeVideo(c echo.Context) error {
 // when a like actually existed; only then is the
 // counter decremented. Unliking never notifies.
 func (h *SocialHandler) UnlikeVideo(c echo.Context) error {
-	if h.Queries == nil || h.DB == nil {
+	if h.Queries == nil || h.Run == nil {
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "social handler not configured"))
 	}
-	user, videoID, ok := parseAuthVideoParam(c)
-	if !ok {
-		return nil
-	}
-	ctx := c.Request().Context()
-
-	if _, err := h.assertVideoVisible(ctx, user.ID, videoID); err != nil {
-		return shared.RespondError(c, err)
-	}
-
-	tx, qtx, err := h.beginSocialTx(ctx)
+	user, videoID, err := parseAuthVideoParam(c)
 	if err != nil {
 		return shared.RespondError(c, err)
 	}
-	defer func() { _ = tx.Rollback() }()
+	ctx := c.Request().Context()
 
-	_, derr := qtx.DeleteLike(ctx, db.DeleteLikeParams{UserID: user.ID, VideoID: videoID})
-	switch {
-	case derr == nil:
-		if err := qtx.DecrementLikesCount(ctx, videoID); err != nil {
-			slog.Error("DecrementLikesCount failed", "err", err, "video_id", videoID)
-			return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "update likes count"))
-		}
-	case errors.Is(derr, sql.ErrNoRows):
-		// Idempotent unlike: row did not exist.
-	default:
-		slog.Error("DeleteLike failed", "err", derr, "user_id", user.ID, "video_id", videoID)
-		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "delete like"))
+	if _, err := assertVideoOwnerOrVisible(ctx, h.Queries, user.ID, videoID); err != nil {
+		return shared.RespondError(c, err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		slog.Error("unlike tx commit failed", "err", err, "video_id", videoID)
-		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "commit unlike"))
+	err = h.Run.Run(ctx, func(qtx socialTxStore) error {
+		_, derr := qtx.DeleteLike(ctx, db.DeleteLikeParams{UserID: user.ID, VideoID: videoID})
+		switch {
+		case derr == nil:
+			if err := qtx.DecrementLikesCount(ctx, videoID); err != nil {
+				slog.Error("DecrementLikesCount failed", "err", err, "video_id", videoID)
+				return shared.Wrap(shared.ErrInternal, "update likes count")
+			}
+		case errors.Is(derr, sql.ErrNoRows):
+			// Idempotent unlike: row did not exist.
+		default:
+			slog.Error("DeleteLike failed", "err", derr, "user_id", user.ID, "video_id", videoID)
+			return shared.Wrap(shared.ErrInternal, "delete like")
+		}
+		return nil
+	})
+	if err != nil {
+		return shared.RespondError(c, err)
 	}
 
 	refreshed, ferr := h.Queries.GetVideoByID(ctx, videoID)
@@ -330,13 +313,13 @@ func (h *SocialHandler) TrackView(c echo.Context) error {
 	if h.Queries == nil {
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "social handler not configured"))
 	}
-	user, videoID, ok := parseAuthVideoParam(c)
-	if !ok {
-		return nil
+	user, videoID, err := parseAuthVideoParam(c)
+	if err != nil {
+		return shared.RespondError(c, err)
 	}
 	ctx := c.Request().Context()
 
-	if _, err := h.assertVideoVisible(ctx, user.ID, videoID); err != nil {
+	if _, err := assertVideoOwnerOrVisible(ctx, h.Queries, user.ID, videoID); err != nil {
 		return shared.RespondError(c, err)
 	}
 	if err := h.Queries.IncrementViews(ctx, videoID); err != nil {
@@ -345,7 +328,7 @@ func (h *SocialHandler) TrackView(c echo.Context) error {
 	}
 	refreshed, ferr := h.Queries.GetVideoByID(ctx, videoID)
 	if ferr != nil {
-		slog.Error("GetVideoByID after view failed", "err", ferr, "video_id", videoID)
+		slog.Error("GetVideoUserID after view failed", "err", ferr, "video_id", videoID)
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load video"))
 	}
 	return shared.RespondOK(c, viewObject{
@@ -445,12 +428,12 @@ func commentObjectFromRow(id, videoID, userID uuid.UUID, parentID uuid.NullUUID,
 // notification to the video owner (skipped on
 // self-comment). All three commit together.
 func (h *SocialHandler) CreateComment(c echo.Context) error {
-	if h.Queries == nil || h.DB == nil {
+	if h.Queries == nil || h.Run == nil {
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "social handler not configured"))
 	}
-	user, videoID, ok := parseAuthVideoParam(c)
-	if !ok {
-		return nil
+	user, videoID, err := parseAuthVideoParam(c)
+	if err != nil {
+		return shared.RespondError(c, err)
 	}
 	content, err := bindCommentContent(c)
 	if err != nil {
@@ -458,49 +441,47 @@ func (h *SocialHandler) CreateComment(c echo.Context) error {
 	}
 	ctx := c.Request().Context()
 
-	video, err := h.assertVideoVisible(ctx, user.ID, videoID)
+	video, err := assertVideoOwnerOrVisible(ctx, h.Queries, user.ID, videoID)
 	if err != nil {
 		return shared.RespondError(c, err)
 	}
 
-	tx, qtx, err := h.beginSocialTx(ctx)
-	if err != nil {
-		return shared.RespondError(c, err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	comment, err := qtx.InsertComment(ctx, db.InsertCommentParams{
-		VideoID: videoID,
-		UserID:  user.ID,
-		Content: content,
+	var commentID uuid.UUID
+	err = h.Run.Run(ctx, func(qtx socialTxStore) error {
+		comment, err := qtx.InsertComment(ctx, db.InsertCommentParams{
+			VideoID: videoID,
+			UserID:  user.ID,
+			Content: content,
+		})
+		if err != nil {
+			slog.Error("InsertComment failed", "err", err, "user_id", user.ID, "video_id", videoID)
+			return shared.Wrap(shared.ErrInternal, "create comment")
+		}
+		commentID = comment.ID
+		if err := qtx.IncrementCommentsCount(ctx, videoID); err != nil {
+			slog.Error("IncrementCommentsCount failed", "err", err, "video_id", videoID)
+			return shared.Wrap(shared.ErrInternal, "update comments count")
+		}
+		if user.ID != video.UserID { // never notify self-comment
+			nerr := insertSocialNotification(ctx, qtx, video.UserID, user.ID, "comment", map[string]string{
+				"username":   user.Username,
+				"video_id":   videoID.String(),
+				"comment_id": comment.ID.String(),
+			})
+			if nerr != nil {
+				slog.Error("insert comment notification failed", "err", nerr, "video_id", videoID)
+				return shared.Wrap(shared.ErrInternal, "insert notification")
+			}
+		}
+		return nil
 	})
 	if err != nil {
-		slog.Error("InsertComment failed", "err", err, "user_id", user.ID, "video_id", videoID)
-		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "create comment"))
-	}
-	if err := qtx.IncrementCommentsCount(ctx, videoID); err != nil {
-		slog.Error("IncrementCommentsCount failed", "err", err, "video_id", videoID)
-		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "update comments count"))
-	}
-	if user.ID != video.UserID { // never notify self-comment
-		nerr := insertSocialNotification(ctx, qtx, video.UserID, user.ID, "comment", map[string]string{
-			"username":   user.Username,
-			"video_id":   videoID.String(),
-			"comment_id": comment.ID.String(),
-		})
-		if nerr != nil {
-			slog.Error("insert comment notification failed", "err", nerr, "video_id", videoID)
-			return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "insert notification"))
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		slog.Error("comment tx commit failed", "err", err, "video_id", videoID)
-		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "commit comment"))
+		return shared.RespondError(c, err)
 	}
 
-	row, err := h.Queries.GetCommentByID(ctx, comment.ID)
+	row, err := h.Queries.GetCommentByID(ctx, commentID)
 	if err != nil {
-		slog.Error("GetCommentByID after insert failed", "err", err, "comment_id", comment.ID)
+		slog.Error("GetCommentByID after insert failed", "err", err, "comment_id", commentID)
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load comment"))
 	}
 	return shared.RespondCreated(c, commentObjectFromRow(
@@ -518,13 +499,13 @@ func (h *SocialHandler) ListComments(c echo.Context) error {
 	if h.Queries == nil {
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "social handler not configured"))
 	}
-	user, videoID, ok := parseAuthVideoParam(c)
-	if !ok {
-		return nil
+	user, videoID, err := parseAuthVideoParam(c)
+	if err != nil {
+		return shared.RespondError(c, err)
 	}
 	ctx := c.Request().Context()
 
-	if _, err := h.assertVideoVisible(ctx, user.ID, videoID); err != nil {
+	if _, err := assertVideoOwnerOrVisible(ctx, h.Queries, user.ID, videoID); err != nil {
 		return shared.RespondError(c, err)
 	}
 
@@ -578,7 +559,7 @@ func (h *SocialHandler) ListComments(c echo.Context) error {
 // atomically so comments_count can never drift from the
 // physical row count on this path.
 func (h *SocialHandler) DeleteComment(c echo.Context) error {
-	if h.Queries == nil || h.DB == nil {
+	if h.Queries == nil || h.Run == nil {
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "social handler not configured"))
 	}
 	user, ok := middleware.UserFromContext(c)
@@ -605,33 +586,29 @@ func (h *SocialHandler) DeleteComment(c echo.Context) error {
 		return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "comment not found"))
 	}
 
-	tx, qtx, err := h.beginSocialTx(ctx)
+	err = h.Run.Run(ctx, func(qtx socialTxStore) error {
+		subtree, err := qtx.CountCommentSubtree(ctx, commentID)
+		if err != nil {
+			slog.Error("CountCommentSubtree failed", "err", err, "comment_id", commentID)
+			return shared.Wrap(shared.ErrInternal, "count comment subtree")
+		}
+		if err := qtx.DeleteCommentByID(ctx, commentID); err != nil {
+			slog.Error("DeleteCommentByID failed", "err", err, "comment_id", commentID)
+			return shared.Wrap(shared.ErrInternal, "delete comment")
+		}
+		if subtree > 0 {
+			if err := qtx.DecrementCommentsCountBy(ctx, db.DecrementCommentsCountByParams{
+				ID:            comment.VideoID,
+				CommentsCount: int32(subtree),
+			}); err != nil {
+				slog.Error("DecrementCommentsCountBy failed", "err", err, "video_id", comment.VideoID, "subtree", subtree)
+				return shared.Wrap(shared.ErrInternal, "update comments count")
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		return shared.RespondError(c, err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	subtree, err := qtx.CountCommentSubtree(ctx, commentID)
-	if err != nil {
-		slog.Error("CountCommentSubtree failed", "err", err, "comment_id", commentID)
-		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "count comment subtree"))
-	}
-	if err := qtx.DeleteCommentByID(ctx, commentID); err != nil {
-		slog.Error("DeleteCommentByID failed", "err", err, "comment_id", commentID)
-		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "delete comment"))
-	}
-	if subtree > 0 {
-		if err := qtx.DecrementCommentsCountBy(ctx, db.DecrementCommentsCountByParams{
-			ID:            comment.VideoID,
-			CommentsCount: int32(subtree),
-		}); err != nil {
-			slog.Error("DecrementCommentsCountBy failed", "err", err, "video_id", comment.VideoID, "subtree", subtree)
-			return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "update comments count"))
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		slog.Error("delete comment tx commit failed", "err", err, "comment_id", commentID)
-		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "commit delete comment"))
 	}
 	return shared.RespondNoContent(c)
 }
@@ -646,7 +623,7 @@ func (h *SocialHandler) DeleteComment(c echo.Context) error {
 // the actor (self-reply) or already received one (owner
 // == parent author).
 func (h *SocialHandler) ReplyComment(c echo.Context) error {
-	if h.Queries == nil || h.DB == nil {
+	if h.Queries == nil || h.Run == nil {
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "social handler not configured"))
 	}
 	user, ok := middleware.UserFromContext(c)
@@ -672,61 +649,59 @@ func (h *SocialHandler) ReplyComment(c echo.Context) error {
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load parent comment"))
 	}
 
-	video, err := h.assertVideoVisible(ctx, user.ID, parent.VideoID)
+	video, err := assertVideoOwnerOrVisible(ctx, h.Queries, user.ID, parent.VideoID)
 	if err != nil {
 		return shared.RespondError(c, err)
 	}
 
-	tx, qtx, err := h.beginSocialTx(ctx)
-	if err != nil {
-		return shared.RespondError(c, err)
-	}
-	defer func() { _ = tx.Rollback() }()
+	var replyID uuid.UUID
+	err = h.Run.Run(ctx, func(qtx socialTxStore) error {
+		reply, err := qtx.InsertComment(ctx, db.InsertCommentParams{
+			VideoID:  parent.VideoID,
+			UserID:   user.ID,
+			ParentID: uuid.NullUUID{UUID: parentID, Valid: true},
+			Content:  content,
+		})
+		if err != nil {
+			slog.Error("InsertComment (reply) failed", "err", err, "parent_id", parentID)
+			return shared.Wrap(shared.ErrInternal, "create reply")
+		}
+		replyID = reply.ID
+		if err := qtx.IncrementCommentsCount(ctx, parent.VideoID); err != nil {
+			slog.Error("IncrementCommentsCount (reply) failed", "err", err, "video_id", parent.VideoID)
+			return shared.Wrap(shared.ErrInternal, "update comments count")
+		}
 
-	reply, err := qtx.InsertComment(ctx, db.InsertCommentParams{
-		VideoID:  parent.VideoID,
-		UserID:   user.ID,
-		ParentID: uuid.NullUUID{UUID: parentID, Valid: true},
-		Content:  content,
+		// Notification fan-out with dedup: notify the video
+		// owner and the parent comment author, skipping the
+		// actor and any recipient already notified.
+		recipients := map[uuid.UUID]struct{}{}
+		if video.UserID != user.ID {
+			recipients[video.UserID] = struct{}{}
+		}
+		if parent.UserID != user.ID {
+			recipients[parent.UserID] = struct{}{}
+		}
+		payload := map[string]string{
+			"username":   user.Username,
+			"video_id":   parent.VideoID.String(),
+			"comment_id": reply.ID.String(),
+		}
+		for recipient := range recipients {
+			if nerr := insertSocialNotification(ctx, qtx, recipient, user.ID, "comment", payload); nerr != nil {
+				slog.Error("insert reply notification failed", "err", nerr, "recipient", recipient)
+				return shared.Wrap(shared.ErrInternal, "insert notification")
+			}
+		}
+		return nil
 	})
 	if err != nil {
-		slog.Error("InsertComment (reply) failed", "err", err, "parent_id", parentID)
-		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "create reply"))
-	}
-	if err := qtx.IncrementCommentsCount(ctx, parent.VideoID); err != nil {
-		slog.Error("IncrementCommentsCount (reply) failed", "err", err, "video_id", parent.VideoID)
-		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "update comments count"))
+		return shared.RespondError(c, err)
 	}
 
-	// Notification fan-out with dedup: notify the video
-	// owner and the parent comment author, skipping the
-	// actor and any recipient already notified.
-	recipients := map[uuid.UUID]struct{}{}
-	if video.UserID != user.ID {
-		recipients[video.UserID] = struct{}{}
-	}
-	if parent.UserID != user.ID {
-		recipients[parent.UserID] = struct{}{}
-	}
-	payload := map[string]string{
-		"username":   user.Username,
-		"video_id":   parent.VideoID.String(),
-		"comment_id": reply.ID.String(),
-	}
-	for recipient := range recipients {
-		if nerr := insertSocialNotification(ctx, qtx, recipient, user.ID, "comment", payload); nerr != nil {
-			slog.Error("insert reply notification failed", "err", nerr, "recipient", recipient)
-			return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "insert notification"))
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		slog.Error("reply tx commit failed", "err", err, "parent_id", parentID)
-		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "commit reply"))
-	}
-
-	row, err := h.Queries.GetCommentByID(ctx, reply.ID)
+	row, err := h.Queries.GetCommentByID(ctx, replyID)
 	if err != nil {
-		slog.Error("GetCommentByID after reply failed", "err", err, "comment_id", reply.ID)
+		slog.Error("GetCommentByID after reply failed", "err", err, "comment_id", replyID)
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load reply"))
 	}
 	return shared.RespondCreated(c, commentObjectFromRow(

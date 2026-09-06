@@ -535,9 +535,9 @@ func (h *VideoHandler) DeleteVideo(c echo.Context) error {
 	if h.Queries == nil || h.Queue == nil {
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "video handler not configured"))
 	}
-	user, videoID, ok := parseAuthVideoParam(c)
-	if !ok {
-		return nil
+	user, videoID, err := parseAuthVideoParam(c)
+	if err != nil {
+		return shared.RespondError(c, err)
 	}
 	ctx := c.Request().Context()
 
