@@ -185,6 +185,46 @@ type AuthenticateConfig struct {
 	Queries UserStore
 }
 
+// resolveUser validates the bearer token on the request,
+// resolves the local *db.User, and stores it on the Echo
+// context. It returns an already-written 401/500 response
+// error when the token is missing, malformed, invalid, or
+// the user cannot be resolved / is inactive; nil means
+// the context now carries the user.
+func resolveUser(c echo.Context, cfg AuthenticateConfig) error {
+	rawToken, err := extractBearer(c)
+	if err != nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrUnauthorized, err.Error()))
+	}
+
+	ctx := c.Request().Context()
+	sub, err := cfg.Verifier.CheckToken(ctx, rawToken)
+	if err != nil || sub == "" {
+		return shared.RespondError(c, shared.Wrap(shared.ErrUnauthorized, "invalid access token"))
+	}
+
+	user, err := getOrCreateUser(ctx, cfg.Queries, sub)
+	if err != nil {
+		slog.Error("get-or-create user failed", "err", err, "sub", sub)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "resolve user"))
+	}
+	if !user.IsActive {
+		// Tombstoned / deactivated users must not be
+		// able to keep using the API with a
+		// pre-deactivation token. The webhook
+		// user.deactivated is the only place that
+		// flips this flag.
+		return shared.RespondError(c, shared.Wrap(shared.ErrUnauthorized, "user is inactive"))
+	}
+
+	// Hand the resolved user to downstream handlers
+	// via the Echo context. We do not expose the
+	// raw sub or the JWT itself; handlers only see
+	// the local row.
+	c.Set(userContextKey, &user)
+	return nil
+}
+
 // Authenticate returns an Echo middleware that validates
 // the Authorization header against the configured
 // TokenVerifier, resolves the local *db.User for the
@@ -203,36 +243,37 @@ type AuthenticateConfig struct {
 func Authenticate(cfg AuthenticateConfig) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
-			rawToken, err := extractBearer(c)
-			if err != nil {
-				return shared.RespondError(c, shared.Wrap(shared.ErrUnauthorized, err.Error()))
+			if err := resolveUser(c, cfg); err != nil {
+				return err
 			}
+			return next(c)
+		}
+	}
+}
 
-			ctx := c.Request().Context()
-			sub, err := cfg.Verifier.CheckToken(ctx, rawToken)
-			if err != nil || sub == "" {
-				return shared.RespondError(c, shared.Wrap(shared.ErrUnauthorized, "invalid access token"))
+// AuthenticateOptional backs routes that serve BOTH
+// first-party clients (JWT in the Authorization header)
+// and browser players that authenticate with a query
+// credential instead (e.g. GetPlaylist's ?token= media
+// token, fetched anonymously by hls.js because attaching
+// the Authorization header to a presigned R2 URL would
+// break the SigV4 signature).
+//
+// When the Authorization header is ABSENT the next handler
+// runs anonymously (no *db.User on the context) and the
+// handler decides what to do. When the header is PRESENT
+// it is validated exactly like Authenticate - a
+// present-but-invalid token fails closed with 401 rather
+// than silently downgrading to anonymous.
+func AuthenticateOptional(cfg AuthenticateConfig) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			if c.Request().Header.Get(echo.HeaderAuthorization) == "" {
+				return next(c)
 			}
-
-			user, err := getOrCreateUser(ctx, cfg.Queries, sub)
-			if err != nil {
-				slog.Error("get-or-create user failed", "err", err, "sub", sub)
-				return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "resolve user"))
+			if err := resolveUser(c, cfg); err != nil {
+				return err
 			}
-			if !user.IsActive {
-				// Tombstoned / deactivated users must not be
-				// able to keep using the API with a
-				// pre-deactivation token. The webhook
-				// user.deactivated is the only place that
-				// flips this flag.
-				return shared.RespondError(c, shared.Wrap(shared.ErrUnauthorized, "user is inactive"))
-			}
-
-			// Hand the resolved user to downstream handlers
-			// via the Echo context. We do not expose the
-			// raw sub or the JWT itself; handlers only see
-			// the local row.
-			c.Set(userContextKey, &user)
 			return next(c)
 		}
 	}

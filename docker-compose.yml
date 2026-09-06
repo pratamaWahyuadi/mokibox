@@ -140,6 +140,10 @@ services:
     #   - pids_limit 200 bounds a request-storm fork burst
     #   - mem_limit 512m + cpus 1.0 bounds the whole
     #     service on the single VPS
+    #   - memswap_limit == mem_limit: no swap (see the
+    #     worker's comment - swap thrashing on the 4GB
+    #     production VPS tanks the whole host; OOM-kill a
+    #     single container instead)
     #   - user left to the image (distroless nonroot,
     #     UID 65532); an explicit user: key here would
     #     conflict with the image's own USER directive
@@ -150,6 +154,7 @@ services:
       - no-new-privileges:true
     pids_limit: 200
     mem_limit: 512m
+    memswap_limit: 512m
     cpus: "1.0"
     networks:
       - backend
@@ -207,8 +212,21 @@ services:
     #     escalation vectors)
     #   - pids_limit 100 to bound runaway fork bombs
     #     from a hostile media file
-    #   - mem_limit 2g + cpus 1.5 to bound the impact of
+    #   - mem_limit 1g + cpus 1.5 to bound the impact of
     #     a single stuck job on the host VPS
+    #   - memswap_limit == mem_limit: the container gets NO
+    #     swap. Docker's default is memswap_limit = 2x
+    #     mem_limit, i.e. a 2g worker may balloon to 4g
+    #     across RAM+swap - on the 4GB production VPS that
+    #     is swap thrashing that tanks the WHOLE host, not
+    #     just the worker (ops lesson from the user). With
+    #     swap disabled, an oversized encode OOM-kills the
+    #     ffmpeg process instead, and the tested retry
+    #     ladder (transient -> retry_count -> FAILED ->
+    #     cleanup) handles it. 1g covers real-world 480p +
+    #     720p libx264 veryfast encodes (measured ~300-600MB
+    #     working set); larger source resolutions will fail
+    #     fast rather than degrade the machine.
     #   - explicit user 10001:10001 matches the Dockerfile
     #     USER directive
     read_only: true
@@ -220,7 +238,8 @@ services:
       - no-new-privileges:true
     user: "10001:10001"
     pids_limit: 100
-    mem_limit: 2g
+    mem_limit: 1g
+    memswap_limit: 1g
     cpus: "1.5"
     networks:
       - backend
@@ -256,6 +275,8 @@ services:
     #   - read_only root FS + tmpfs for nginx runtime
     #     writes (/var/cache/nginx, /var/run, /var/log)
     #   - pids_limit + mem_limit bound a request storm
+    #   - memswap_limit == mem_limit: no swap (see the
+    #     worker's comment for the rationale)
     cap_drop:
       - AUDIT_WRITE
       - DAC_OVERRIDE
@@ -276,6 +297,7 @@ services:
       - /var/log/nginx:size=32M,mode=1777
     pids_limit: 100
     mem_limit: 256m
+    memswap_limit: 256m
     cpus: "0.5"
     networks:
       - backend

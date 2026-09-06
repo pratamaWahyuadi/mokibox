@@ -31,3 +31,6 @@ vendor/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Demo UI env-specific config (auto-generated from .env)
+deploy/demo/config.js

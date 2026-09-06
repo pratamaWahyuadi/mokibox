@@ -54,6 +54,10 @@ services:
       # local-only HTTP config. Same in-container path
       # so the override is transparent.
       - ./deploy/nginx/local.conf:/etc/nginx/conf.d/default.conf:ro
+      # Demo E2E UI (fase-10): static page untuk manual
+      # demo semua endpoint via browser.
+      # Served at http://api.localhost/demo/
+      - ./deploy/demo:/usr/share/nginx/html/demo:ro
       # Do NOT mount the certs directory - local.conf
       # has no TLS. This also stops nginx from
       # restart-looping on the missing production
