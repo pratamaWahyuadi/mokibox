@@ -19,6 +19,7 @@
 package handlers
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -56,26 +57,58 @@ const (
 	uploadContentType = "application/octet-stream"
 )
 
+// videoStore is the consumer-side read interface the
+// VideoHandler methods in video.go + video_detail.go use
+// outside the confirm tx. *db.Queries satisfies it.
+type videoStore interface {
+	visibilityStore
+	GetPendingVideoByUser(ctx context.Context, userID uuid.UUID) (db.Video, error)
+	InsertVideo(ctx context.Context, arg db.InsertVideoParams) (db.Video, error)
+	UpdatePendingVideoR2Key(ctx context.Context, arg db.UpdatePendingVideoR2KeyParams) (db.Video, error)
+	UpdatePendingVideoMetadata(ctx context.Context, arg db.UpdatePendingVideoMetadataParams) (db.Video, error)
+	GetVideoDetail(ctx context.Context, arg db.GetVideoDetailParams) (db.GetVideoDetailRow, error)
+	MarkVideoDeleted(ctx context.Context, arg db.MarkVideoDeletedParams) (db.Video, error)
+}
+
+// videoTxStore is the confirm-tx body: row lock + state
+// flip. Satisfied by *db.Queries bound via WithTx.
+type videoTxStore interface {
+	GetVideoByIDForUpdate(ctx context.Context, id uuid.UUID) (db.Video, error)
+	ConfirmVideoProcessing(ctx context.Context, arg db.ConfirmVideoProcessingParams) (db.Video, error)
+}
+
 // VideoHandler holds the dependencies for the upload
-// intent + confirm endpoints. DB is the *sql.DB pool
-// used for the confirm transaction: sqlc's
-// Queries.WithTx requires a *sql.Tx, which only
-// *sql.DB can produce (via pgx/v5/stdlib).
+// intent + confirm endpoints. Run opens the confirm
+// transaction (txRunner so the tx mechanics are stubbable);
+// Queries is the consumer-side read interface; R2 and Queue
+// are wrapped behind small interfaces too, so unit tests
+// drive the full request path with stubs (see video_test.go).
+// The constructor still accepts the production concretes.
 type VideoHandler struct {
-	Queries *db.Queries
-	DB      *sql.DB
-	R2      *shared.R2Client
-	Queue   *asynq.Client
+	Queries videoStore
+	Run     txRunner[videoTxStore]
+	R2      r2ObjectStore
+	Queue   taskEnqueuer
 	Cfg     *shared.APIConfig
 }
 
+// r2ObjectStore is the consumer-side R2 surface the video
+// handlers need: presign the raw PUT, inspect the uploaded
+// object, presign thumbnails, and read playlist bodies.
+// *shared.R2Client satisfies it.
+type r2ObjectStore interface {
+	PresignPut(ctx context.Context, key, contentType string, expiry time.Duration) (string, error)
+	PresignGet(ctx context.Context, key string, expiry time.Duration) (string, error)
+	HeadObject(ctx context.Context, key string) (int64, error)
+	GetObject(ctx context.Context, key string, maxBytes int64) ([]byte, error)
+}
+
 // NewVideoHandler builds a VideoHandler with all
-// dependencies injected. DB must be the *sql.DB
+// dependencies injected. dbHandle must be the *sql.DB
 // opened from DATABASE_URL via pgx/v5/stdlib so the
-// confirm transaction can call Queries.WithTx. A nil
-// DB causes the constructor to return an error so
-// a misconfigured main.go fails fast at startup, not
-// on the first confirm.
+// confirm transaction can bind the sqlc querier. A nil
+// on any dependency is a wiring bug and refuses
+// construction early.
 func NewVideoHandler(queries *db.Queries, dbHandle *sql.DB, r2 *shared.R2Client, queue *asynq.Client, cfg *shared.APIConfig) (*VideoHandler, error) {
 	if queries == nil {
 		return nil, fmt.Errorf("NewVideoHandler: queries is nil")
@@ -94,11 +127,19 @@ func NewVideoHandler(queries *db.Queries, dbHandle *sql.DB, r2 *shared.R2Client,
 	}
 	return &VideoHandler{
 		Queries: queries,
-		DB:      dbHandle,
-		R2:      r2,
-		Queue:   queue,
-		Cfg:     cfg,
+		Run: NewSQLTxRunner(dbHandle, func(tx *sql.Tx) videoTxStore {
+			return queries.WithTx(tx)
+		}),
+		R2:    r2,
+		Queue: asynqEnqueuer{client: queue},
+		Cfg:   cfg,
 	}, nil
+}
+
+// newVideoHandlerForTest lets the test suite build the
+// handler directly from interfaces.
+func newVideoHandlerForTest(store videoStore, runner txRunner[videoTxStore], r2 r2ObjectStore, queue taskEnqueuer, cfg *shared.APIConfig) *VideoHandler {
+	return &VideoHandler{Queries: store, Run: runner, R2: r2, Queue: queue, Cfg: cfg}
 }
 
 // uploadIntentRequest is the body of POST
@@ -269,7 +310,7 @@ func (h *VideoHandler) UploadIntent(c echo.Context) error {
 		// enqueue fails the user still gets a usable
 		// presigned URL; the orphan R2 object will be
 		// picked up by future cleanup paths.
-		if _, qerr := shared.EnqueueCleanupObjects(h.Queue, shared.CleanupObjectsPayload{Keys: []string{oldKey}}); qerr != nil {
+		if _, qerr := h.Queue.EnqueueCleanupObjects(shared.CleanupObjectsPayload{Keys: []string{oldKey}}); qerr != nil {
 			slog.Warn("enqueue cleanup old upload key failed", "err", qerr, "old_key", oldKey, "new_key", r2Key)
 		}
 	}
@@ -383,127 +424,110 @@ func (h *VideoHandler) ConfirmUpload(c echo.Context) error {
 
 	ctx := c.Request().Context()
 
-	// Begin tx so GetVideoByIDForUpdate + ConfirmVideoProcessing
-	// form an atomic state transition. The whole confirm
-	// pipeline runs under one tx so an enqueue failure
-	// later can roll the row back to PENDING_UPLOAD.
-	tx, err := h.DB.BeginTx(ctx, nil)
-	if err != nil {
-		slog.Error("BeginTx failed", "err", err, "user_id", user.ID, "video_id", videoID)
-		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "begin transaction"))
-	}
-	// Rollback is a no-op after a successful Commit, so
-	// deferring it here is the standard idiom - the tx
-	// is closed on every return path.
-	defer func() { _ = tx.Rollback() }()
-
-	qtx := h.Queries.WithTx(tx)
-	video, err := qtx.GetVideoByIDForUpdate(ctx, videoID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "video not found"))
+	// The confirm pipeline runs under one tx (via the runner)
+	// so an enqueue failure later can roll the row back to
+	// PENDING_UPLOAD. The tx body returns the already-wrapped
+	// sentinel errors for the 404/409/400 branches so
+	// ConfirmUpload keeps a single respond point.
+	txOutcome := struct {
+		confirmed db.Video
+	}{}
+	err = h.Run.Run(ctx, func(qtx videoTxStore) error {
+		video, err := qtx.GetVideoByIDForUpdate(ctx, videoID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return shared.Wrap(shared.ErrNotFound, "video not found")
+			}
+			slog.Error("GetVideoByIDForUpdate failed", "err", err, "video_id", videoID)
+			return shared.Wrap(shared.ErrInternal, "load video")
 		}
-		slog.Error("GetVideoByIDForUpdate failed", "err", err, "video_id", videoID)
-		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load video"))
-	}
-	if video.UserID != user.ID {
-		// Anti-enumeration: a non-owner asking about a
-		// video that exists gets the same response as a
-		// missing video.
-		return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "video not found"))
-	}
-	if video.Status != "PENDING_UPLOAD" {
-		return shared.RespondError(c, shared.Wrap(shared.ErrVideoStatusConflict, "video is not in a confirmable state"))
-	}
-	if video.R2Key != bodyR2Key {
-		return shared.RespondError(c, shared.NewAPIError(shared.CodeValidationError, "r2_key does not match video").
-			WithDetails(shared.FieldError{Field: "r2_key", Message: "does not match the key on file"}))
-	}
-
-	// Validate the R2 object itself. Per LLD A3 the
-	// presigned PUT cannot enforce content-length-range,
-	// so we read the actual size here.
-	size, herr := h.R2.HeadObject(ctx, video.R2Key)
-	if herr != nil {
-		if errors.Is(herr, shared.ErrNotFound) {
-			return shared.RespondError(c, shared.Wrap(shared.ErrUploadMissing, "uploaded object not found in storage"))
+		if video.UserID != user.ID {
+			// Anti-enumeration: a non-owner asking about a
+			// video that exists gets the same response as a
+			// missing video.
+			return shared.Wrap(shared.ErrNotFound, "video not found")
 		}
-		slog.Error("HeadObject failed", "err", herr, "r2_key", video.R2Key)
-		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "inspect uploaded object"))
-	}
-	if size < MinUploadBytes || size > MaxUploadBytes {
-		// Best-effort cleanup of the invalid object so
-		// R2 doesn't keep accumulating garbage. Failures
-		// are logged but do not change the response.
-		if _, qerr := shared.EnqueueCleanupObjects(h.Queue, shared.CleanupObjectsPayload{Keys: []string{video.R2Key}}); qerr != nil {
-			slog.Warn("enqueue cleanup invalid upload failed", "err", qerr, "r2_key", video.R2Key, "size", size)
+		if video.Status != "PENDING_UPLOAD" {
+			return shared.Wrap(shared.ErrVideoStatusConflict, "video is not in a confirmable state")
 		}
-		return shared.RespondError(c, shared.NewAPIError(shared.CodeUploadSizeInvalid, fmt.Sprintf("uploaded object size %d is outside the allowed range", size)).
-			WithDetails(shared.FieldError{Field: "r2_key", Message: fmt.Sprintf("size must be between %d and %d bytes", MinUploadBytes, MaxUploadBytes)}))
-	}
+		if video.R2Key != bodyR2Key {
+			return shared.NewAPIError(shared.CodeValidationError, "r2_key does not match video").
+				WithDetails(shared.FieldError{Field: "r2_key", Message: "does not match the key on file"})
+		}
 
-	// Flip status inside the tx so the row lock holds
-	// for the entire check-and-flip.
-	confirmed, cerr := qtx.ConfirmVideoProcessing(ctx, db.ConfirmVideoProcessingParams{
-		ID:     video.ID,
-		UserID: video.UserID,
-		R2Key:  video.R2Key,
+		// Validate the R2 object itself. Per LLD A3 the
+		// presigned PUT cannot enforce content-length-range,
+		// so we read the actual size here.
+		size, herr := h.R2.HeadObject(ctx, video.R2Key)
+		if herr != nil {
+			if errors.Is(herr, shared.ErrNotFound) {
+				return shared.Wrap(shared.ErrUploadMissing, "uploaded object not found in storage")
+			}
+			slog.Error("HeadObject failed", "err", herr, "r2_key", video.R2Key)
+			return shared.Wrap(shared.ErrInternal, "inspect uploaded object")
+		}
+		if size < MinUploadBytes || size > MaxUploadBytes {
+			// Best-effort cleanup of the invalid object so
+			// R2 doesn't keep accumulating garbage. Failures
+			// are logged but do not change the response.
+			if _, qerr := h.Queue.EnqueueCleanupObjects(shared.CleanupObjectsPayload{Keys: []string{video.R2Key}}); qerr != nil {
+				slog.Warn("enqueue cleanup invalid upload failed", "err", qerr, "r2_key", video.R2Key, "size", size)
+			}
+			return shared.NewAPIError(shared.CodeUploadSizeInvalid, fmt.Sprintf("uploaded object size %d is outside the allowed range", size)).
+				WithDetails(shared.FieldError{Field: "r2_key", Message: fmt.Sprintf("size must be between %d and %d bytes", MinUploadBytes, MaxUploadBytes)})
+		}
+
+		// Flip status inside the tx so the row lock holds
+		// for the entire check-and-flip.
+		confirmed, cerr := qtx.ConfirmVideoProcessing(ctx, db.ConfirmVideoProcessingParams{
+			ID:     video.ID,
+			UserID: video.UserID,
+			R2Key:  video.R2Key,
+		})
+		if cerr != nil {
+			if errors.Is(cerr, sql.ErrNoRows) {
+				// Race: another request mutated the row
+				// between our FOR UPDATE and the UPDATE
+				// (e.g. a concurrent confirm). Surface
+				// 409 so the client can retry.
+				return shared.Wrap(shared.ErrVideoStatusConflict, "video state changed concurrently")
+			}
+			slog.Error("ConfirmVideoProcessing failed", "err", cerr, "video_id", video.ID)
+			return shared.Wrap(shared.ErrInternal, "confirm video")
+		}
+		txOutcome.confirmed = confirmed
+
+		// Enqueue the transcode task INSIDE the tx body (same
+		// semantics as the pre-refactor code): an enqueue
+		// failure returns an error here, the runner rolls the
+		// tx back, and the row stays PENDING_UPLOAD so the
+		// client can retry the confirm.
+		//
+		// Retry model (two layers, do not confuse):
+		//  1. asynq-level retry: asynq.MaxRetry(1) lets the
+		//     queue itself retry the task ONCE on transient
+		//     failures such as a Redis blip before dropping
+		//     it. Queue-level safety net only.
+		//  2. application-level retry (worker-owned, fase 5):
+		//     the worker catches a transcode error, checks
+		//     retry_count < 3, and re-enqueues with
+		//     ProcessIn(30s * retry_count) - where the PRD
+		//     "retry maksimal 3 kali" rule lives.
+		if _, qerr := h.Queue.EnqueueTranscode(shared.TranscodeVideoPayload{VideoID: confirmed.ID.String()}); qerr != nil {
+			slog.Error("EnqueueTranscode failed", "err", qerr, "video_id", confirmed.ID)
+			return shared.Wrap(shared.ErrInternal, "enqueue transcode")
+		}
+		slog.Info("transcode task enqueued", "video_id", confirmed.ID)
+		return nil
 	})
-	if cerr != nil {
-		if errors.Is(cerr, sql.ErrNoRows) {
-			// Race: another request mutated the row
-			// between our FOR UPDATE and the UPDATE
-			// (e.g. a concurrent confirm). Surface
-			// 409 so the client can retry.
-			return shared.RespondError(c, shared.Wrap(shared.ErrVideoStatusConflict, "video state changed concurrently"))
-		}
-		slog.Error("ConfirmVideoProcessing failed", "err", cerr, "video_id", video.ID)
-		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "confirm video"))
-	}
-
-	// Enqueue the transcode task.
-	//
-	// Retry model (two layers, do not confuse):
-	//   1. asynq-level retry: asynq.MaxRetry(1) lets
-	//      the queue itself retry the task ONCE on
-	//      transient failures such as a Redis blip
-	//      before dropping it. This is the queue's
-	//      own safety net; the producer hands control
-	//      over the moment EnqueueTranscode returns.
-	//   2. application-level retry (handled by the
-	//      transcoder worker in fase 5): the worker
-	//      catches a transcode error, checks
-	//      retry_count < 3 against the videos row, and
-	//      re-enqueues a fresh transcode:video task
-	//      with ProcessIn(30s * retry_count). This is
-	//      where the PRD "retry maksimal 3 kali" rule
-	//      is enforced - per the LLD retry section.
-	//
-	// The producer therefore sets MaxRetry(1) so a
-	// stuck task fails fast into the application-level
-	// retry path instead of being silently retried
-	// by asynq forever.
-	info, qerr := shared.EnqueueTranscode(h.Queue, shared.TranscodeVideoPayload{VideoID: confirmed.ID.String()}, asynq.MaxRetry(1))
-	if qerr != nil {
-		// Roll back so the row stays PENDING_UPLOAD
-		// and the client can retry the confirm.
-		if rerr := tx.Rollback(); rerr != nil {
-			slog.Error("rollback after enqueue failure also failed", "err", rerr, "video_id", video.ID)
-		}
-		slog.Error("EnqueueTranscode failed", "err", qerr, "video_id", video.ID)
-		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "enqueue transcode"))
-	}
-	slog.Info("transcode task enqueued", "video_id", video.ID, "task_id", info.ID, "queue", info.Queue)
-
-	if cerr := tx.Commit(); cerr != nil {
-		slog.Error("tx.Commit failed", "err", cerr, "video_id", video.ID)
-		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "commit confirm transaction"))
+	if err != nil {
+		return shared.RespondError(c, err)
 	}
 
 	return shared.RespondOK(c, confirmResponse{
-		VideoID:    confirmed.ID.String(),
-		Status:     confirmed.Status,
-		RetryCount: int(confirmed.RetryCount),
+		VideoID:    txOutcome.confirmed.ID.String(),
+		Status:     txOutcome.confirmed.Status,
+		RetryCount: int(txOutcome.confirmed.RetryCount),
 	})
 }
 
@@ -584,9 +608,9 @@ func (h *VideoHandler) DeleteVideo(c echo.Context) error {
 	// re-enqueues itself if the grace has not
 	// elapsed yet.
 	cleanupDelay := 24 * time.Hour
-	if _, err := shared.EnqueueCleanupVideo(h.Queue, shared.CleanupVideoPayload{
+	if _, err := h.Queue.EnqueueCleanupVideo(shared.CleanupVideoPayload{
 		VideoID: updated.ID.String(),
-	}, asynq.ProcessIn(cleanupDelay)); err != nil {
+	}, cleanupDelay); err != nil {
 		// Per LLD the 24h grace lets the worker
 		// re-enqueue on its own if it misses a
 		// tick; we log warn rather than fail

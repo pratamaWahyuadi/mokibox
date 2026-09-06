@@ -160,7 +160,7 @@ func (h *VideoHandler) GetVideoDetail(c echo.Context) error {
 // into the wire VideoObject. The row carries the full
 // user join + liked_by_me so no extra queries are
 // needed.
-func videoObjectFromDetail(ctx context.Context, r2 *shared.R2Client, cfg *shared.APIConfig, r db.GetVideoDetailRow, isOwner bool) VideoObject {
+func videoObjectFromDetail(ctx context.Context, r2 r2ObjectStore, cfg *shared.APIConfig, r db.GetVideoDetailRow, isOwner bool) VideoObject {
 	out := VideoObject{
 		ID:            r.ID,
 		UserID:        r.UserID,
@@ -520,7 +520,7 @@ func RewriteMasterPlaylist(body []byte, apiBaseURL string, videoID uuid.UUID, se
 // the full R2 key: hls_prefix/<variant>/<segment>.
 // The hls_prefix already has a trailing slash, so the
 // concatenation is correct.
-func RewriteVariantPlaylist(ctx context.Context, r2 *shared.R2Client, body []byte, hlsPrefix, variant string, ttl time.Duration) ([]byte, error) {
+func RewriteVariantPlaylist(ctx context.Context, r2 r2ObjectStore, body []byte, hlsPrefix, variant string, ttl time.Duration) ([]byte, error) {
 	if r2 == nil {
 		return nil, fmt.Errorf("RewriteVariantPlaylist: r2 client is nil")
 	}
