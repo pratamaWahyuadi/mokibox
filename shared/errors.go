@@ -150,6 +150,35 @@ func httpStatusFor(err error) int {
 	}
 }
 
+// httpStatusForCode maps an ErrorCode to its HTTP status.
+// It is the fallback ClassifyError uses when an *APIError
+// carries no explicit Status and no sentinel Cause: without
+// it, an APIError built via NewAPIError(CodeValidationError,
+// ...) classified as 500 because httpStatusFor only matches
+// sentinel-wrapped errors. Found by the handler-testability
+// refactor (testability RED test): every NewAPIError call
+// site without a cause was returning HTTP 500 with a
+// correct-looking 4xx body code. The table mirrors the
+// ErrorCode doc comments (planning/04_api_contracts.md).
+func httpStatusForCode(code ErrorCode) int {
+	switch code {
+	case CodeValidationError, CodeUploadSizeInvalid, CodeSelfFollowNotAllowed, CodeWebhookEventUnsupported:
+		return http.StatusBadRequest
+	case CodeUnauthorized, CodeWebhookInvalidSignature:
+		return http.StatusUnauthorized
+	case CodeForbidden:
+		return http.StatusForbidden
+	case CodeNotFound:
+		return http.StatusNotFound
+	case CodeVideoStatusConflict, CodeVideoNotReady, CodeUploadMissing:
+		return http.StatusConflict
+	case CodeRateLimited:
+		return http.StatusTooManyRequests
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
 // codeFor maps a sentinel error to its ErrorCode. Anything
 // not matched collapses to CodeInternalError so the wire
 // format always carries a code, never an empty string.

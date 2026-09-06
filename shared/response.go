@@ -151,7 +151,11 @@ func ClassifyError(err error) (int, ErrorCode, string, []FieldError) {
 		}
 		status := api.Status
 		if status == 0 {
-			status = httpStatusFor(err)
+			// Prefer the code-derived status so a bare
+			// NewAPIError(CodeValidationError, ...) maps to
+			// 400, not 500. WithCause(sentinel) errors keep
+			// their sentinel mapping (see httpStatusFor).
+			status = httpStatusForCode(code)
 		}
 		msg := api.Message
 		if msg == "" {
