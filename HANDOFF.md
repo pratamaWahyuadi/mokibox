@@ -2,11 +2,55 @@
 
 State captured 2026-09-04, post PR #47 + #48 + #49 merged
 (semua 6 issue fase 10 closed: #29 #30 #31 #39 #44 + #28
-via PR #45).
+via PR #45), updated 2026-09-07 with the handler-testability
+refactor (PR pending) + PR #51 (playlist auth two-tier).
 Regenerate per session via `git fetch && gh pr list && gh issue list --state open`.
 
 ## Latest
 
+- **Handler-testability refactor** (`refactor/handler-testability`,
+  2026-09-07, branch dari main post-PR-#51): review Go idiomatic
+  menemukan DI berhenti di middleware — 8 handler structs pegang
+  concrete `*db.Queries`/`*sql.DB`, handler layer (~3.4k baris)
+  punya 0 unit test. 3 batch, semua green:
+  - `fix: [testability.1]` — **BUG PRODUCTION ditemukan via RED
+    test**: `ClassifyError` map bare `NewAPIError` ke 500 (httpStatusFor
+    cuma match sentinel; APIError tanpa cause → default 500). 10 call
+    site validasi/size-error selama ini 500-with-correct-code. Fix:
+    tabel `httpStatusForCode` di shared/errors.go (keputusan user
+    Option A). Integration 16 PASS tidak pernah kena karena tidak
+    pernah kirim payload invalid tersebut.
+  - `refactor: [testability.1]` — tx.go (txRunner[T] + sqlTxRunner,
+    bind-closure compile-time checked, NO `WithTx(tx).(T)` assertion),
+    visibility.go (assertVideoOwnerOrVisible = owner bypass SEMUA;
+    assertVideoReadyVisible = playlist mode NO owner bypass — dua mode
+    eksplisit share sub-step), social.go → interfaces + 5 tx path via
+    runner + parseAuthVideoParam return error (0 `_ =` discard),
+    21 test. routes.go TIDAK berubah (constructor tetap terima concrete).
+  - `refactor: [testability.2]` — queue.go (taskEnqueuer + asynqEnqueuer),
+    video.go ConfirmUpload via runner (enqueue DI DALAM tx body —
+    draft pertama sempat pindah ke post-commit, tertangkap self-review;
+    TestConfirmUpload_EnqueueFailureRollsBack pin ini), account.go
+    delete-cascade → deleteUserData + collectUserR2Keys (runner +
+    enqueuer), exported DeleteUserData adapter untuk webhook.go
+    (call site unchanged), TombstoneUser ErrNoRows → rollback+ack via
+    errNoLocalUser sentinel. 14 test. Catatan: prompt bilang video.go
+    tx x2; live hanya ConfirmUpload (DeleteVideo single-statement) —
+    semua tx path aktual (7 total) via runner.
+  - `refactor: [testability.3]` — user/user_follow (struct field R2/
+    Queue/Cfg UNUSED dibuang; constructor signature tetap),
+    notification/feed/video_detail/webhook → interfaces.
+    **GetPlaylist TRAP resolved**: inline visibility →
+    assertVideoReadyVisible, 2 behavior di-PIN test:
+    non-READY 404 untuk owner sekalipun; private owner via JWT gagal
+    IsFollowing(self,self) → 404 (owner harus pakai ?token= path).
+    Webhook test pakai REAL actions.ComputeSignatureHeader. 21 test
+    (total handler 56; grep assertions 0; integration 16 PASS).
+- **PR #51 MERGED** (`a202fca`): playlist auth two-tier — root cause
+  400-"CORS" di demo player (hls.js meneruskan Authorization header ke
+  segment R2 presigned → SigV4 mismatch; fix = ?token= media token path
+  + AuthenticateOptional fail-closed). Lesson di skill
+  presigned-object-urls.
 - **Fase 10 SELESAI.** `gh issue list --label phase-10 --state open` = kosong.
 - **PR #47 `feature/phase-10-tests` MERGED** — unit tests (#29) + FFmpeg
   timeout-kill verification (#39) + 2 bug fix:
