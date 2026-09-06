@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MokiBox Demo E2E</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
+<style>
+  body{background:#14161a;color:#e7e9ee}
+  .card{background:#1d2027;border-color:#2c313c}
+  .btn-demo{min-width:110px}
+  #log{height:260px;overflow:auto;font-size:.78rem;background:#0f1116;border-radius:.5rem;padding:.75rem}
+  .log-ok{color:#69db7c}.log-err{color:#ff8787}.log-info{color:#91a7ff}.log-dim{color:#8b93a3}
+  .req{color:#ffd43b}
+  video{width:100%;border-radius:.5rem;background:#000}
+  .feed-item{cursor:pointer}
+  .feed-item:hover{background:#252a34}
+  .avatar{width:32px;height:32px;border-radius:50%;background:#3b4354;display:inline-flex;align-items:center;justify-content:center;font-weight:600}
+  .badge-soft{background:#2c313c;color:#adb5bd}
+  .thumb{width:100%;aspect-ratio:16/10;object-fit:cover;border-radius:.4rem;background:#000}
+  .thumb-empty{width:100%;aspect-ratio:16/10;border-radius:.4rem;background:#0f1116;display:flex;align-items:center;justify-content:center;color:#495057;font-size:2rem}
+  .spin{width:1rem;height:1rem;border:.15em solid #495057;border-top-color:#e7e9ee;border-radius:50%;animation:s .6s linear infinite;display:inline-block}
+  @keyframes s{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body class="py-3">
+<div class="container-xl">
+
+<!-- HEADER -->
+<div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+  <h4 class="mb-0 me-2">🎬 MokiBox <span class="text-secondary">demo E2E</span></h4>
+  <span id="auth-state" class="badge bg-secondary">belum login</span>
+  <div class="ms-auto d-flex gap-2 align-items-center">
+    <span id="me-label" class="text-secondary small"></span>
+    <a id="login-btn" class="btn btn-warning btn-demo" href="#">Login (Zitadel)</a>
+    <button id="logout-btn" class="btn btn-outline-secondary btn-demo d-none">Logout</button>
+  </div>
+</div>
+
+<div class="row g-3">
+
+<!-- KOLOM KIRI: AKSI -->
+<div class="col-lg-7">
+
+  <!-- PROFIL -->
+  <div class="card mb-3"><div class="card-body py-2">
+    <div class="d-flex flex-wrap gap-1 mt-1">
+      <button class="btn btn-demo btn-outline-info" data-act="me">GET /users/me</button>
+      <button class="btn btn-demo btn-outline-info" data-act="feed">GET /feed/home</button>
+      <button class="btn btn-demo btn-outline-info" data-act="notif">GET /notifications</button>
+      <button class="btn btn-demo btn-outline-info" data-act="readall">PUT /notif read-all</button>
+      <button class="btn btn-demo btn-outline-danger" id="del-me" data-act="delme">DELETE /users/me</button>
+    </div>
+    <div id="me-edit" class="row g-2 d-none mt-2">
+      <div class="col-auto"><input id="inp-display" class="form-control form-control-sm" placeholder="display_name"></div>
+      <div class="col-auto"><input id="inp-bio" class="form-control form-control-sm" placeholder="bio"></div>
+      <div class="col-auto"><input id="inp-private" type="checkbox" class="form-check-input mt-2"></div><label class="col-form-label-sm col-auto">is_private</label>
+      <div class="col-auto"><button class="btn btn-sm btn-info" data-act="updateme">PUT /users/me</button></div>
+    </div>
+  </div></div>
+
+  <!-- UPLOAD -->
+  <div class="card mb-3"><div class="card-body py-3">
+    <h6 class="text-secondary mb-2">Upload video (3 langkah real flow)</h6>
+    <div class="row g-2 mb-2">
+      <div class="col-md-3"><input id="up-title" class="form-control form-control-sm" placeholder="title"></div>
+      <div class="col-md-4"><input id="up-desc" class="form-control form-control-sm" placeholder="description"></div>
+      <div class="col-md-3"><input id="up-file" type="file" accept="video/*" class="form-control form-control-sm"></div>
+      <div class="col-md-2"><button id="up-go" class="btn btn-demo btn-warning w-100" data-act="upload">Upload</button></div>
+    </div>
+    <div id="up-progress" class="small text-secondary d-none"></div>
+    <ol id="up-steps" class="small text-secondary mb-0" style="list-style-position:inside">
+      <li id="s1">1. POST /videos/upload-intent → r2_key + presigned PUT URL</li>
+      <li id="s2">2. PUT langsung ke R2 (presigned URL)</li>
+      <li id="s3">3. POST /videos/confirm → PROCESSING → worker transcode → READY</li>
+    </ol>
+  </div></div>
+
+  <!-- FEED / VIDEOS -->
+  <div class="card mb-3"><div class="card-body py-3">
+    <div class="d-flex align-items-center mb-2">
+      <h6 class="text-secondary mb-0">Feed <span class="badge badge-soft" id="feed-count">0</span></h6>
+      <button class="btn btn-sm btn-outline-info ms-2" data-act="feed">⟳ muat</button>
+      <button class="btn btn-sm btn-outline-info ms-auto" data-act="myvideos">video saya</button>
+    </div>
+    <div id="feed" class="row g-2"></div>
+    <div id="feed-more" class="text-center d-none mt-2">
+      <button class="btn btn-sm btn-outline-secondary" data-act="feed-next">load more (cursor)</button>
+    </div>
+  </div></div>
+
+  <!-- VIDEO TERPILIH -->
+  <div class="card mb-3" id="vid-card" style="display:none"><div class="card-body py-3">
+    <div class="d-flex align-items-start gap-2 mb-2">
+      <h6 class="text-secondary mb-0" id="v-title"></h6>
+      <span id="v-status" class="badge bg-warning text-dark"></span>
+      <button class="btn-close btn-close-white ms-auto" id="v-close"></button>
+    </div>
+    <video id="player" controls></video>
+    <div class="d-flex flex-wrap gap-1 mt-2 align-items-center">
+      <button class="btn btn-demo btn-outline-danger" data-act="like">🤍 like</button>
+      <button class="btn btn-demo btn-outline-danger" data-act="unlike">💔 unlike</button>
+      <button class="btn btn-demo btn-outline-info" data-act="view">👁 view</button>
+      <button class="btn btn-demo btn-outline-danger" data-act="delvideo">🗑 hapus video</button>
+      <span class="ms-2 small" id="v-stats"></span>
+    </div>
+    <div class="input-group input-group-sm mt-2">
+      <input id="c-content" class="form-control" placeholder="tulis komentar…">
+      <button class="btn btn-info" data-act="comment">POST comment</button>
+      <button class="btn btn-outline-info" data-act="comments">⟳ list</button>
+    </div>
+    <div id="comments" class="mt-2" style="max-height:200px;overflow:auto"></div>
+  </div></div>
+
+  <!-- USERS -->
+  <div class="card mb-3"><div class="card-body py-3">
+    <h6 class="text-secondary mb-2">Users &amp; follow</h6>
+    <div class="input-group input-group-sm">
+      <input id="u-id" class="form-control" placeholder="user UUID (klik dari feed untuk isi otomatis)">
+      <button class="btn btn-demo btn-outline-info" data-act="getuser">GET /users/:id</button>
+      <button class="btn btn-demo btn-outline-info" data-act="uservideos">video dia</button>
+      <button class="btn btn-demo btn-outline-success" data-act="follow">follow</button>
+      <button class="btn btn-demo btn-outline-secondary" data-act="unfollow">unfollow</button>
+      <button class="btn btn-demo btn-outline-info" data-act="followers">followers</button>
+      <button class="btn btn-demo btn-outline-info" data-act="following">following</button>
+    </div>
+  </div></div>
+
+</div>
+
+<!-- KOLOM KANAN: LOG -->
+<div class="col-lg-5">
+  <div class="card sticky-top" style="top:12px"><div class="card-body py-2">
+    <div class="d-flex align-items-center mb-1">
+      <h6 class="text-secondary mb-0">API log <span class="small log-dim">(semua request/response live)</span></h6>
+      <button class="btn btn-sm btn-outline-secondary ms-auto" data-act="clearlog">clear</button>
+    </div>
+    <div id="log"></div>
+  </div></div>
+</div>
+</div>
+
+<div class="text-center small log-dim mt-2 mb-4">
+  login = SPA PKCE flow → auth.localhost → redirect balik ke sini. Token disimpan sessionStorage (demo only).
+</div>
+</div>
+
+<script>
+/* ================= CONFIG ================= */
+const API = 'http://api.localhost';
+const AUTH = 'http://auth.localhost';
+// redirect_uri HARUS terdaftar di app mokibox_spa (dev: http://api.localhost/callback)
+// callback redirect target = halaman ini (nginx /demo/)
+const REDIRECT_CB = 'http://api.localhost/callback';
+const AFTER_LOGIN = location.origin + location.pathname; // halaman ini
+
+// dibaca live dari window.SPA_CLIENT_ID (di-set /demo/config.js,
+// yang dimuat SEBELUM fungsi ini dipanggil).
+const SPA_CID = () => window.SPA_CLIENT_ID || '';
+
+const $ = s => document.querySelector(s);
+const logEl = $('#log');
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function log(kind, msg, detail){
+  const t = new Date().toTimeString().slice(0,8);
+  const d = detail ? '<div class="log-dim" style="white-space:pre-wrap">'+esc(detail)+'</div>' : '';
+  logEl.insertAdjacentHTML('afterbegin',
+    `<div class="mb-1"><span class="log-dim">[${t}]</span> <span class="log-${kind}">${esc(msg)}</span>${d}</div>`);
+  if(logEl.children.length > 400) logEl.lastChild.remove();
+}
+
+/* ================= AUTH (PKCE S256, pola mokibox_spa) ================= */
+function b64url(buf){ return btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
+
+function startLogin(){
+  const v = b64url(crypto.getRandomValues(new Uint8Array(48))).slice(0,64);
+  crypto.subtle.digest('SHA-256', new TextEncoder().encode(v)).then(h => {
+    const challenge = b64url(h);
+    sessionStorage.setItem('pkce_v', v);
+    const url = `${AUTH}/oauth/v2/authorize?client_id=${SPA_CID()}` +
+      `&response_type=code&scope=openid+profile` +
+      `&redirect_uri=${encodeURIComponent(REDIRECT_CB)}` +
+      `&state=demo&code_challenge=${challenge}&code_challenge_method=S256`;
+    log('info','redirect ke Zitadel login…', url);
+    location.href = url;
+  });
+}
+
+function handleCallback(){
+  const q = new URLSearchParams(location.search);
+  const code = q.get('code');
+  if(!code) return false;
+  history.replaceState({}, '', AFTER_LOGIN);
+  const v = sessionStorage.getItem('pkce_v') || '';
+  log('req', `POST /oauth/v2/token (authorization_code + PKCE)`);
+  fetch(`${AUTH}/oauth/v2/token`, {
+    method:'POST',
+    headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body: new URLSearchParams({
+      grant_type:'authorization_code', code,
+      client_id: SPA_CID(),
+      redirect_uri: REDIRECT_CB,
+      code_verifier: v,
+    })
+  }).then(r => r.json()).then(t => {
+    if(t.error){ log('err','token exchange gagal: '+t.error, t.error_description||''); return; }
+    sessionStorage.setItem('at', t.access_token);
+    log('ok', `token didapat (${t.access_token.split('.').length} segmen, ${t.access_token.length} chars)`);
+    boot(true);
+  }).catch(e => log('err','token fetch error: '+e));
+  return true;
+}
+
+/* ================= API CORE ================= */
+let AT = () => sessionStorage.getItem('at') || '';
+function logged(){ return !!AT(); }
+
+async function api(method, path, body, opts={}){
+  if(!logged() && !opts.public){ log('err','belum login — klik Login dulu'); throw new Error('no token'); }
+  const url = path.startsWith('http') ? path : API + path;
+  log('req', `${method} ${path.replace('http://api.localhost','')}` + (body ? ' ' + (opts.hideBody ? '{…}' : JSON.stringify(body)) : ''));
+  const r = await fetch(url, {
+    method, headers: {
+      ...(body && !(body instanceof Blob) ? {'Content-Type':'application/json'} : {}),
+      ...({}), ...(logged() && !opts.public ? {'Authorization':'Bearer '+AT()} : {}),
+    },
+    body: body instanceof Blob ? body : (body ? JSON.stringify(body) : undefined),
+  });
+  let data = null;
+  const ct = r.headers.get('content-type') || '';
+  if(ct.includes('json')) data = await r.json().catch(()=>null);
+  else data = await r.text().catch(()=> '');
+  log(r.ok ? 'ok' : 'err', `${method} ${path.replace('http://api.localhost','')} → ${r.status}`,
+      typeof data === 'string' ? data.slice(0,400) : JSON.stringify(data, null, 1)?.slice(0, 900));
+  if(!r.ok) throw {status:r.status, data};
+  return data;
+}
+
+/* ================= UI STATE ================= */
+let currentVideo = null;
+let feedCursor = null;
+
+function setAuthUI(){
+  const on = logged();
+  $('#auth-state').className = 'badge ' + (on ? 'bg-success' : 'bg-secondary');
+  $('#auth-state').textContent = on ? 'login OK' : 'belum login';
+  $('#login-btn').classList.toggle('d-none', on);
+  $('#logout-btn').classList.toggle('d-none', !on);
+}
+
+async function boot(afterLogin){
+  setAuthUI();
+  if(!logged()) { log('dim','klik "Login (Zitadel)" untuk mulai PKCE flow'); return; }
+  try{
+    const me = await api('GET','/api/users/me');
+    const u = me.data;
+    $('#me-label').innerHTML = `<b>${esc(u.username)}</b> <span class="log-dim">${u.id}</span>`;
+    $('#me-edit').classList.remove('d-none');
+    $('#inp-display').value = u.display_name || '';
+    $('#inp-bio').value = '';
+    log('dim', 'login sebagai ' + u.username);
+  }catch(e){ if(e.status===401){ sessionStorage.removeItem('at'); setAuthUI(); } }
+  loadFeed();
+}
+
+/* ================= FEED ================= */
+async function loadFeed(cursor){
+  try{
+    const d = await api('GET', '/api/feed/home' + (cursor ? '?cursor='+encodeURIComponent(cursor) : ''));
+    const items = d.data || [];
+    feedCursor = d.pagination?.next_cursor || null;
+    $('#feed-count').textContent = items.length + ($('#feed').children.length ? '' : '');
+    if(!cursor) $('#feed').innerHTML = '';
+    items.forEach(v => $('#feed').insertAdjacentHTML('beforeend', videoCard(v)));
+    if(items.length) $('#feed-count').textContent = $('#feed').children.length + ' item';
+    $('#feed-more').classList.toggle('d-none', !feedCursor);
+  }catch(e){}
+}
+
+function videoCard(v){
+  const th = v.thumbnail_url
+    ? `<img class="thumb" src="${v.thumbnail_url}" alt="">`
+    : `<div class="thumb-empty">🎬</div>`;
+  return `<div class="col-6 col-md-4 feed-item" data-vid="${v.id}">
+    ${th}
+    <div class="small mt-1 text-truncate">${esc(v.title||'(tanpa judul)')}</div>
+    <div class="small log-dim">@${esc(v.user?.username||'?')} · ${v.likes_count||0}♥ ${v.views_count||0}👁 · ${esc(v.status)}</div>
+  </div>`;
+}
+
+/* ================= VIDEO DETAIL ================= */
+async function openVideo(id){
+  try{
+    const d = await api('GET', `/api/videos/${id}`);
+    currentVideo = d.data;
+    $('#vid-card').style.display = '';
+    $('#v-title').textContent = currentVideo.title || '(tanpa judul)';
+    paintStatus(currentVideo);
+    playHLS(currentVideo);
+    loadComments(id);
+  }catch(e){}
+}
+function paintStatus(v){
+  const b = $('#v-status');
+  b.textContent = v.status;
+  b.className = 'badge ' + (v.status==='READY' ? 'bg-success' : v.status==='FAILED' ? 'bg-danger' : 'bg-warning text-dark');
+  $('#v-stats').textContent = `♥${v.likes_count||0} 👁${v.views_count||0} 💬${v.comments_count||0} retry:${v.retry_count||0}`;
+}
+function playHLS(v){
+  const vid = $('#player');
+  if(v.status !== 'READY' || !v.hls_playlist_url){
+    vid.removeAttribute('src'); vid.load();
+    if(v.status !== 'READY') pollStatus(v.id);
+    return;
+  }
+  const url = API + `/api/videos/${v.id}/playlist.m3u8` + (v.hls_playlist_url.includes('token=') ? '' : '');
+  if(Hls.isSupported()){
+    const hls = new Hls();
+    hls.loadSource(url); hls.attachMedia(vid);
+  } else { vid.src = url; }
+}
+
+async function pollStatus(id){
+  const iv = setInterval(async ()=>{
+    try{
+      const d = await api('GET', `/api/videos/${id}/status`);
+      const s = d.data?.status;
+      if(s !== currentVideo?.status){ currentVideo.status = s; paintStatus(currentVideo); }
+      if(s === 'READY' || s === 'FAILED'){ clearInterval(iv); if(s==='READY') openVideo(id); }
+    }catch(e){ clearInterval(iv); }
+  }, 3000);
+}
+
+/* ================= COMMENTS ================= */
+async function loadComments(vid){
+  try{
+    const d = await api('GET', `/api/videos/${vid}/comments`);
+    const cs = d.data || [];
+    $('#comments').innerHTML = cs.map(c =>
+      `<div class="small border-bottom border-secondary py-1 d-flex">
+         <span class="me-2 log-dim">#${c.parent_id?'↳ ':''}</span>
+         <span class="me-auto"><b>@${esc(c.user?.username||c.user_id?.slice(0,8)||'?')}</b> ${esc(c.content)}
+           <span class="log-dim">${new Date(c.created_at).toLocaleString()}</span></span>
+         ${c.can_delete||c.is_owner ? `<button class="btn btn-sm btn-link text-danger py-0" data-cdel="${c.id}">✕</button>` : ''}
+         <button class="btn btn-sm btn-link text-info py-0" data-creply="${c.id}">↩</button>
+       </div>`).join('') || '<div class="small log-dim">belum ada komentar</div>';
+    // klik reply → isi input dengan marker reply:ID
+    $('#comments').querySelectorAll('[data-creply]').forEach(b => b.onclick = () => {
+      $('#c-content').value = `@${b.closest('div.small').querySelector('b')?.textContent||''} `;
+      $('#c-content').dataset.reply = b.dataset.creply;
+      $('#c-content').focus();
+    });
+    $('#comments').querySelectorAll('[data-cdel]').forEach(b => b.onclick = () =>
+      api('DELETE', `/api/comments/${b.dataset.cdel}`).then(()=>loadComments(currentVideo.id)));
+  }catch(e){}
+}
+
+/* ================= UPLOAD 3 LANGKAH ================= */
+async function doUpload(){
+  const f = $('#up-file').files[0];
+  const title = $('#up-title').value || 'demo upload';
+  if(!f){ log('err','pilih file video dulu'); return; }
+  $('#up-progress').classList.remove('d-none');
+  try{
+    mark(1,'run');
+    const intent = await api('POST','/api/videos/upload-intent', {title, description: $('#up-desc').value});
+    const {video_id, r2_key, upload_url} = intent.data;
+    mark(1,'ok');
+    mark(2,'run');
+    log('req', `PUT presigned R2 (${f.size} bytes)`);
+    const pu = await fetch(upload_url, {method:'PUT', body:f, headers:{'Content-Type':'application/octet-stream'}});
+    log(pu.ok?'ok':'err', `PUT R2 → ${pu.status}`);
+    if(!pu.ok) throw 'PUT R2 gagal';
+    mark(2,'ok');
+    mark(3,'run');
+    const conf = await api('POST','/api/videos/confirm', {video_id, r2_key});
+    mark(3,'ok');
+    $('#up-progress').innerHTML = `<span class="spin"></span> worker sedang transcode (poll status)…`;
+    currentVideo = {id: video_id, status: conf.data?.status || 'PROCESSING'};
+    $('#vid-card').style.display='';
+    $('#v-title').textContent = title;
+    paintStatus(currentVideo); pollStatus(video_id);
+    setTimeout(()=>loadFeed(), 4000);
+  }catch(e){ mark(0,'err'); }
+}
+function mark(n, st){
+  const el = $('#s'+n); if(!el) return;
+  el.classList.remove('log-ok','log-err');
+  if(st==='ok') el.classList.add('log-ok');
+  if(st==='err') el.classList.add('log-err');
+}
+
+/* ================= ROUTER AKSI ================= */
+const acts = {
+  me:        () => api('GET','/api/users/me'),
+  updateme:  () => api('PUT','/api/users/me', {display_name:$('#inp-display').value||undefined, bio:$('#inp-bio').value||undefined}),
+  delme:     () => { if(confirm('HAPUS AKUN SENDIRI? (tombstoned + cascade)')) api('DELETE','/api/users/me'); },
+  feed:      () => loadFeed(),
+  'feed-next':() => loadFeed(feedCursor),
+  myvideos:  async () => { const me = await api('GET','/api/users/me'); loadUserVideos(me.data.id); },
+  notif:     () => api('GET','/api/notifications'),
+  readall:   () => api('PUT','/api/notifications/read-all'),
+  like:      () => api('POST',`/api/videos/${currentVideo.id}/like`),
+  unlike:    () => api('DELETE',`/api/videos/${currentVideo.id}/like`),
+  view:      () => api('POST',`/api/videos/${currentVideo.id}/view`).then(()=>paintStatus(currentVideo)),
+  delvideo:  () => { if(confirm('hapus video ini?')) api('DELETE',`/api/videos/${currentVideo.id}`).then(()=>loadFeed()); },
+  comment:   () => {
+    const c = $('#c-content').value.trim(); if(!c) return;
+    const replyId = $('#c-content').dataset.reply;
+    const p = replyId ? `/api/comments/${replyId}/reply` : `/api/videos/${currentVideo.id}/comments`;
+    delete $('#c-content').dataset.reply; $('#c-content').value='';
+    api('POST', p, {content:c}).then(()=>loadComments(currentVideo.id));
+  },
+  comments:  () => loadComments(currentVideo.id),
+  getuser:    () => { const id=$('#u-id').value.trim(); if(id) api('GET',`/api/users/${id}`); },
+  uservideos:() => { const id=$('#u-id').value.trim(); if(id) loadUserVideos(id); },
+  follow:    () => { const id=$('#u-id').value.trim(); if(id) api('POST',`/api/users/${id}/follow`); },
+  unfollow:  () => { const id=$('#u-id').value.trim(); if(id) api('DELETE',`/api/users/${id}/follow`); },
+  followers: () => { const id=$('#u-id').value.trim(); if(id) api('GET',`/api/users/${id}/followers`); },
+  following: () => { const id=$('#u-id').value.trim(); if(id) api('GET',`/api/users/${id}/following`); },
+  clearlog:  () => logEl.innerHTML = '',
+};
+
+async function loadUserVideos(uid){
+  try{
+    const d = await api('GET', `/api/users/${uid}/videos`);
+    const items = d.data || [];
+    $('#feed').innerHTML = items.map(videoCard).join('');
+    $('#feed-count').textContent = items.length + ' item (user)';
+  }catch(e){}
+}
+
+/* ================= EVENTS ================= */
+document.addEventListener('click', e => {
+  const btn = e.target.closest('[data-act]');
+  if(btn && acts[btn.dataset.act]){ acts[btn.dataset.act](); return; }
+  const card = e.target.closest('.feed-item');
+  if(card){ openVideo(card.dataset.vid); }
+});
+$('#up-go').onclick = doUpload;
+$('#login-btn').onclick = e => { e.preventDefault(); startLogin(); };
+$('#logout-btn').onclick = () => { sessionStorage.clear(); location.reload(); };
+$('#v-close').onclick = () => { $('#vid-card').style.display='none'; $('#player').removeAttribute('src'); };
+
+/* click pada kartu feed mengisi user id juga */
+document.addEventListener('click', e => {
+  const card = e.target.closest('.feed-item');
+  if(card){ const v = [...$('#feed').children].find(x=>x.dataset.vid===card.dataset.vid); }
+}, true);
+
+/* ================= START ================= */
+// SPA client id di-inject via nginx sub_filter? Paling sederhana: fetch dari /demo/config.js
+</script>
+<script src="/demo/config.js"></script>
+<script>
+  if(!window.SPA_CLIENT_ID){ log('err','SPA_CLIENT_ID kosong — isi /demo/config.js'); }
+  if(location.search.includes('code=')) handleCallback(); else boot();
+</script>
+</body>
+</html>
