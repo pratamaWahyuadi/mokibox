@@ -237,7 +237,22 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	//                              NOT the JSON envelope)
 	api.GET("/videos/:id", vh.GetVideoDetail)
 	api.GET("/videos/:id/status", vh.GetVideoStatus)
-	api.GET("/videos/:id/playlist.m3u8", vh.GetPlaylist)
+	// HLS playlist lives at the SAME path but registered
+	// outside the /api group: the player (hls.js) fetches
+	// it anonymously with a ?token= media token. The
+	// Authenticate middleware on /api would otherwise
+	// 401 any non-JWT request — and hls.js running in
+	// the browser cannot attach Authorization headers
+	// without breaking the R2 presigned signature
+	// (SignedHeaders=host only — extra header = 400).
+	// The handler itself still verifies either JWT or
+	// ?token=; visibility rules apply to both.
+	e.GET("/api/videos/:id/playlist.m3u8", vh.GetPlaylist,
+		middleware.AuthenticateOptional(middleware.AuthenticateConfig{
+			Verifier: d.AuthVerifier,
+			Queries:  d.Queries,
+		}),
+		webhookRateLimit)
 
 	// Phase 8.B: delete video (owner only). The
 	// handler tombstones the row (status=DELETED +

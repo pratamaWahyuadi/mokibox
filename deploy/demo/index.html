@@ -315,11 +315,21 @@ function playHLS(v){
     if(v.status !== 'READY') pollStatus(v.id);
     return;
   }
-  const url = API + `/api/videos/${v.id}/playlist.m3u8` + (v.hls_playlist_url.includes('token=') ? '' : '');
+  // Pakai v.hls_playlist_url LANGSUNG — sudah built-in dengan
+  // ?token= dari backend. Tidak bawa Authorization header
+  // (akan break R2 presigned signature yang hanya sign 'host').
+  // hls.js default tidak kirim extra header, R2 segments 200.
+  // Sebelumnya: Authorization header di xhrSetup = cause
+  // R2 400 + no CORS header = browser block (2026-09-06).
+  const playlistURL = v.hls_playlist_url;
   if(Hls.isSupported()){
-    const hls = new Hls();
-    hls.loadSource(url); hls.attachMedia(vid);
-  } else { vid.src = url; }
+    const hls = new Hls({});
+    hls.loadSource(playlistURL); hls.attachMedia(vid);
+  } else {
+    // Safari native HLS via <video> - no custom header support
+    // anyway; URL dengan token sudah cukup.
+    vid.src = playlistURL;
+  }
 }
 
 async function pollStatus(id){
@@ -362,7 +372,9 @@ async function doUpload(){
   const f = $('#up-file').files[0];
   const title = $('#up-title').value || 'demo upload';
   if(!f){ log('err','pilih file video dulu'); return; }
+  if(!logged()){ log('err','belum login — klik Login dulu (token mungkin kadaluarsa, refresh halaman)'); return; }
   $('#up-progress').classList.remove('d-none');
+  $('#up-progress').innerHTML = '';
   try{
     mark(1,'run');
     const intent = await api('POST','/api/videos/upload-intent', {title, description: $('#up-desc').value});
@@ -372,7 +384,7 @@ async function doUpload(){
     log('req', `PUT presigned R2 (${f.size} bytes)`);
     const pu = await fetch(upload_url, {method:'PUT', body:f, headers:{'Content-Type':'application/octet-stream'}});
     log(pu.ok?'ok':'err', `PUT R2 → ${pu.status}`);
-    if(!pu.ok) throw 'PUT R2 gagal';
+    if(!pu.ok) throw 'PUT R2 gagal: '+pu.status;
     mark(2,'ok');
     mark(3,'run');
     const conf = await api('POST','/api/videos/confirm', {video_id, r2_key});
@@ -383,7 +395,15 @@ async function doUpload(){
     $('#v-title').textContent = title;
     paintStatus(currentVideo); pollStatus(video_id);
     setTimeout(()=>loadFeed(), 4000);
-  }catch(e){ mark(0,'err'); }
+  }catch(e){
+    // Tampilkan error yang sebenarnya — tidak pernah stuck diam.
+    const msg = (e && e.data && e.data.error)
+      ? `${e.status} ${e.data.error.code}: ${e.data.error.message}`
+      : (typeof e === 'string' ? e : (e && e.message) || 'error tak dikenal (cek log panel)');
+    $('#up-progress').innerHTML = `<span class="log-err">✗ gagal: ${esc(msg)}</span>`;
+    log('err', 'upload gagal di langkah aktif — lihat status langkah (1/2/3) di atas');
+    [1,2,3].forEach(n => { const el=$('#s'+n); if(el && !el.classList.contains('log-ok')) el.classList.add('log-err'); });
+  }
 }
 function mark(n, st){
   const el = $('#s'+n); if(!el) return;
