@@ -324,6 +324,19 @@ function playHLS(v){
   const playlistURL = v.hls_playlist_url;
   if(Hls.isSupported()){
     const hls = new Hls({});
+    // Mulai dari level tertinggi (720p). Default hls.js ABR
+    // (startLevel -1) memilih level rendah saat seed estimate
+    // bandwidth konservatif, lalu butuh buffer bertahan-tahan
+    // untuk naik — untuk video pendek demo (~20 detik) video
+    // selesai sebelum ABR sempat naik = terlihat buram (480p)
+    // padahal 720p tersedia. Set currentLevel sekali di awal;
+    // setelah itu ABR tetap aktif dan boleh turun kalau
+    // bandwidth asli jelek.
+    hls.once(Hls.Events.MANIFEST_PARSED, (_e, data) => {
+      if (data.levels && data.levels.length > 0) {
+        hls.currentLevel = data.levels.length - 1;
+      }
+    });
     hls.loadSource(playlistURL); hls.attachMedia(vid);
   } else {
     // Safari native HLS via <video> - no custom header support
