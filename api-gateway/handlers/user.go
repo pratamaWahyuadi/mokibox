@@ -29,8 +29,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
-	"github.com/hibiken/asynq"
-
 	"github.com/pratamaWahyuadi/mokibox/api-gateway/middleware"
 	"github.com/pratamaWahyuadi/mokibox/shared"
 	"github.com/pratamaWahyuadi/mokibox/shared/db"
@@ -61,17 +59,14 @@ type UserHandler struct {
 	Queries userStore
 }
 
-// NewUserHandler builds a UserHandler with all
-// dependencies injected. r2 / queue / cfg were removed
-// from the struct in the testability refactor — no
-// method ever touched them (thumbnails arrive via the
-// feed/detail handlers, notifications via InsertNotification
-// on the same store interface); keeping nil fields
-// forced every test to pass three unused concretes.
-// The signature keeps accepting them for wiring
-// compatibility and simply ignores them (routes.go
-// unchanged); a future cleanup may drop the params.
-func NewUserHandler(q *db.Queries, r2 *shared.R2Client, queue *asynq.Client, cfg *shared.APIConfig) *UserHandler {
+// NewUserHandler builds a UserHandler from the sqlc
+// querier. The testability refactor dropped the unused
+// R2/Queue/Cfg struct fields (no method ever touched them —
+// thumbnails are owned by the feed/detail handlers and the
+// follow notification goes through InsertNotification on
+// the same store); the constructor signature follows, so
+// routes.go passes only what is real.
+func NewUserHandler(q *db.Queries) *UserHandler {
 	return &UserHandler{Queries: q}
 }
 

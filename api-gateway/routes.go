@@ -173,7 +173,7 @@ func NewRouter(d RouterDeps) *echo.Echo {
 		authRateLimit,
 	)
 
-	uh := handlers.NewUserHandler(d.Queries, d.R2, d.Queue, d.Cfg)
+	uh := handlers.NewUserHandler(d.Queries)
 	api.GET("/users/me", uh.GetMe)
 	api.PUT("/users/me", uh.UpdateMe)
 	api.GET("/users/:id", uh.GetUserProfile)

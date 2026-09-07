@@ -727,7 +727,7 @@ func postWebhook(e *echo.Echo, body []byte, sig string) *httptest.ResponseRecord
 
 func TestWebhook_InvalidSignature401(t *testing.T) {
 	store := &stubWebhookStore{}
-	wh := newWebhookHandlerForTest(store, testSigningKey)
+	wh := newWebhookHandlerForTest(store, testSigningKey, nil)
 	e := echo.New()
 	e.POST("/api/webhooks/zitadel", wh.Handle)
 
@@ -750,7 +750,7 @@ func TestWebhook_ValidSignatureDeactivates(t *testing.T) {
 			return db.User{ID: id, IsActive: false}, nil
 		},
 	}
-	wh := newWebhookHandlerForTest(store, testSigningKey)
+	wh := newWebhookHandlerForTest(store, testSigningKey, nil)
 	e := echo.New()
 	e.POST("/api/webhooks/zitadel", wh.Handle)
 
@@ -770,7 +770,7 @@ func TestWebhook_MissingLocalUserAcked(t *testing.T) {
 			return db.User{}, sql.ErrNoRows
 		},
 	}
-	wh := newWebhookHandlerForTest(store, testSigningKey)
+	wh := newWebhookHandlerForTest(store, testSigningKey, nil)
 	e := echo.New()
 	e.POST("/api/webhooks/zitadel", wh.Handle)
 
@@ -783,13 +783,92 @@ func TestWebhook_MissingLocalUserAcked(t *testing.T) {
 
 func TestWebhook_UnsupportedEvent400(t *testing.T) {
 	store := &stubWebhookStore{}
-	wh := newWebhookHandlerForTest(store, testSigningKey)
+	wh := newWebhookHandlerForTest(store, testSigningKey, nil)
 	e := echo.New()
 	e.POST("/api/webhooks/zitadel", wh.Handle)
 
 	payload := []byte(fmt.Sprintf(`{"event_type":"user.locked","aggregateID":"sub-1"}`))
 	rec := postWebhook(e, payload, signWebhook(t, payload))
 	assertErrCode(t, rec, http.StatusBadRequest, shared.CodeWebhookEventUnsupported)
+}
+
+func TestWebhook_UserRemovedDelegatesToDeleteUser(t *testing.T) {
+	// The user.removed branch now runs against a stubbed
+	// delete callable (previously it held the concrete
+	// *db.Queries/*sql.DB/*asynq.Client and was untestable
+	// without infra). Asserts: valid signature -> lookup by
+	// aggregateID -> the callable receives the resolved local
+	// id -> 200 processed.
+	var deleted uuid.UUID
+	deleteCalled := false
+	store := &stubWebhookStore{
+		getByZitadelID: func(ctx context.Context, zitadelID string) (db.User, error) {
+			if zitadelID != "sub-gone" {
+				t.Errorf("lookup sub = %s, want sub-gone", zitadelID)
+			}
+			return db.User{ID: testViewerID, ZitadelID: zitadelID, IsActive: true}, nil
+		},
+	}
+	wh := newWebhookHandlerForTest(store, testSigningKey, func(ctx context.Context, userID uuid.UUID) error {
+		deleteCalled = true
+		deleted = userID
+		return nil
+	})
+	e := echo.New()
+	e.POST("/api/webhooks/zitadel", wh.Handle)
+
+	payload := []byte(`{"event_type":"user.removed","aggregateID":"sub-gone"}`)
+	rec := postWebhook(e, payload, signWebhook(t, payload))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if !deleteCalled || deleted != testViewerID {
+		t.Errorf("deleteUser called=%v userID=%s, want the resolved local id %s", deleteCalled, deleted, testViewerID)
+	}
+}
+
+func TestWebhook_UserRemovedDeleteFailure500(t *testing.T) {
+	store := &stubWebhookStore{
+		getByZitadelID: func(ctx context.Context, zitadelID string) (db.User, error) {
+			return db.User{ID: testViewerID, ZitadelID: zitadelID, IsActive: true}, nil
+		},
+	}
+	wh := newWebhookHandlerForTest(store, testSigningKey, func(ctx context.Context, userID uuid.UUID) error {
+		return shared.Wrap(shared.ErrInternal, "cascade failed")
+	})
+	e := echo.New()
+	e.POST("/api/webhooks/zitadel", wh.Handle)
+
+	payload := []byte(`{"event_type":"user.removed","aggregateID":"sub-gone"}`)
+	rec := postWebhook(e, payload, signWebhook(t, payload))
+	assertErrCode(t, rec, http.StatusInternalServerError, shared.CodeInternalError)
+}
+
+func TestWebhook_UserRemovedMissingLocalUserAcked(t *testing.T) {
+	// Webhook path: Zitadel notifies about a user with no
+	// local row. The lookup short-circuits BEFORE the delete
+	// callable runs; Zitadel gets a 200 so it stops retrying.
+	deleteCalled := false
+	store := &stubWebhookStore{
+		getByZitadelID: func(ctx context.Context, zitadelID string) (db.User, error) {
+			return db.User{}, sql.ErrNoRows
+		},
+	}
+	wh := newWebhookHandlerForTest(store, testSigningKey, func(ctx context.Context, userID uuid.UUID) error {
+		deleteCalled = true
+		return nil
+	})
+	e := echo.New()
+	e.POST("/api/webhooks/zitadel", wh.Handle)
+
+	payload := []byte(`{"event_type":"user.removed","aggregateID":"never-logged-in"}`)
+	rec := postWebhook(e, payload, signWebhook(t, payload))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (missing local user acked)", rec.Code)
+	}
+	if deleteCalled {
+		t.Error("deleteUser must not run when no local row exists")
+	}
 }
 
 // Compile-time checks.

@@ -70,25 +70,23 @@ type webhookStore interface {
 }
 
 // WebhookHandler holds the dependencies the
-// /api/webhooks/zitadel endpoint needs. The user.removed
-// branch delegates to the exported DeleteUserData
-// adapter (concrete pair), which is itself covered by
-// the account tests; the interface fields keep the
-// handler's own paths (lookup, deactivate, signature)
-// stubbable.
+// /api/webhooks/zitadel endpoint needs. Queries is the
+// consumer-side interface (lookup + deactivate); the
+// user.removed branch goes through the deleteUser callable
+// (a plain func, not a stored concrete), which the
+// constructor wires to the exported DeleteUserData adapter.
+// No *db.Queries / *sql.DB / *asynq.Client is stored on the
+// struct — the "interface-only handler" claim stays exact.
 type WebhookHandler struct {
 	Queries    webhookStore
-	DB         *sql.DB
-	Queue      *asynq.Client
 	SigningKey string
 
-	// queriesConcrete keeps the *db.Queries the
-	// user.removed branch hands to the exported
-	// DeleteUserData adapter (which takes the concrete
-	// pair so webhook.go's pre-refactor call site is
-	// unchanged). Nil in tests that do not exercise
-	// user.removed.
-	queriesConcrete *db.Queries
+	// deleteUser performs the full delete-cascade for a local
+	// user id (tombstone + row deletes + post-commit R2
+	// enqueue). Production wires it to DeleteUserData; tests
+	// inject a stub to verify the webhook's own branch logic
+	// without touching the cascade (which has its own tests).
+	deleteUser func(ctx context.Context, userID uuid.UUID) error
 }
 
 // NewWebhookHandler returns a WebhookHandler with
@@ -100,21 +98,18 @@ type WebhookHandler struct {
 // value at startup).
 func NewWebhookHandler(queries *db.Queries, dbHandle *sql.DB, queue *asynq.Client, signingKey string) *WebhookHandler {
 	return &WebhookHandler{
-		Queries:         queries,
-		DB:              dbHandle,
-		Queue:           queue,
-		SigningKey:      signingKey,
-		queriesConcrete: queries,
+		Queries:    queries,
+		SigningKey: signingKey,
+		deleteUser: func(ctx context.Context, userID uuid.UUID) error {
+			return DeleteUserData(ctx, queries, dbHandle, queue, userID)
+		},
 	}
 }
 
-// newWebhookHandlerForTest lets the test suite build
-// the handler directly from the interface (DB/Queue
-// stay concrete: only the user.removed branch uses
-// them, and that branch delegates to the tested
-// DeleteUserData adapter).
-func newWebhookHandlerForTest(store webhookStore, signingKey string) *WebhookHandler {
-	return &WebhookHandler{Queries: store, SigningKey: signingKey}
+// newWebhookHandlerForTest lets the test suite build the
+// handler from the interfaces + a deleteUser stub.
+func newWebhookHandlerForTest(store webhookStore, signingKey string, deleteUser func(ctx context.Context, userID uuid.UUID) error) *WebhookHandler {
+	return &WebhookHandler{Queries: store, SigningKey: signingKey, deleteUser: deleteUser}
 }
 
 // zitadelActionV2Event is the subset of the Actions V2
@@ -240,24 +235,24 @@ func (h *WebhookHandler) Handle(c echo.Context) error {
 }
 
 // handleUserRemoved maps the Zitadel Actions V2
-// user.removed event to DeleteUserData. The flow:
+// user.removed event to the delete cascade. The flow:
 //
 //  1. Look up the local user id (Zitadel sub ->
 //     *db.User.ID). Missing -> 200 ack so Zitadel
 //     stops retrying (the same rationale as the
 //     deactivated branch).
-//  2. Call DeleteUserData(ctx, Queries, DB, Queue,
-//     userID). All tombstone + row delete + R2
-//     enqueue work happens there; this handler is
-//     a thin shim.
+//  2. Call h.deleteUser (the DeleteUserData adapter in
+//     production, a stub in tests). All tombstone +
+//     row delete + R2 enqueue work happens there;
+//     this handler is a thin shim.
 //
-// If DB or Queue is nil (degraded wiring in tests
-// that only exercise user.deactivated) we return
-// 500 rather than crash on a nil pointer.
+// If the deleteUser callable is nil (degraded wiring in
+// tests that only exercise user.deactivated) we return
+// 500 rather than crash on a nil call.
 func (h *WebhookHandler) handleUserRemoved(ctx context.Context, c echo.Context, zitadelSub string) error {
-	if h.DB == nil || h.Queue == nil {
+	if h.deleteUser == nil {
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal,
-			"webhook missing DB/Queue for user.removed"))
+			"webhook missing delete-cascade wiring for user.removed"))
 	}
 	userID, err := lookupUserIDByZitadelID(ctx, h.Queries, zitadelSub)
 	if err != nil {
@@ -270,7 +265,7 @@ func (h *WebhookHandler) handleUserRemoved(ctx context.Context, c echo.Context, 
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "lookup user"))
 	}
 
-	if err := DeleteUserData(ctx, h.queriesConcrete, h.DB, h.Queue, userID); err != nil {
+	if err := h.deleteUser(ctx, userID); err != nil {
 		slog.Error("user.removed DeleteUserData failed", "err", err, "user_id", userID)
 		return shared.RespondError(c, err)
 	}

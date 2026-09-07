@@ -59,6 +59,53 @@ func TestErrorMapping(t *testing.T) {
 	}
 }
 
+// allErrorCodes is the registry every ErrorCode constant MUST
+// be listed in. TestErrorMapping_CodeStatusCoverage iterates it
+// so a future ErrorCode added to errors.go without a status
+// mapping (and without a registry entry) fails the build-time
+// test instead of shipping a silent 500 to production — the
+// exact bug class the testability-refactor ClassifyError fix
+// closed for the 10 call sites that existed then.
+var allErrorCodes = map[ErrorCode]int{
+	CodeValidationError:        http.StatusBadRequest,
+	CodeUnauthorized:           http.StatusUnauthorized,
+	CodeForbidden:              http.StatusForbidden,
+	CodeNotFound:               http.StatusNotFound,
+	CodeVideoStatusConflict:    http.StatusConflict,
+	CodeVideoNotReady:         http.StatusConflict,
+	CodeUploadMissing:          http.StatusConflict,
+	CodeUploadSizeInvalid:      http.StatusBadRequest,
+	CodeSelfFollowNotAllowed:   http.StatusBadRequest,
+	CodeWebhookInvalidSignature: http.StatusUnauthorized,
+	CodeWebhookEventUnsupported: http.StatusBadRequest,
+	CodeRateLimited:            http.StatusTooManyRequests,
+	CodeInternalError:          http.StatusInternalServerError,
+}
+
+func TestErrorMapping_CodeStatusCoverage(t *testing.T) {
+	if len(allErrorCodes) != len(knownErrorCodes) {
+		t.Fatalf("allErrorCodes has %d entries but knownErrorCodes has %d — every ErrorCode constant must be in both (add the constant to knownErrorCodes AND its status to allErrorCodes)", len(allErrorCodes), len(knownErrorCodes))
+	}
+	for code, wantStatus := range allErrorCodes {
+		t.Run(string(code), func(t *testing.T) {
+			got := httpStatusForCode(code)
+			if got != wantStatus {
+				t.Errorf("httpStatusForCode(%s) = %d, want %d", code, got, wantStatus)
+			}
+			// The full ClassifyError path (what a bare
+			// NewAPIError(code, ...) without WithCause /
+			// WithStatus goes through) must agree.
+			s, gotCode, _, _ := ClassifyError(NewAPIError(code, "coverage probe"))
+			if s != wantStatus {
+				t.Errorf("ClassifyError(NewAPIError(%s)) status = %d, want %d", code, s, wantStatus)
+			}
+			if gotCode != code {
+				t.Errorf("ClassifyError must preserve the code, got %s want %s", gotCode, code)
+			}
+		})
+	}
+}
+
 func TestErrorMapping_UnknownFallsToInternal(t *testing.T) {
 	unknown := errors.New("something unexpected")
 	if got := httpStatusFor(unknown); got != http.StatusInternalServerError {

@@ -94,6 +94,36 @@ const (
 	CodeRateLimited ErrorCode = "RATE_LIMITED"
 )
 
+// knownErrorCodes lists every ErrorCode constant declared
+// above. It exists so TestErrorMapping_CodeStatusCoverage
+// (shared/errors_test.go) can fail loudly when a new ErrorCode
+// is added without also extending the status mapping — before
+// this registry, a new code without a mapping silently
+// classified as 500 through ClassifyError's fallback (the
+// exact bug class the testability refactor fixed for the 10
+// call sites that existed then).
+//
+// Maintenance rule: adding an ErrorCode constant REQUIRES (1)
+// an entry here and (2) a case in httpStatusForCode, plus
+// the expected status in the test's allErrorCodes map. The
+// test compares lengths, so skipping any one of the three
+// fails the suite.
+var knownErrorCodes = []ErrorCode{
+	CodeValidationError,
+	CodeUnauthorized,
+	CodeForbidden,
+	CodeNotFound,
+	CodeVideoStatusConflict,
+	CodeVideoNotReady,
+	CodeUploadMissing,
+	CodeUploadSizeInvalid,
+	CodeSelfFollowNotAllowed,
+	CodeWebhookInvalidSignature,
+	CodeWebhookEventUnsupported,
+	CodeRateLimited,
+	CodeInternalError,
+}
+
 // Sentinel errors. Wrap these with fmt.Errorf("...: %w",
 // ErrXxx) so the central error handler can match with
 // errors.Is.
