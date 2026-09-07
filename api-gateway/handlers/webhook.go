@@ -60,18 +60,33 @@ const (
 	EventUserRemoved     = "user.removed"
 )
 
+// webhookStore is the consumer-side interface the
+// webhook handlers need: resolve the local user by
+// Zitadel sub and deactivate them. *db.Queries
+// satisfies it.
+type webhookStore interface {
+	GetUserByZitadelID(ctx context.Context, zitadelID string) (db.User, error)
+	DeactivateUser(ctx context.Context, id uuid.UUID) (db.User, error)
+}
+
 // WebhookHandler holds the dependencies the
-// /api/webhooks/zitadel endpoint needs. Phase 8
-// extends the struct with DB and Queue so the
-// user.removed branch can call DeleteUserData
-// (which itself needs the *sql.DB to open the
-// tombstone tx and the Asynq client to enqueue
-// the R2 cleanup task).
+// /api/webhooks/zitadel endpoint needs. Queries is the
+// consumer-side interface (lookup + deactivate); the
+// user.removed branch goes through the deleteUser callable
+// (a plain func, not a stored concrete), which the
+// constructor wires to the exported DeleteUserData adapter.
+// No *db.Queries / *sql.DB / *asynq.Client is stored on the
+// struct — the "interface-only handler" claim stays exact.
 type WebhookHandler struct {
-	Queries    *db.Queries
-	DB         *sql.DB
-	Queue      *asynq.Client
+	Queries    webhookStore
 	SigningKey string
+
+	// deleteUser performs the full delete-cascade for a local
+	// user id (tombstone + row deletes + post-commit R2
+	// enqueue). Production wires it to DeleteUserData; tests
+	// inject a stub to verify the webhook's own branch logic
+	// without touching the cascade (which has its own tests).
+	deleteUser func(ctx context.Context, userID uuid.UUID) error
 }
 
 // NewWebhookHandler returns a WebhookHandler with
@@ -84,10 +99,17 @@ type WebhookHandler struct {
 func NewWebhookHandler(queries *db.Queries, dbHandle *sql.DB, queue *asynq.Client, signingKey string) *WebhookHandler {
 	return &WebhookHandler{
 		Queries:    queries,
-		DB:         dbHandle,
-		Queue:      queue,
 		SigningKey: signingKey,
+		deleteUser: func(ctx context.Context, userID uuid.UUID) error {
+			return DeleteUserData(ctx, queries, dbHandle, queue, userID)
+		},
 	}
+}
+
+// newWebhookHandlerForTest lets the test suite build the
+// handler from the interfaces + a deleteUser stub.
+func newWebhookHandlerForTest(store webhookStore, signingKey string, deleteUser func(ctx context.Context, userID uuid.UUID) error) *WebhookHandler {
+	return &WebhookHandler{Queries: store, SigningKey: signingKey, deleteUser: deleteUser}
 }
 
 // zitadelActionV2Event is the subset of the Actions V2
@@ -213,24 +235,24 @@ func (h *WebhookHandler) Handle(c echo.Context) error {
 }
 
 // handleUserRemoved maps the Zitadel Actions V2
-// user.removed event to DeleteUserData. The flow:
+// user.removed event to the delete cascade. The flow:
 //
 //  1. Look up the local user id (Zitadel sub ->
 //     *db.User.ID). Missing -> 200 ack so Zitadel
 //     stops retrying (the same rationale as the
 //     deactivated branch).
-//  2. Call DeleteUserData(ctx, Queries, DB, Queue,
-//     userID). All tombstone + row delete + R2
-//     enqueue work happens there; this handler is
-//     a thin shim.
+//  2. Call h.deleteUser (the DeleteUserData adapter in
+//     production, a stub in tests). All tombstone +
+//     row delete + R2 enqueue work happens there;
+//     this handler is a thin shim.
 //
-// If DB or Queue is nil (degraded wiring in tests
-// that only exercise user.deactivated) we return
-// 500 rather than crash on a nil pointer.
+// If the deleteUser callable is nil (degraded wiring in
+// tests that only exercise user.deactivated) we return
+// 500 rather than crash on a nil call.
 func (h *WebhookHandler) handleUserRemoved(ctx context.Context, c echo.Context, zitadelSub string) error {
-	if h.DB == nil || h.Queue == nil {
+	if h.deleteUser == nil {
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal,
-			"webhook missing DB/Queue for user.removed"))
+			"webhook missing delete-cascade wiring for user.removed"))
 	}
 	userID, err := lookupUserIDByZitadelID(ctx, h.Queries, zitadelSub)
 	if err != nil {
@@ -243,7 +265,7 @@ func (h *WebhookHandler) handleUserRemoved(ctx context.Context, c echo.Context, 
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "lookup user"))
 	}
 
-	if err := DeleteUserData(ctx, h.Queries, h.DB, h.Queue, userID); err != nil {
+	if err := h.deleteUser(ctx, userID); err != nil {
 		slog.Error("user.removed DeleteUserData failed", "err", err, "user_id", userID)
 		return shared.RespondError(c, err)
 	}
@@ -269,7 +291,7 @@ var errUserNotFound = errors.New("local user not found")
 // The handler runs against a *sql.DB (pgx stdlib), so
 // a missing row surfaces as sql.ErrNoRows from
 // QueryRowContext().Scan().
-func lookupUserIDByZitadelID(ctx context.Context, q *db.Queries, sub string) (uuid.UUID, error) {
+func lookupUserIDByZitadelID(ctx context.Context, q webhookStore, sub string) (uuid.UUID, error) {
 	row, err := q.GetUserByZitadelID(ctx, sub)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

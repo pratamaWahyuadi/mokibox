@@ -19,6 +19,7 @@
 package handlers
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -28,40 +29,51 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
-	"github.com/hibiken/asynq"
-
 	"github.com/pratamaWahyuadi/mokibox/api-gateway/middleware"
 	"github.com/pratamaWahyuadi/mokibox/shared"
 	"github.com/pratamaWahyuadi/mokibox/shared/db"
 )
 
-// UserHandler holds the dependencies for the user
-// profile endpoints. R2 and Queue are listed because
-// the spec calls them out; phase 3 does not call them
-// directly (thumbnails + notifications arrive in
-// phase 6/7) but keeping the field on the struct now
-// means phase 6/7 can wire them without touching
-// routes.go.
-type UserHandler struct {
-	Queries *db.Queries
-	R2      *shared.R2Client // used from phase 6 for presigned thumbnail URLs
-	Queue   *asynq.Client   // used from phase 7 to enqueue notifications
-	Cfg     *shared.APIConfig
+// userStore is the consumer-side interface the
+// UserHandler methods (user.go + user_follow.go) use.
+// *db.Queries satisfies it.
+type userStore interface {
+	visibilityStore
+	GetUserProfileWithStats(ctx context.Context, arg db.GetUserProfileWithStatsParams) (db.GetUserProfileWithStatsRow, error)
+	UpdateUserProfile(ctx context.Context, arg db.UpdateUserProfileParams) (db.User, error)
+	ListVideosByUser(ctx context.Context, arg db.ListVideosByUserParams) ([]db.Video, error)
+	FollowUser(ctx context.Context, arg db.FollowUserParams) error
+	GetFollow(ctx context.Context, arg db.GetFollowParams) (db.Follow, error)
+	DeleteFollow(ctx context.Context, arg db.DeleteFollowParams) error
+	ListFollowers(ctx context.Context, arg db.ListFollowersParams) ([]db.ListFollowersRow, error)
+	ListFollowing(ctx context.Context, arg db.ListFollowingParams) ([]db.ListFollowingRow, error)
+	InsertNotification(ctx context.Context, arg db.InsertNotificationParams) (db.Notification, error)
 }
 
-// NewUserHandler builds a UserHandler with all
-// dependencies injected. Callers should pass nil only
-// for fields they explicitly want to leave unset (phase 3
-// leaves R2 and Queue as zero values - the methods
-// implemented here do not touch them, so passing nil is
-// safe and the strict wiring will be added in phase 9).
-func NewUserHandler(q *db.Queries, r2 *shared.R2Client, queue *asynq.Client, cfg *shared.APIConfig) *UserHandler {
-	return &UserHandler{
-		Queries: q,
-		R2:      r2,
-		Queue:   queue,
-		Cfg:     cfg,
-	}
+// UserHandler holds the dependencies for the user
+// profile + follow endpoints. Queries is the
+// consumer-side interface (testable with stubs); the
+// constructor keeps the production concretes so
+// routes.go wiring is unchanged.
+type UserHandler struct {
+	Queries userStore
+}
+
+// NewUserHandler builds a UserHandler from the sqlc
+// querier. The testability refactor dropped the unused
+// R2/Queue/Cfg struct fields (no method ever touched them —
+// thumbnails are owned by the feed/detail handlers and the
+// follow notification goes through InsertNotification on
+// the same store); the constructor signature follows, so
+// routes.go passes only what is real.
+func NewUserHandler(q *db.Queries) *UserHandler {
+	return &UserHandler{Queries: q}
+}
+
+// newUserHandlerForTest lets the test suite build the
+// handler directly from the interface.
+func newUserHandlerForTest(store userStore) *UserHandler {
+	return &UserHandler{Queries: store}
 }
 
 // userProfileResponse is the on-the-wire shape of a user

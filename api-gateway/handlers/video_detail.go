@@ -160,7 +160,7 @@ func (h *VideoHandler) GetVideoDetail(c echo.Context) error {
 // into the wire VideoObject. The row carries the full
 // user join + liked_by_me so no extra queries are
 // needed.
-func videoObjectFromDetail(ctx context.Context, r2 *shared.R2Client, cfg *shared.APIConfig, r db.GetVideoDetailRow, isOwner bool) VideoObject {
+func videoObjectFromDetail(ctx context.Context, r2 r2ObjectStore, cfg *shared.APIConfig, r db.GetVideoDetailRow, isOwner bool) VideoObject {
 	out := VideoObject{
 		ID:            r.ID,
 		UserID:        r.UserID,
@@ -328,32 +328,18 @@ func (h *VideoHandler) GetPlaylist(c echo.Context) error {
 	}
 
 	// Visibility check (JWT path only; token path
-	// is anonymous-valid for the video).
+	// is anonymous-valid for the video). This uses the
+	// playlist-mode helper with NO owner bypass: a
+	// private owner consuming their own video via JWT
+	// fails IsFollowing(self, self) and gets 404 —
+	// existing anti-enumeration behaviour, deliberately
+	// preserved (owners use the ?token= path).
+	// The status=READY gate above already ran before this
+	// block, so the helper only owns the owner-active +
+	// private-following sub-steps here.
 	if !tokenPath {
-		ownerID := row.UserID
-		owner, uerr := h.Queries.GetUserByID(ctx, ownerID)
-		if uerr != nil {
-			if errors.Is(uerr, sql.ErrNoRows) {
-				return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "video not found"))
-			}
-			slog.Error("GetUserByID during playlist visibility failed", "err", uerr, "user_id", ownerID)
-			return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load owner"))
-		}
-		if !owner.IsActive {
-			return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "video not found"))
-		}
-		if owner.IsPrivate {
-			following, ferr := h.Queries.IsFollowing(ctx, db.IsFollowingParams{
-				FollowerID: viewer.ID,
-				FolloweeID: ownerID,
-			})
-			if ferr != nil {
-				slog.Error("IsFollowing during playlist visibility failed", "err", ferr)
-				return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load follow state"))
-			}
-			if !following {
-				return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "video not found"))
-			}
+		if err := assertVideoReadyVisible(ctx, h.Queries, row.UserID, viewer.ID); err != nil {
+			return shared.RespondError(c, err)
 		}
 	}
 
@@ -520,7 +506,7 @@ func RewriteMasterPlaylist(body []byte, apiBaseURL string, videoID uuid.UUID, se
 // the full R2 key: hls_prefix/<variant>/<segment>.
 // The hls_prefix already has a trailing slash, so the
 // concatenation is correct.
-func RewriteVariantPlaylist(ctx context.Context, r2 *shared.R2Client, body []byte, hlsPrefix, variant string, ttl time.Duration) ([]byte, error) {
+func RewriteVariantPlaylist(ctx context.Context, r2 r2ObjectStore, body []byte, hlsPrefix, variant string, ttl time.Duration) ([]byte, error) {
 	if r2 == nil {
 		return nil, fmt.Errorf("RewriteVariantPlaylist: r2 client is nil")
 	}

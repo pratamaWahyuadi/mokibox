@@ -117,7 +117,10 @@ func userSummaryFromRow(displayName, avatarURL sql.NullString, id uuid.UUID, use
 // the whole page. The contract's thumbnail_url is
 // nullable, so "null on error" is the right
 // contract-level response.
-func buildThumbnailURL(ctx context.Context, r2 *shared.R2Client, cfg *shared.APIConfig, thumbKey sql.NullString, status string) *string {
+//
+// Takes the consumer-side r2ObjectStore (not the R2Client
+// concrete) so the whole mapping path is unit-testable.
+func buildThumbnailURL(ctx context.Context, r2 r2ObjectStore, cfg *shared.APIConfig, thumbKey sql.NullString, status string) *string {
 	if status != "READY" {
 		return nil
 	}

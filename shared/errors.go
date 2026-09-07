@@ -94,6 +94,36 @@ const (
 	CodeRateLimited ErrorCode = "RATE_LIMITED"
 )
 
+// knownErrorCodes lists every ErrorCode constant declared
+// above. It exists so TestErrorMapping_CodeStatusCoverage
+// (shared/errors_test.go) can fail loudly when a new ErrorCode
+// is added without also extending the status mapping — before
+// this registry, a new code without a mapping silently
+// classified as 500 through ClassifyError's fallback (the
+// exact bug class the testability refactor fixed for the 10
+// call sites that existed then).
+//
+// Maintenance rule: adding an ErrorCode constant REQUIRES (1)
+// an entry here and (2) a case in httpStatusForCode, plus
+// the expected status in the test's allErrorCodes map. The
+// test compares lengths, so skipping any one of the three
+// fails the suite.
+var knownErrorCodes = []ErrorCode{
+	CodeValidationError,
+	CodeUnauthorized,
+	CodeForbidden,
+	CodeNotFound,
+	CodeVideoStatusConflict,
+	CodeVideoNotReady,
+	CodeUploadMissing,
+	CodeUploadSizeInvalid,
+	CodeSelfFollowNotAllowed,
+	CodeWebhookInvalidSignature,
+	CodeWebhookEventUnsupported,
+	CodeRateLimited,
+	CodeInternalError,
+}
+
 // Sentinel errors. Wrap these with fmt.Errorf("...: %w",
 // ErrXxx) so the central error handler can match with
 // errors.Is.
@@ -145,6 +175,35 @@ func httpStatusFor(err error) int {
 		return http.StatusTooManyRequests
 	case errors.Is(err, ErrInternal):
 		return http.StatusInternalServerError
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// httpStatusForCode maps an ErrorCode to its HTTP status.
+// It is the fallback ClassifyError uses when an *APIError
+// carries no explicit Status and no sentinel Cause: without
+// it, an APIError built via NewAPIError(CodeValidationError,
+// ...) classified as 500 because httpStatusFor only matches
+// sentinel-wrapped errors. Found by the handler-testability
+// refactor (testability RED test): every NewAPIError call
+// site without a cause was returning HTTP 500 with a
+// correct-looking 4xx body code. The table mirrors the
+// ErrorCode doc comments (planning/04_api_contracts.md).
+func httpStatusForCode(code ErrorCode) int {
+	switch code {
+	case CodeValidationError, CodeUploadSizeInvalid, CodeSelfFollowNotAllowed, CodeWebhookEventUnsupported:
+		return http.StatusBadRequest
+	case CodeUnauthorized, CodeWebhookInvalidSignature:
+		return http.StatusUnauthorized
+	case CodeForbidden:
+		return http.StatusForbidden
+	case CodeNotFound:
+		return http.StatusNotFound
+	case CodeVideoStatusConflict, CodeVideoNotReady, CodeUploadMissing:
+		return http.StatusConflict
+	case CodeRateLimited:
+		return http.StatusTooManyRequests
 	default:
 		return http.StatusInternalServerError
 	}
