@@ -142,17 +142,17 @@
 </div>
 
 <div class="text-center small log-dim mt-2 mb-4">
-  login = SPA PKCE flow → auth.localhost → redirect balik ke sini. Token disimpan sessionStorage (demo only).
+  login = SPA PKCE flow → auth.binery.my.id → redirect balik ke sini. Token disimpan sessionStorage (demo only).
 </div>
 </div>
 
 <script>
 /* ================= CONFIG ================= */
-const API = 'http://api.localhost';
-const AUTH = 'http://auth.localhost';
-// redirect_uri HARUS terdaftar di app mokibox_spa (dev: http://api.localhost/callback)
+const API = 'http://mokiboxapi.binery.my.id';
+const AUTH = 'http://auth.binery.my.id';
+// redirect_uri HARUS terdaftar di app mokibox_spa (dev: http://mokiboxapi.binery.my.id/callback)
 // callback redirect target = halaman ini (nginx /demo/)
-const REDIRECT_CB = 'http://api.localhost/callback';
+const REDIRECT_CB = 'http://mokiboxapi.binery.my.id/callback';
 const AFTER_LOGIN = location.origin + location.pathname; // halaman ini
 
 // dibaca live dari window.SPA_CLIENT_ID (di-set /demo/config.js,
@@ -220,7 +220,7 @@ function logged(){ return !!AT(); }
 async function api(method, path, body, opts={}){
   if(!logged() && !opts.public){ log('err','belum login — klik Login dulu'); throw new Error('no token'); }
   const url = path.startsWith('http') ? path : API + path;
-  log('req', `${method} ${path.replace('http://api.localhost','')}` + (body ? ' ' + (opts.hideBody ? '{…}' : JSON.stringify(body)) : ''));
+  log('req', `${method} ${path.replace('http://mokiboxapi.binery.my.id','')}` + (body ? ' ' + (opts.hideBody ? '{…}' : JSON.stringify(body)) : ''));
   const r = await fetch(url, {
     method, headers: {
       ...(body && !(body instanceof Blob) ? {'Content-Type':'application/json'} : {}),
@@ -232,7 +232,7 @@ async function api(method, path, body, opts={}){
   const ct = r.headers.get('content-type') || '';
   if(ct.includes('json')) data = await r.json().catch(()=>null);
   else data = await r.text().catch(()=> '');
-  log(r.ok ? 'ok' : 'err', `${method} ${path.replace('http://api.localhost','')} → ${r.status}`,
+  log(r.ok ? 'ok' : 'err', `${method} ${path.replace('http://mokiboxapi.binery.my.id','')} → ${r.status}`,
       typeof data === 'string' ? data.slice(0,400) : JSON.stringify(data, null, 1)?.slice(0, 900));
   if(!r.ok) throw {status:r.status, data};
   return data;
