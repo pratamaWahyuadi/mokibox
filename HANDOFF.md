@@ -1,10 +1,84 @@
-# Handoff — Fase 10 FINAL → Prod-Domain Migration
+# Handoff — Domain-Asli Lokal (fase migrasi) → Prod-VPS next
 
-State captured 2026-09-04, post PR #47 + #48 + #49 merged
-(semua 6 issue fase 10 closed: #29 #30 #31 #39 #44 + #28
-via PR #45), updated 2026-09-07 with the handler-testability
-refactor (PR pending) + PR #51 (playlist auth two-tier).
-Regenerate per session via `git fetch && gh pr list && gh issue list --state open`.
+State captured 2026-09-09, post domain-migration lokal (DOMAIN-MIGRATION-LOCAL-PROMPT.md).
+Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
+
+## Domain-asli lokal (2026-09-09) — AKTIF
+
+Domain trio (keputusan user 2026-09-04): backend
+`mokiboxapi.binery.my.id`, auth `auth.binery.my.id`,
+frontend `mokibox.binery.my.id`. Semua verifikasi hijau:
+
+- `/etc/hosts`: `127.0.0.1` + `::1` untuk ketiga domain
+  (AAAA record Cloudflare publik ada — TANPA `::1` entry,
+  browser IPv6-preferring nyasar ke Cloudflare → error 1033;
+  hapus/comment entry saat mulai tes prod).
+- Zitadel re-init dengan `ZITADEL_DOMAIN=auth.binery.my.id`
+  (HTTP-only, EXTERNALPORT=80). **WAJIB `docker volume rm`
+  BUKAN cuma `zitadel_zitadel-bootstrap` tapi JUGA
+  `zitadel_postgres-data`** — DB lama masih menyimpan instance
+  lama (domain membeku di eventstore); tanpa itu up membawa
+  kembali instance localhost. Admin baru:
+  `zitadel-admin@zitadel.auth.binery.my.id` / `Password1!`.
+- Re-provisioned: org+project MokiBox, apps mokibox_web
+  (confidential/BASIC/JWT) + api_app + mokibox_spa
+  (UserAgent/NONE/PKCE/devMode/JWT), test1/test2 users,
+  Actions V2 target `http://mokiboxapi.binery.my.id/api/webhooks/zitadel`
+  + executions user.deactivated/user.removed. Nilai baru semua
+  di `.env` (client IDs, secret, signing key).
+- integration_test.sh: 16 PASS / 0 FAIL **2x back-to-back**
+  (rerun-ability terbukti).
+- Webhook aggregateID verifikasi ulang di domain baru:
+  log `aggregateID=test2, userID=admin` → tombstone test2 benar.
+- HLS chain: master (2 variant, 480p+720p) → variant →
+  segment R2 200 + `Access-Control-Allow-Origin:
+  http://mokiboxapi.binery.my.id` (bucket CORS origin baru live).
+- **Zero Go code changes** — semua via env/config, sesuai desain.
+
+### Gotcha baru (jangan diulang di VPS)
+
+1. **Actions V2 execution payload v4.16**: condition =
+   `{"event":{"event":"user.deactivated"}}` — BUKAN
+   `{"event":{"eventType":...}}` (skill §5.6 usang; diverifikasi
+   dari proto source tag v4.16.0 `EventExecution.event`).
+2. **Create user + password dalam satu call**: v1
+   `POST /management/v1/users/human` MENGABAIKAN field password →
+   user state 6 "not yet initialized" dan `POST .../password`
+   ditolak. Yang benar: `POST /v2beta/users/human` dengan
+   `{"password":{"password":"...","change_required":false}}`.
+3. **Enum AddOIDCApp**: `responseTypes:[0]` = code (bukan 1;
+   1 = id_token → implicit → unauthorized_client). Sama untuk
+   `grantTypes:[0]`. Kalau salah create, PUT oidc_config bisa
+   memperbaiki tanpa recreate (full payload, gotcha subset).
+4. **/.well-known/openid-configuration tanpa port**: issuer
+   `http://auth.binery.my.id` (EXTERNALPORT=80 dianggap default,
+   tidak muncul `:80` di issuer) — cocok dengan `ZITADEL_ISSUER_URL`
+   di `.env`.
+5. **/etc/hosts butuh baris `::1` juga** (lihat atas) —
+   getent/curl pakai IPv4 dulu, tapi browser modern happy-eyeballs
+   bisa pilih AAAA publik.
+
+### Runbook lengkap (domain-asli, menggantikan runbook *.localhost)
+
+1. Zitadel stack (`zitadel-compose/`, gitignored):
+   - `.env`: `ZITADEL_DOMAIN=auth.binery.my.id`,
+     `ZITADEL_EXTERNALPORT=80`, `ZITADEL_EXTERNALSECURE=false`,
+     `ZITADEL_PUBLIC_SCHEME=http`, `PROXY_HTTP_PUBLISHED_PORT=8081`.
+   - `docker-compose.override.yml` (deny-list narrower) tetap
+     diperlukan untuk Actions V2 webhook ke Docker bridge.
+   - Fresh init: down + `docker volume rm zitadel_zitadel-bootstrap
+     zitadel_postgres-data` + up.
+2. MokiBox compose: `docker compose up -d` — override auto-load:
+   nginx local.conf (server_name domain-asli) + aliases
+   domain-asli + demo UI mount.
+3. Provisioning: lihat "Domain-asli lokal" di atas + gotcha 1-3.
+   Semua ID/secret/signing key → `.env`; regen
+   `deploy/demo/config.js` dari `ZITADEL_SPA_CLIENT_ID`.
+4. `bash scripts/integration_test.sh` — hostname sekarang
+   env-driven (baca `API_BASE_URL`/`ZITADEL_ISSUER_URL` dari
+   `.env`; ADMIN_LOGIN/ADMIN_PASS overridable env var).
+5. Demo UI browser: `http://mokiboxapi.binery.my.id/demo/`.
+
 
 ## Latest
 

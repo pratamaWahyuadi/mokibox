@@ -3,12 +3,14 @@
 # integration_test.sh - MokiBox end-to-end integration
 # smoke test (Fase 10, issue #30).
 #
-# Runs the full user journey against the LOCAL *.localhost
+# Runs the full user journey against the LOCAL real-domain
 # environment (see deploy/nginx/local.conf +
-# docker-compose.override.yml, commit phase-10.1):
+# docker-compose.override.yml, commit phase-10.1; domain
+# migration 2026-09-09 swapped *.localhost for the real
+# trio resolved via /etc/hosts):
 #
-#   auth.localhost  -> Zitadel (via Traefik, cross-network)
-#   api.localhost   -> MokiBox api-gateway
+#   auth.binery.my.id     -> Zitadel (via Traefik, cross-network)
+#   mokiboxapi.binery.my.id -> MokiBox api-gateway
 #
 # Prerequisites (documented in HANDOFF.md "Local E2E
 # environment" section):
@@ -16,10 +18,10 @@
 #   1. MokiBox .env has real values for:
 #      ZITADEL_CLIENT_ID, ZITADEL_API_CLIENT_ID,
 #      ZITADEL_CLIENT_SECRET, ZITADEL_TARGET_SIGNING_KEY,
-#      ZITADEL_ISSUER_URL=http://auth.localhost,
-#      API_BASE_URL=http://api.localhost
+#      ZITADEL_ISSUER_URL=http://auth.binery.my.id,
+#      API_BASE_URL=http://mokiboxapi.binery.my.id
 #   2. zitadel-compose is UP with the domain override
-#      (ZITADEL_DOMAIN=auth.localhost) and the
+#      (ZITADEL_DOMAIN=auth.binery.my.id) and the
 #      docker-compose.override.yml HTTPClient deny-list
 #      override ( zitadel-compose/ is gitignored; the
 #      override file content is reproduced in this
@@ -29,7 +31,7 @@
 #      users (test1/test2) with passwords set, and an
 #      Actions V2 target + executions
 #      (user.deactivated, user.removed) pointing at
-#      http://api.localhost/api/webhooks/zitadel.
+#      http://mokiboxapi.binery.my.id/api/webhooks/zitadel.
 #   4. The login-client PAT is available from the
 #      zitadel-bootstrap volume (used for the headless
 #      session login; see login() below).
@@ -44,13 +46,25 @@
 set -uo pipefail
 
 # ----------------------------- config -----------------------------
-API="http://api.localhost"
-AUTH="http://auth.localhost"
-REDIRECT_URI="http://api.localhost/callback"
+# Hostnames are env-driven (domain migration 2026-09-09): override
+# via API_BASE_URL / ZITADEL_ISSUER_URL in .env (or ENV_FILE).
+# Defaults keep the same env-file contract as the api-gateway.
 ENV_FILE="${ENV_FILE:-.env}"
+API="${API:-$(grep -E '^API_BASE_URL=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)}"
+AUTH="${AUTH:-$(grep -E '^ZITADEL_ISSUER_URL=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)}"
+API="${API:-http://mokiboxapi.binery.my.id}"
+AUTH="${AUTH:-http://auth.binery.my.id}"
+REDIRECT_URI="$API/callback"
 VIDEO_OUT="/tmp/mokibox-itest.mp4"
 POLL_TIMEOUT="${POLL_TIMEOUT:-300}"     # 5 min for transcode
 WEBHOOK_USER="test2"                    # user deactivated in step 12
+# Redis password for the asynq queue-length check in step 13.
+REDIS_PASS="$(grep -E '^REDIS_PASSWORD=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)"
+# First-instance admin creds (loginName embeds the instance domain —
+# changes with every Zitadel re-init; override ADMIN_PASS after
+# capturing the fresh bootstrap password from `docker compose logs`).
+ADMIN_LOGIN="${ADMIN_LOGIN:-zitadel-admin@zitadel.auth.binery.my.id}"
+ADMIN_PASS="${ADMIN_PASS:-Password1!}"
 
 PASS=0; FAIL=0; FAILED_STEPS=()
 
@@ -127,7 +141,7 @@ wait_healthz() {
 step 0 "environment sanity (healthz + OIDC discovery)"
 wait_healthz && pass "GET /healthz = 200" || fail "healthz not reachable"
 [[ "$(code GET "$AUTH/.well-known/openid-configuration")" == "200" ]] \
-  && pass "OIDC discovery reachable via auth.localhost" \
+  && pass "OIDC discovery reachable via $AUTH" \
   || fail "OIDC discovery unreachable"
 
 # =====================================================
@@ -304,7 +318,7 @@ step 10 "own-video exclusion: test1 feed must NOT contain it"
 # via the admin session so the login below succeeds.
 ADMINSESS_PREP=$(curl -sS -X POST "$AUTH/v2/sessions" -H "Content-Type: application/json" -H "Accept: application/json" \
   -H "Authorization: Bearer $LCPAT" \
-  -d '{"checks":{"user":{"loginName":"zitadel-admin@zitadel.auth.localhost"},"password":{"password":"Password1!"}}}' \
+  -d "{\"checks\":{\"user\":{\"loginName\":\"$ADMIN_LOGIN\"},\"password\":{\"password\":\"$ADMIN_PASS\"}}}" \
   | jq -r .sessionToken)
 T2_ZID=$(docker exec zitadel-postgres-1 psql -U postgres -d zitadel -At -c \
   "SELECT id FROM projections.login_names3_users WHERE user_name='test2';" 2>/dev/null)
@@ -351,7 +365,7 @@ WUID=$(docker exec zitadel-postgres-1 psql -U postgres -d zitadel -At -c \
 if [[ -n "$WUID" ]]; then
   ADMINSESS=$(curl -sS -X POST "$AUTH/v2/sessions" -H "Content-Type: application/json" -H "Accept: application/json" \
     -H "Authorization: Bearer $LCPAT" \
-    -d '{"checks":{"user":{"loginName":"zitadel-admin@zitadel.auth.localhost"},"password":{"password":"Password1!"}}}' \
+    -d "{\"checks\":{\"user\":{\"loginName\":\"$ADMIN_LOGIN\"},\"password\":{\"password\":\"$ADMIN_PASS\"}}}" \
     | jq -r .sessionToken)
   DEACT=$(curl -sS -X POST "$AUTH/management/v1/users/$WUID/_deactivate" \
     -H "Authorization: Bearer $ADMINSESS" -H "Accept: application/json")
@@ -374,7 +388,7 @@ if [[ -n "$T1" && -n "$VID" ]]; then
   if [[ "$DC" == "204" ]]; then
     ROWSTAT=$(docker exec mokibox-postgres psql -U postgres -d tiktok -At -c \
       "SELECT status FROM videos WHERE id='$VID';" 2>/dev/null)
-    QLEN=$(docker exec mokibox-redis redis-cli -a change-me-redis --no-auth-warning \
+    QLEN=$(docker exec mokibox-redis redis-cli -a "$REDIS_PASS" --no-auth-warning \
       zcard asynq:pending 2>/dev/null || echo "?")
     pass "204; videos.status='$ROWSTAT' (expect DELETED); asynq pending=$QLEN"
     [[ "$ROWSTAT" == "DELETED" ]] || fail "videos.status is '$ROWSTAT' (expected DELETED)"
