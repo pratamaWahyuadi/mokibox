@@ -3,6 +3,92 @@
 State captured 2026-09-09, post domain-migration lokal (DOMAIN-MIGRATION-LOCAL-PROMPT.md).
 Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
 
+## Production deploy VPS (2026-09-10) — AKTIF (prompt 2 selesai)
+
+MokiBox production live di VPS multi-tenant `43.157.227.130`,
+repo `/www/wwwroot/mokibox` (branch `deploy/aapanel` — bukan main,
+sesuai keputusan user: main bebas perubahan yang menyesuaikan aaPanel).
+
+### Topologi
+- Edge: aaPanel nginx host (port 80/443) — `mokibox-nginx` TIDAK jalan
+  (`docker-compose.prod.yml` overlay: nginx `profiles:[disabled]`,
+  gateway publish `127.0.0.1:8180:8080`). Compose selalu eksplisit
+  `-f docker-compose.yml -f docker-compose.prod.yml` (dev override
+  ter-track TIDAK boleh auto-load di VPS).
+- Zitadel: sibling compose `zitadel-compose/` fresh instance
+  (volumes bootstrap+postgres-data fresh), Traefik publish
+  `127.0.0.1:8181:80`, deny-list DEFAULT (tanpa bypass dev).
+- vhost aaPanel: `mokiboxapi.binery.my.id` → 127.0.0.1:8180,
+  `auth.binery.my.id` → 127.0.0.1:8181 (file
+  `/www/server/panel/vhost/nginx/{mokiboxapi.,auth.}binery.my.id.conf`;
+  HSTS max-age=63072000, X-Content-Type-Options, X-Frame-Options,
+  Referrer-Policy; /demo/ alias ke repo; /callback 302).
+- TLS: wildcard LE `*.binery.my.id` + apex via acme.sh DNS-01
+  (Cloudflare API token), cert di
+  `/www/server/panel/vhost/cert/<domain>/{fullchain,privkey}.pem`,
+  renewal otomatis (cron acme.sh, ARI window Nov 2026).
+  HTTP→HTTPS 301 aktif.
+- DNS: `mokiboxapi`+`auth` A-record 43.157.227.130 **DNS-only** (grey).
+  `mokibox` (frontend) belum dibuat — frontend memang di-host terpisah.
+
+### Provisioning (Zitadel v4.16.0, script `scripts/zitadel-provision-prod.sh`)
+- Project mokibox + apps: `mokibox_web` (confidential BASIC),
+  `mokibox_spa` (PKCE public), `mokibox_api` (JWT audience).
+- Actions V2: target `mokibox-webhook` →
+  `https://mokiboxapi.binery.my.id/api/webhooks/zitadel` (Opsi W,
+  tanpa deny-list bypass), execution `user.deactivated`.
+- Test users test1/test2, password sesuai kontrak integration_test.sh
+  (`MokiTest1-A`/`MokiTest2-B`, di-set via
+  `POST /management/v1/users/{id}/password` + `noVerification:true`).
+- Secrets di VPS `/root/mokibox-secrets/` (client secret, signing key,
+  test passwords); .env prod `chmod 600` di repo dir.
+
+### Verifikasi prod (semua hijau 2026-09-10)
+- integration_test.sh **16 PASS × 2 run berturut-turut** di VPS
+  (healthz, OIDC discovery issuer=https, headless login JWT,
+  SPA PKCE, users/me, upload→transcode→READY→playlist 480p,
+  feed exclusion, follow feed, webhook real user.deactivated
+  (aggregateID), soft delete + cleanup).
+- R2 CORS origin `https://mokiboxapi.binery.my.id` terverifikasi
+  (ACAO header muncul di presigned GET — lesson prompt-1 #8 closed).
+- /api/users/me 401 envelope; anonymous video-GET 401
+  (rate-limit middleware depan — DEViasi dari ekspektasi prompt
+  "404 envelope"; bukan bug: rate limit auth-first, hardening SEC).
+- Multi-tenant aman: 9 container tenant lain tak tersentuh;
+  memori 4.3Gi/7.4Gi used, mokibox+zitadel ~450Mi total, no swap.
+- Worker reconcile ticker jalan tanpa permission error (002 grant ok).
+
+### Gotchas prod (live-verified)
+- **login-client PAT TIDAK BISA management API** (403 AUTH-5mWD2);
+  pakai sessionToken admin (session via login-client PAT +
+  zitadel-admin login) — skill zitadel §5.9.6.
+- **User search** = `POST /v2/users` (bukan /v2/users/search, 405);
+  field `userId` bukan `id`.
+- **Set password user existing** = `POST /v2/users/{id}/password`
+  perlu efek pending-verification — v1
+  `POST /management/v1/users/{id}/password` + `noVerification:true`
+  yang live-works.
+- Container env beku: setelah update .env R2, WAJIB
+  `docker compose ... up -d --force-recreate` (restart saja tidak
+  reload env) — root cause itest run-2 403 massal.
+- apt mirror Tencent internal tidak resolv dari publik; swap ke
+  archive.ubuntu.com untuk install (ffmpeg/basenc/jq), lalu restore.
+  jq 1.7.1 dipasang via static binary GitHub.
+- acme.sh CF plugin pakai `CF_Token` (API token baru cfat_*),
+  di-pass via stdin, tidak di-file.
+- MCP ssh-mcp run/privileged/sftp tidak stabil di sesi ini
+  (timeout 300s / tool-call promotion); SSH askpass dari laptop
+  (`SSH_ASKPASS` + config password) lebih reliable.
+
+### Security follow-up (WAJIB setelah sesi ini)
+- **ROTASI password VPS ubuntu** — ter-expose di transcript sesi
+  2026-09-10 (agent redaction gagal).
+- **ROTASI/roll Cloudflare API token `cfat_...`** — pernah di-paste
+  di chat oleh user.
+- CF token ini punya Zone DNS Edit scope binery.my.id — simpan di
+  password manager; acme.sh renewal di VPS butuh token aktif.
+
+
 ## Domain-asli lokal (2026-09-09) — AKTIF
 
 Domain trio (keputusan user 2026-09-04): backend
