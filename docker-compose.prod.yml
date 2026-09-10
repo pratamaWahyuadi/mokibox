@@ -1,0 +1,63 @@
+# =====================================================
+# MokiBox - PRODUCTION overlay for the multi-tenant VPS
+# where the host aaPanel nginx owns :80/:443.
+#
+# Usage - ALWAYS pass both files explicitly so the
+# tracked dev docker-compose.override.yml (local.conf,
+# real-domain aliases, no-ports gateway) is NOT
+# auto-loaded:
+#
+#   docker compose -f docker-compose.yml \
+#                  -f docker-compose.prod.yml up -d
+#
+# Topology (Opsi A', prompts/PROD-VPS-SETUP-PROMPT):
+#
+#   Internet -> aaPanel nginx :80/:443 (TLS, wildcard
+#     *.binery.my.id via DNS-01)
+#     |- mokiboxapi.binery.my.id -> 127.0.0.1:8180  (gateway publish below)
+#     |- auth.binery.my.id       -> 127.0.0.1:8181  (Zitadel Traefik publish,
+#        configured in ../zitadel-compose/.env on the VPS)
+#
+# Differences vs the base file:
+#   1. nginx service is DISABLED via a profile. aaPanel
+#      is the edge; a container nginx behind aaPanel
+#      would double-proxy every request for no value,
+#      and its base-file :80/:443 publishes cannot bind
+#      anyway (aaPanel owns those ports on the host).
+#   2. api-gateway publishes 127.0.0.1:8180:8080 -
+#      loopback ONLY, never a public interface. This is
+#      the aaPanel vhost proxy_pass target.
+#   3. postgres / redis stay internal-only (the base
+#      file already publishes nothing for them).
+#
+# Zitadel reachability: Opsi W - the gateway reaches
+# Zitadel via the public https://auth.binery.my.id URL
+# through the edge, so there is no shared docker
+# network and no dev SSRF deny-list bypass. Zitadel
+# Actions V2 webhooks likewise target the public
+# https://mokiboxapi.binery.my.id/api/webhooks/zitadel
+# URL (resolves to a public IP -> passes the default
+# deny-list).
+#
+# The demo UI (/demo/) and /callback are served by the
+# aaPanel vhost (static alias + 302), NOT by a
+# container.
+# =====================================================
+
+services:
+  nginx:
+    # Disable the dev edge container without editing the
+    # base file. A service that has `profiles` is only
+    # created when the profile is explicitly enabled
+    # (--profile disabled); plain `up -d` never passes
+    # it. Local dev keeps using the base + override
+    # files untouched.
+    profiles:
+      - disabled
+
+  api-gateway:
+    # Loopback-only publish for the aaPanel vhost
+    # proxy_pass target. Not reachable from any public
+    # interface.
+    ports:
+      - "127.0.0.1:8180:8080"
