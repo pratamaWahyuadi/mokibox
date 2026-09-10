@@ -26,7 +26,7 @@ mkdir -p "$SECDIR" && chmod 700 "$SECDIR"
 IDS="$SECDIR/zitadel-ids.env"
 TMPD=$(mktemp -d); trap 'rm -rf "$TMPD"' EXIT
 
-jqr() { python3 -c "import sys,json;d=json.load(sys.stdin);print(eval(sys.argv[1]))" "$1" 2>/dev/null; }
+jqr() { python3 -c "import sys,json;d=json.load(sys.stdin);print(eval(sys.argv[1]))" "$1" 2>/dev/null; return 0; }
 
 PAT=$(docker run --rm -v zitadel_zitadel-bootstrap:/bs alpine cat /bs/login-client.pat)
 echo "[1] login-client PAT loaded (${#PAT} chars)"
