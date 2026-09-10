@@ -148,21 +148,11 @@
 
 <script>
 /* ================= CONFIG ================= */
-// Protocol-aware URLs: derive API + redirect_uri from
-// location.origin so the same file serves the local
-// smoke env (http://mokiboxapi.binery.my.id via
-// /etc/hosts - where PKCE login is skipped anyway
-// because crypto.subtle is undefined on non-localhost
-// http) AND production (https, secure context, full
-// browser flow runs). Hardcoding http:// would break
-// prod: mixed-content block + redirect_uri mismatch.
-const API = location.origin;
-const AUTH = location.protocol + '//auth.binery.my.id';
-// redirect_uri HARUS terdaftar di app mokibox_spa dengan
-// skema yang sama dengan halaman ini (dev http, prod https).
-// callback redirect target = halaman ini (nginx /demo/ di dev,
-// aaPanel static alias /demo/ di prod).
-const REDIRECT_CB = location.origin + '/callback';
+const API = 'http://mokiboxapi.binery.my.id';
+const AUTH = 'http://auth.binery.my.id';
+// redirect_uri HARUS terdaftar di app mokibox_spa (dev: http://mokiboxapi.binery.my.id/callback)
+// callback redirect target = halaman ini (nginx /demo/)
+const REDIRECT_CB = 'http://mokiboxapi.binery.my.id/callback';
 const AFTER_LOGIN = location.origin + location.pathname; // halaman ini
 
 // dibaca live dari window.SPA_CLIENT_ID (di-set /demo/config.js,
@@ -230,7 +220,7 @@ function logged(){ return !!AT(); }
 async function api(method, path, body, opts={}){
   if(!logged() && !opts.public){ log('err','belum login — klik Login dulu'); throw new Error('no token'); }
   const url = path.startsWith('http') ? path : API + path;
-  log('req', `${method} ${path.replace(location.origin,'')}` + (body ? ' ' + (opts.hideBody ? '{…}' : JSON.stringify(body)) : ''));
+  log('req', `${method} ${path.replace('http://mokiboxapi.binery.my.id','')}` + (body ? ' ' + (opts.hideBody ? '{…}' : JSON.stringify(body)) : ''));
   const r = await fetch(url, {
     method, headers: {
       ...(body && !(body instanceof Blob) ? {'Content-Type':'application/json'} : {}),
@@ -242,7 +232,7 @@ async function api(method, path, body, opts={}){
   const ct = r.headers.get('content-type') || '';
   if(ct.includes('json')) data = await r.json().catch(()=>null);
   else data = await r.text().catch(()=> '');
-  log(r.ok ? 'ok' : 'err', `${method} ${path.replace(location.origin,'')} → ${r.status}`,
+  log(r.ok ? 'ok' : 'err', `${method} ${path.replace('http://mokiboxapi.binery.my.id','')} → ${r.status}`,
       typeof data === 'string' ? data.slice(0,400) : JSON.stringify(data, null, 1)?.slice(0, 900));
   if(!r.ok) throw {status:r.status, data};
   return data;
