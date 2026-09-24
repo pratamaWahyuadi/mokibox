@@ -63,7 +63,7 @@ REDIS_PASS="$(grep -E '^REDIS_PASSWORD=' "$ENV_FILE" 2>/dev/null | head -1 | cut
 # First-instance admin creds (loginName embeds the instance domain —
 # changes with every Zitadel re-init; override ADMIN_PASS after
 # capturing the fresh bootstrap password from `docker compose logs`).
-ADMIN_LOGIN="${ADMIN_LOGIN:-zitadel-admin@zitadel.auth.binery.my.id}"
+ADMIN_LOGIN="${ADMIN_LOGIN:-zitadel-admin@zitadel.auth.mokibox.my.id}"
 ADMIN_PASS="${ADMIN_PASS:-Password1!}"
 
 PASS=0; FAIL=0; FAILED_STEPS=()
