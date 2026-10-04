@@ -324,7 +324,19 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	api.POST("/chat/conversations/:id/messages", ch.SendMessage)
 	api.POST("/chat/conversations/:id/read", ch.MarkRead)
 	api.POST("/chat/upload-intent", ch.UploadIntent)
-	api.GET("/chat/ws", ch.HandleWebSocket)
+	api.POST("/chat/ws-ticket", ch.IssueWSTicket)
+
+	// WebSocket handshake lives OUTSIDE the /api auth group, like the HLS
+	// playlist above: a browser cannot attach an Authorization header to
+	// `new WebSocket(...)`. Native clients may still send a JWT (the optional
+	// middleware resolves it); browsers pass ?ticket=, a 30s HMAC ticket from
+	// POST /api/chat/ws-ticket. The handler rejects anything unauthenticated.
+	e.GET("/api/chat/ws", ch.HandleWebSocket,
+		middleware.AuthenticateOptional(middleware.AuthenticateConfig{
+			Verifier: d.AuthVerifier,
+			Queries:  d.Queries,
+		}),
+		webhookRateLimit)
 
 	return e
 }

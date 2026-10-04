@@ -3,8 +3,11 @@
 // ChatHandler + ChatHub backed by the real Postgres, and we assert that
 // messages, typing and read events reach the right people.
 //
-// Authentication is replaced by a tiny test middleware (X-Test-User header),
-// so this needs only Postgres, not Zitadel or nginx.
+// Authentication of the REST endpoints is replaced by a tiny test middleware
+// (X-Test-User header), so this needs only Postgres, not Zitadel or nginx.
+// The WebSocket handshake is NOT faked: it is mounted exactly like production
+// (outside the auth group) and every client connects the way a browser must,
+// with no headers at all, using a ?ticket= obtained from POST /chat/ws-ticket.
 //
 // Usage (from the repo root, with the stack up):
 //
@@ -37,6 +40,7 @@ import (
 	"github.com/pratamaWahyuadi/mokibox/shared/db"
 )
 
+const ticketSecret = "smoketest-ws-ticket-secret-0123456789"
 const eventWait = 2 * time.Second
 const quietWait = 400 * time.Millisecond
 
@@ -46,10 +50,35 @@ type wsClient struct {
 	in   chan map[string]any
 }
 
-func dial(name, wsURL string, userID uuid.UUID) *wsClient {
-	hdr := http.Header{}
-	hdr.Set("X-Test-User", userID.String())
-	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, hdr)
+// fetchTicket asks the REST API for a WebSocket ticket on behalf of userID.
+func fetchTicket(httpBase string, userID uuid.UUID) string {
+	status, body := doJSON(http.MethodPost, httpBase+"/chat/ws-ticket", userID, nil)
+	data, _ := body["data"].(map[string]any)
+	ticket, _ := data["ticket"].(string)
+	if status != http.StatusOK || ticket == "" {
+		log.Fatalf("ws-ticket for %s failed: status=%d body=%v", userID, status, body)
+	}
+	return ticket
+}
+
+// handshakeStatus tries to open a WebSocket with NO headers (like a browser)
+// and returns the HTTP status of the handshake, or 101 if it was upgraded.
+func handshakeStatus(url string) int {
+	conn, resp, err := websocket.DefaultDialer.Dial(url, nil)
+	if err == nil {
+		_ = conn.Close()
+		return http.StatusSwitchingProtocols
+	}
+	if resp != nil {
+		return resp.StatusCode
+	}
+	return 0
+}
+
+// dial connects the way a browser has to: no Authorization header, only a
+// short-lived ticket in the query string.
+func dial(name, httpBase, wsURL string, userID uuid.UUID) *wsClient {
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL+"?ticket="+fetchTicket(httpBase, userID), nil)
 	if err != nil {
 		log.Fatalf("%s: websocket dial failed: %v (response: %v)", name, err, resp)
 	}
@@ -200,7 +229,7 @@ func run(dsn string) int {
 	// ---- wire the real handler behind a fake-auth router ------------
 	hub := handlers.NewChatHub()
 	go hub.Run(ctx)
-	ch := handlers.NewChatHandler(queries, &shared.R2Client{}, hub, &shared.APIConfig{PresignUploadExpiry: 15 * time.Minute})
+	ch := handlers.NewChatHandler(queries, &shared.R2Client{}, hub, &shared.APIConfig{PresignUploadExpiry: 15 * time.Minute, MediaTokenSecret: ticketSecret})
 
 	e := echo.New()
 	e.HTTPErrorHandler = func(err error, c echo.Context) {
@@ -233,7 +262,9 @@ func run(dsn string) int {
 	api.GET("/chat/conversations/:id/messages", ch.ListMessages)
 	api.POST("/chat/conversations/:id/messages", ch.SendMessage)
 	api.POST("/chat/conversations/:id/read", ch.MarkRead)
-	api.GET("/chat/ws", ch.HandleWebSocket)
+	api.POST("/chat/ws-ticket", ch.IssueWSTicket)
+	// Mounted like production: OUTSIDE the auth group, authenticated by ?ticket=.
+	e.GET("/api/chat/ws", ch.HandleWebSocket)
 
 	srv := httptest.NewServer(e)
 	defer srv.Close()
@@ -264,10 +295,21 @@ func run(dsn string) int {
 	status, _ = doJSON(http.MethodPost, httpBase+"/chat/conversations", alice.ID, map[string]any{"target_user_id": alice.ID})
 	check("REST: chatting with yourself is rejected (400)", status == 400, fmt.Sprintf("status=%d", status))
 
+	// ---- WebSocket handshake auth (the browser path) ----------------
+	check("WS handshake without a ticket is refused (401)", handshakeStatus(wsURL) == http.StatusUnauthorized, "expected 401")
+	check("WS handshake with a garbage ticket is refused (401)", handshakeStatus(wsURL+"?ticket=garbage") == http.StatusUnauthorized, "expected 401")
+	expiredTicket, _ := shared.SignWSTicket(alice.ID, ticketSecret, time.Now().Add(-time.Minute))
+	check("WS handshake with an expired ticket is refused (401)", handshakeStatus(wsURL+"?ticket="+expiredTicket) == http.StatusUnauthorized, "expected 401")
+	wrongSecret, _, _ := shared.NewWSTicket(alice.ID, "some-other-secret-some-other-secret", time.Minute)
+	check("WS handshake with a ticket signed by another secret is refused (401)", handshakeStatus(wsURL+"?ticket="+wrongSecret) == http.StatusUnauthorized, "expected 401")
+	check("WS handshake with a valid ticket succeeds (101)", handshakeStatus(wsURL+"?ticket="+fetchTicket(httpBase, alice.ID)) == http.StatusSwitchingProtocols, "expected 101")
+	status, _ = doJSON(http.MethodPost, httpBase+"/chat/ws-ticket", uuid.New(), nil)
+	check("REST: ws-ticket requires authentication (401)", status == http.StatusUnauthorized, fmt.Sprintf("status=%d", status))
+
 	// ---- WebSocket: connect ----------------------------------------
-	aliceWS := dial("alice", wsURL, alice.ID)
-	bobWS := dial("bob", wsURL, bob.ID)
-	carolWS := dial("carol", wsURL, carol.ID)
+	aliceWS := dial("alice", httpBase, wsURL, alice.ID)
+	bobWS := dial("bob", httpBase, wsURL, bob.ID)
+	carolWS := dial("carol", httpBase, wsURL, carol.ID)
 	time.Sleep(300 * time.Millisecond) // let the hub register everyone
 	fmt.Println("Connected 3 WebSocket clients (alice, bob, carol)")
 
@@ -314,7 +356,7 @@ func run(dsn string) int {
 
 	// ---- history ------------------------------------------------------
 	status, hist := doJSON(http.MethodGet, httpBase+"/chat/conversations/"+convID+"/messages", bob.ID, nil)
-	msgs, _ := hist["messages"].([]any)
+	msgs, _ := hist["data"].([]any)
 	var texts []string
 	for _, m := range msgs {
 		mm, _ := m.(map[string]any)
@@ -327,7 +369,7 @@ func run(dsn string) int {
 	check("REST: non-member cannot read history (404)", status == 404, fmt.Sprintf("status=%d", status))
 
 	// ---- multi-device and offline recipients --------------------------
-	bob2WS := dial("bob2", wsURL, bob.ID)
+	bob2WS := dial("bob2", httpBase, wsURL, bob.ID)
 	time.Sleep(300 * time.Millisecond)
 	aliceWS.send(map[string]any{"type": "message.send", "conversation_id": convID, "message_type": "text", "content": "for both devices"})
 	_, ok1 := bobWS.waitFor("message.new", hasContent("for both devices"))
@@ -340,6 +382,41 @@ func run(dsn string) int {
 	aliceWS.send(map[string]any{"type": "message.send", "conversation_id": convID, "message_type": "text", "content": "bob is offline"})
 	_, ok = aliceWS.waitFor("message.new", hasContent("bob is offline"))
 	check("WS: sending still works while the recipient is offline", ok, "alice got no echo")
+
+	// ---- cursor pagination over the full history ----------------------
+	// History now holds 4 valid messages; walk it newest-first with limit=2.
+	var walked []string
+	cursor := ""
+	for page := 1; page <= 5; page++ {
+		url := httpBase + "/chat/conversations/" + convID + "/messages?limit=2"
+		if cursor != "" {
+			url += "&cursor=" + cursor
+		}
+		st, body := doJSON(http.MethodGet, url, alice.ID, nil)
+		items, _ := body["data"].([]any)
+		for _, it := range items {
+			m, _ := it.(map[string]any)
+			s, _ := m["content"].(string)
+			walked = append(walked, s)
+		}
+		pg, _ := body["pagination"].(map[string]any)
+		next, _ := pg["next_cursor"].(string)
+		if st != 200 || next == "" {
+			break
+		}
+		cursor = next
+	}
+	want := []string{"bob is offline", "for both devices", "via rest", "halo bob"}
+	check("REST: cursor pagination walks the history newest-first, once each", strings.Join(walked, "|") == strings.Join(want, "|"), fmt.Sprintf("got %v", walked))
+
+	status, _ = doJSON(http.MethodGet, httpBase+"/chat/conversations/"+convID+"/messages?cursor=not-a-cursor", alice.ID, nil)
+	check("REST: an invalid cursor is rejected (400)", status == 400, fmt.Sprintf("status=%d", status))
+
+	status, convList := doJSON(http.MethodGet, httpBase+"/chat/conversations?limit=1", alice.ID, nil)
+	convItems, _ := convList["data"].([]any)
+	convPg, _ := convList["pagination"].(map[string]any)
+	_, hasCursorKey := convPg["next_cursor"]
+	check("REST: conversation list uses the shared list envelope", status == 200 && len(convItems) == 1 && hasCursorKey, fmt.Sprintf("status=%d body=%v", status, convList))
 
 	_ = aliceWS.conn.Close()
 	_ = carolWS.conn.Close()

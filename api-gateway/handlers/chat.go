@@ -27,7 +27,7 @@ type chatStore interface {
 	GetConversation(ctx context.Context, id uuid.UUID) (db.Conversation, error)
 	IsConversationMember(ctx context.Context, arg db.IsConversationMemberParams) (bool, error)
 	ListConversationMembers(ctx context.Context, conversationID uuid.UUID) ([]db.ListConversationMembersRow, error)
-	ListUserConversations(ctx context.Context, userID uuid.UUID) ([]db.ListUserConversationsRow, error)
+	ListUserConversations(ctx context.Context, arg db.ListUserConversationsParams) ([]db.ListUserConversationsRow, error)
 	InsertMessage(ctx context.Context, arg db.InsertMessageParams) (db.Message, error)
 	ListMessages(ctx context.Context, arg db.ListMessagesParams) ([]db.ListMessagesRow, error)
 	UpdateLastReadAt(ctx context.Context, arg db.UpdateLastReadAtParams) error
@@ -71,6 +71,10 @@ const (
 	maxMediaMetadataBytes = 4096
 	maxGroupNameLen       = 100
 	maxGroupMembers       = 100
+
+	// chatWSTicketTTL is how long a WebSocket ticket stays valid. It only
+	// has to cover the gap between "ask for a ticket" and "open the socket".
+	chatWSTicketTTL = 30 * time.Second
 )
 
 // isMember reports whether userID belongs to the conversation. Any lookup
@@ -266,8 +270,26 @@ func (h *ChatHandler) ListConversations(c echo.Context) error {
 		return shared.Wrap(shared.ErrUnauthorized, "missing authentication")
 	}
 
+	limit, err := parseLimit(c.QueryParam("limit"))
+	if err != nil {
+		return shared.Wrap(shared.ErrValidation, err.Error())
+	}
+	cursorTS, cursorID, err := shared.DecodeCursor(c.QueryParam("cursor"))
+	if err != nil {
+		return shared.Wrap(shared.ErrValidation, "invalid cursor")
+	}
+
+	params := db.ListUserConversationsParams{
+		UserID:    user.ID,
+		PageLimit: int32(limit),
+	}
+	if !cursorTS.IsZero() {
+		params.CursorUpdated = sql.NullTime{Time: cursorTS, Valid: true}
+		params.CursorID = uuid.NullUUID{UUID: cursorID, Valid: true}
+	}
+
 	ctx := c.Request().Context()
-	rows, err := h.Queries.ListUserConversations(ctx, user.ID)
+	rows, err := h.Queries.ListUserConversations(ctx, params)
 	if err != nil {
 		return shared.Wrap(shared.ErrInternal, "failed to list conversations")
 	}
@@ -323,9 +345,57 @@ func (h *ChatHandler) ListConversations(c echo.Context) error {
 		res = []ConversationResponse{}
 	}
 
-	return c.JSON(http.StatusOK, map[string]any{
-		"conversations": res,
+	// Cursor is (updated_at, id) of the last row, same contract as every
+	// other list endpoint. A conversation that receives a message between
+	// two page requests moves to the top and can be seen again on a later
+	// page; clients de-duplicate by id.
+	var nextCursor *string
+	if len(rows) == limit {
+		last := rows[len(rows)-1]
+		nc := shared.EncodeCursor(last.UpdatedAt, last.ID)
+		nextCursor = &nc
+	}
+	return shared.RespondList(c, res, nextCursor)
+}
+
+// IssueWSTicket hands an authenticated user a short-lived ticket for the
+// WebSocket handshake. Browsers cannot set an Authorization header on a
+// WebSocket, so the client calls this endpoint with its normal JWT and then
+// connects to /api/chat/ws?ticket=<ticket>.
+func (h *ChatHandler) IssueWSTicket(c echo.Context) error {
+	user, ok := middleware.UserFromContext(c)
+	if !ok || user == nil {
+		return shared.Wrap(shared.ErrUnauthorized, "missing authentication")
+	}
+	if h.Cfg == nil || h.Cfg.MediaTokenSecret == "" {
+		return shared.Wrap(shared.ErrInternal, "websocket tickets are not configured")
+	}
+
+	ticket, expiry, err := shared.NewWSTicket(user.ID, h.Cfg.MediaTokenSecret, chatWSTicketTTL)
+	if err != nil {
+		return shared.Wrap(shared.ErrInternal, "failed to issue websocket ticket")
+	}
+	return shared.RespondOK(c, map[string]any{
+		"ticket":     ticket,
+		"expires_at": expiry.UTC(),
 	})
+}
+
+// userFromTicket authenticates a WebSocket handshake from ?ticket=.
+func (h *ChatHandler) userFromTicket(c echo.Context) (*db.User, error) {
+	ticket := c.QueryParam("ticket")
+	if ticket == "" || h.Cfg == nil || h.Cfg.MediaTokenSecret == "" {
+		return nil, shared.Wrap(shared.ErrUnauthorized, "missing authentication")
+	}
+	userID, err := shared.VerifyWSTicket(ticket, h.Cfg.MediaTokenSecret)
+	if err != nil {
+		return nil, shared.Wrap(shared.ErrUnauthorized, "invalid or expired ticket")
+	}
+	u, err := h.Queries.GetUserByID(c.Request().Context(), userID)
+	if err != nil || !u.IsActive || u.DeletedAt.Valid {
+		return nil, shared.Wrap(shared.ErrUnauthorized, "invalid or expired ticket")
+	}
+	return &u, nil
 }
 
 // SendMessageRequest payload for REST message send.
@@ -488,20 +558,25 @@ func (h *ChatHandler) ListMessages(c echo.Context) error {
 		return shared.Wrap(shared.ErrNotFound, "conversation not found")
 	}
 
-	var cursorTime sql.NullTime
-	if cursorParam := c.QueryParam("cursor"); cursorParam != "" {
-		if t, err := time.Parse(time.RFC3339, cursorParam); err == nil {
-			cursorTime = sql.NullTime{Time: t, Valid: true}
-		}
+	limit, err := parseLimit(c.QueryParam("limit"))
+	if err != nil {
+		return shared.Wrap(shared.ErrValidation, err.Error())
+	}
+	cursorTS, cursorID, err := shared.DecodeCursor(c.QueryParam("cursor"))
+	if err != nil {
+		return shared.Wrap(shared.ErrValidation, "invalid cursor")
 	}
 
-	limit := int32(30)
-
-	rows, err := h.Queries.ListMessages(ctx, db.ListMessagesParams{
+	params := db.ListMessagesParams{
 		ConversationID: convID,
-		Limit:          limit,
-		Cursor:         cursorTime,
-	})
+		PageLimit:      int32(limit),
+	}
+	if !cursorTS.IsZero() {
+		params.CursorCreated = sql.NullTime{Time: cursorTS, Valid: true}
+		params.CursorID = uuid.NullUUID{UUID: cursorID, Valid: true}
+	}
+
+	rows, err := h.Queries.ListMessages(ctx, params)
 	if err != nil {
 		return shared.Wrap(shared.ErrInternal, "failed to list messages")
 	}
@@ -535,9 +610,13 @@ func (h *ChatHandler) ListMessages(c echo.Context) error {
 		msgs = []map[string]any{}
 	}
 
-	return c.JSON(http.StatusOK, map[string]any{
-		"messages": msgs,
-	})
+	var nextCursor *string
+	if len(rows) == limit {
+		last := rows[len(rows)-1]
+		nc := shared.EncodeCursor(last.CreatedAt, last.ID)
+		nextCursor = &nc
+	}
+	return shared.RespondList(c, msgs, nextCursor)
 }
 
 // MarkRead updates the user's last_read_at timestamp.

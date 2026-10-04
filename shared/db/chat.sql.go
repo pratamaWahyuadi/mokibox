@@ -225,15 +225,17 @@ FROM messages m
 JOIN users u ON u.id = m.sender_id
 WHERE m.conversation_id = $1
   AND m.deleted_at IS NULL
-  AND ($3::timestamptz IS NULL OR m.created_at < $3)
-ORDER BY m.created_at DESC
-LIMIT $2
+  AND ($2::timestamptz IS NULL
+       OR (m.created_at, m.id) < ($2::timestamptz, $3::uuid))
+ORDER BY m.created_at DESC, m.id DESC
+LIMIT $4
 `
 
 type ListMessagesParams struct {
-	ConversationID uuid.UUID    `json:"conversation_id"`
-	Limit          int32        `json:"limit"`
-	Cursor         sql.NullTime `json:"cursor"`
+	ConversationID uuid.UUID     `json:"conversation_id"`
+	CursorCreated  sql.NullTime  `json:"cursor_created"`
+	CursorID       uuid.NullUUID `json:"cursor_id"`
+	PageLimit      int32         `json:"page_limit"`
 }
 
 type ListMessagesRow struct {
@@ -251,7 +253,12 @@ type ListMessagesRow struct {
 }
 
 func (q *Queries) ListMessages(ctx context.Context, arg ListMessagesParams) ([]ListMessagesRow, error) {
-	rows, err := q.db.QueryContext(ctx, listMessages, arg.ConversationID, arg.Limit, arg.Cursor)
+	rows, err := q.db.QueryContext(ctx, listMessages,
+		arg.ConversationID,
+		arg.CursorCreated,
+		arg.CursorID,
+		arg.PageLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -303,8 +310,18 @@ LEFT JOIN LATERAL (
     LIMIT 1
 ) m ON true
 WHERE cm.user_id = $1
-ORDER BY c.updated_at DESC
+  AND ($2::timestamptz IS NULL
+       OR (c.updated_at, c.id) < ($2::timestamptz, $3::uuid))
+ORDER BY c.updated_at DESC, c.id DESC
+LIMIT $4
 `
+
+type ListUserConversationsParams struct {
+	UserID        uuid.UUID     `json:"user_id"`
+	CursorUpdated sql.NullTime  `json:"cursor_updated"`
+	CursorID      uuid.NullUUID `json:"cursor_id"`
+	PageLimit     int32         `json:"page_limit"`
+}
 
 type ListUserConversationsRow struct {
 	ID                   uuid.UUID      `json:"id"`
@@ -320,8 +337,13 @@ type ListUserConversationsRow struct {
 	LastMessageCreatedAt time.Time      `json:"last_message_created_at"`
 }
 
-func (q *Queries) ListUserConversations(ctx context.Context, userID uuid.UUID) ([]ListUserConversationsRow, error) {
-	rows, err := q.db.QueryContext(ctx, listUserConversations, userID)
+func (q *Queries) ListUserConversations(ctx context.Context, arg ListUserConversationsParams) ([]ListUserConversationsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listUserConversations,
+		arg.UserID,
+		arg.CursorUpdated,
+		arg.CursorID,
+		arg.PageLimit,
+	)
 	if err != nil {
 		return nil, err
 	}

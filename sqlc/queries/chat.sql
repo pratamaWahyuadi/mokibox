@@ -60,7 +60,10 @@ LEFT JOIN LATERAL (
     LIMIT 1
 ) m ON true
 WHERE cm.user_id = $1
-ORDER BY c.updated_at DESC;
+  AND (sqlc.narg('cursor_updated')::timestamptz IS NULL
+       OR (c.updated_at, c.id) < (sqlc.narg('cursor_updated')::timestamptz, sqlc.narg('cursor_id')::uuid))
+ORDER BY c.updated_at DESC, c.id DESC
+LIMIT sqlc.arg('page_limit');
 
 -- name: InsertMessage :one
 INSERT INTO messages (conversation_id, sender_id, message_type, content, media_url, media_metadata)
@@ -74,9 +77,10 @@ FROM messages m
 JOIN users u ON u.id = m.sender_id
 WHERE m.conversation_id = $1
   AND m.deleted_at IS NULL
-  AND (sqlc.narg('cursor')::timestamptz IS NULL OR m.created_at < sqlc.narg('cursor'))
-ORDER BY m.created_at DESC
-LIMIT $2;
+  AND (sqlc.narg('cursor_created')::timestamptz IS NULL
+       OR (m.created_at, m.id) < (sqlc.narg('cursor_created')::timestamptz, sqlc.narg('cursor_id')::uuid))
+ORDER BY m.created_at DESC, m.id DESC
+LIMIT sqlc.arg('page_limit');
 
 -- name: UpdateLastReadAt :exec
 UPDATE conversation_members

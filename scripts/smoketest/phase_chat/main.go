@@ -23,7 +23,7 @@ import (
 func main() {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
-		log.Fatal("DATABASE_URL is required")
+		log.Fatal("DATABASE_URL is required (see scripts/smoketest/phase_chat_ws/main.go for how to build it)")
 	}
 
 	ctx := context.Background()
@@ -175,12 +175,70 @@ func main() {
 		log.Fatalf("Expected 200 OK on ListMessages, got %d", recMsgs.Code)
 	}
 
-	var msgsRes map[string][]map[string]any
-	_ = json.Unmarshal(recMsgs.Body.Bytes(), &msgsRes)
-	if len(msgsRes["messages"]) != 3 {
-		log.Fatalf("Expected 3 messages in conversation history, got %d", len(msgsRes["messages"]))
+	var msgsRes struct {
+		Data       []map[string]any `json:"data"`
+		Pagination struct {
+			NextCursor *string `json:"next_cursor"`
+		} `json:"pagination"`
 	}
-	fmt.Printf("✅ Test 6 Passed: Retried Message History (%d messages retrieved)\n", len(msgsRes["messages"]))
+	if err := json.Unmarshal(recMsgs.Body.Bytes(), &msgsRes); err != nil {
+		log.Fatalf("ListMessages: bad envelope: %v (%s)", err, recMsgs.Body.String())
+	}
+	if len(msgsRes.Data) != 3 {
+		log.Fatalf("Expected 3 messages in conversation history, got %d", len(msgsRes.Data))
+	}
+	if msgsRes.Pagination.NextCursor != nil {
+		log.Fatalf("Expected null next_cursor when the whole history fits one page, got %q", *msgsRes.Pagination.NextCursor)
+	}
+	fmt.Printf("✅ Test 6 Passed: Retried Message History (%d messages retrieved)\n", len(msgsRes.Data))
+
+	// TEST 6b: cursor pagination walks the history exactly once (limit=2 -> pages of 2 and 1)
+	seen := map[string]bool{}
+	cursor := ""
+	pages := 0
+	for {
+		pages++
+		if pages > 5 {
+			log.Fatalf("Pagination did not terminate after %d pages", pages)
+		}
+		target := "/api/chat/conversations/" + convRes.ID.String() + "/messages?limit=2"
+		if cursor != "" {
+			target += "&cursor=" + cursor
+		}
+		reqP := httptest.NewRequest(http.MethodGet, target, nil)
+		recP := httptest.NewRecorder()
+		cP := e.NewContext(reqP, recP)
+		cP.SetParamNames("id")
+		cP.SetParamValues(convRes.ID.String())
+		cP.Set("auth.currentUser", &bob)
+		if err := handler.ListMessages(cP); err != nil {
+			log.Fatalf("ListMessages page %d error: %v", pages, err)
+		}
+		var page struct {
+			Data       []map[string]any `json:"data"`
+			Pagination struct {
+				NextCursor *string `json:"next_cursor"`
+			} `json:"pagination"`
+		}
+		if err := json.Unmarshal(recP.Body.Bytes(), &page); err != nil {
+			log.Fatalf("page %d: bad envelope: %v", pages, err)
+		}
+		for _, m := range page.Data {
+			id, _ := m["id"].(string)
+			if seen[id] {
+				log.Fatalf("Message %s returned twice while paginating", id)
+			}
+			seen[id] = true
+		}
+		if page.Pagination.NextCursor == nil {
+			break
+		}
+		cursor = *page.Pagination.NextCursor
+	}
+	if len(seen) != 3 {
+		log.Fatalf("Pagination returned %d distinct messages, want 3", len(seen))
+	}
+	fmt.Printf("✅ Test 6b Passed: Cursor pagination returned all 3 messages exactly once in %d pages\n", pages)
 
 	// TEST 7: Mark Read for Bob
 	reqRead := httptest.NewRequest(http.MethodPost, "/api/chat/conversations/"+convRes.ID.String()+"/read", nil)

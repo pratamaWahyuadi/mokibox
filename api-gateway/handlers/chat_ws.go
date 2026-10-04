@@ -352,9 +352,17 @@ func (c *WSClient) writePump() {
 
 // HandleWebSocket upgrades HTTP requests to WebSocket connections.
 func (h *ChatHandler) HandleWebSocket(c echo.Context) error {
+	// Native clients may authenticate with the Authorization header (the
+	// AuthenticateOptional middleware has then filled the context). Browsers
+	// cannot set headers on a WebSocket, so they pass ?ticket=, obtained from
+	// POST /api/chat/ws-ticket.
 	user, ok := middleware.UserFromContext(c)
 	if !ok || user == nil {
-		return shared.Wrap(shared.ErrUnauthorized, "missing authentication")
+		var err error
+		user, err = h.userFromTicket(c)
+		if err != nil {
+			return err
+		}
 	}
 
 	conn, err := upgrader.Upgrade(c.Response(), c.Request(), nil)
