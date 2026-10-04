@@ -446,14 +446,13 @@ and validation. Endpoint mounted in the authenticated `/api` group in `routes.go
 **Files touched:**
 
 ```
- HANDOFF.md                               |  56 +++
- api-gateway/handlers/search.go           | 240 +++++++++++++
- api-gateway/handlers/search_test.go      | 412 +++++++++++++++++++++
- api-gateway/routes.go                    |   6 +
- scripts/smoketest/phase11_search/main.go | 589 +++++++++++++++++++++++++++++++
- shared/db/search.sql.go                  | 206 +++++++++++
- sqlc/queries/search.sql                  |  59 ++++
- 7 files changed, 1568 insertions(+)
+sqlc/queries/search.sql                  NEW — SearchUsers, SearchVideos (:many)
+shared/db/search.sql.go                  GENERATED — make sqlc-gen
+api-gateway/handlers/search.go           NEW — SearchHandler + handler + mapper + validation + pagination
+api-gateway/handlers/search_test.go      NEW — 11 unit tests (happy, 401, empty-q, long-q, limit=0, limit-cap, type-filter, tombstone, pagination, rune-count, underscore)
+api-gateway/routes.go                    MODIFIED — api.GET("/search", searchH.Search)
+scripts/smoketest/phase11_search/main.go NEW — Real HTTP integration smoke test using real middleware.Authenticate & PostgreSQL (2x back-to-back PASS)
+HANDOFF.md                               MODIFIED — this section
 ```
 
 **Key Fixes & Refinements (from code review):**
