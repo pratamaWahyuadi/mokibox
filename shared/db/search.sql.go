@@ -26,7 +26,7 @@ WHERE u.is_active = TRUE
   AND u.id <> $1
   AND (u.username ILIKE '%' || $2::text || '%' OR u.display_name ILIKE '%' || $2::text || '%')
 ORDER BY
-    (u.username = $2::text) DESC,
+    (LOWER(u.username) = LOWER($2::text)) DESC,
     length(u.username) ASC,
     COALESCE((SELECT count(*) FROM follows f WHERE f.followee_id = u.id), 0) DESC,
     u.username ASC
@@ -107,9 +107,11 @@ SELECT
 FROM videos v
 JOIN users u ON u.id = v.user_id
 WHERE v.status = 'READY'
+  AND v.deleted_at IS NULL
   AND u.is_active = TRUE
   AND (v.title ILIKE '%' || $2::text || '%' OR v.description ILIKE '%' || $2::text || '%')
   AND (u.is_private = FALSE
+       OR u.id = $1
        OR EXISTS (
            SELECT 1 FROM follows f
            WHERE f.follower_id = $1 AND f.followee_id = u.id
@@ -150,7 +152,7 @@ type SearchVideosRow struct {
 }
 
 // Searches READY videos by title or description (case-insensitive).
-// Enforces active owner user and private user visibility rule.
+// Enforces active owner user, deleted_at NULL, and private user visibility rule (public, owner self, or followed).
 func (q *Queries) SearchVideos(ctx context.Context, arg SearchVideosParams) ([]SearchVideosRow, error) {
 	rows, err := q.db.QueryContext(ctx, searchVideos,
 		arg.ViewerID,

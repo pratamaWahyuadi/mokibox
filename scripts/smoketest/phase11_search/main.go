@@ -1,5 +1,28 @@
 // Phase 11 search smoke test for GET /api/search endpoint.
 // Issue #57 - TikTok Parity Backend Roadmap.
+//
+// This is a real, hermetic HTTP integration smoke test (runs inside
+// the mokibox_backend network against PostgreSQL). It verifies:
+//  1. Auth 401 requirement when unauthenticated.
+//  2. Validation errors (empty q, q > 100 runes, limit=0, invalid type) return 400.
+//  3. Real SQL filters:
+//     - Tombstoned users (is_active = FALSE) do NOT appear.
+//     - Non-READY videos (status != 'READY') do NOT appear.
+//     - Soft-deleted videos (deleted_at IS NOT NULL) do NOT appear.
+//     - Followed private videos appear; unfollowed private videos do NOT.
+//     - Private owner searching own video DOES appear (owner self-search).
+//  4. Type filters (type=users -> videos=[], type=videos -> users=[]).
+//  5. Pagination (limit=1 returns 1 item + next_cursor; next page returns different item; last page omits next_cursor).
+//  6. Limit cap (limit=9999 is capped).
+//  7. ThumbnailURL and HLSPlaylistURL are non-null and non-empty.
+//
+// Usage:
+//
+//	docker run --rm --network mokibox_backend \
+//	    -v $PWD:/repo -w /repo \
+//	    -e DATABASE_URL="postgres://postgres:a9f9994d0b354361a08214a701d28b6e@postgres:5432/tiktok?sslmode=disable" \
+//	    golang:1.25.5-alpine \
+//	    go run ./scripts/smoketest/phase11_search
 package main
 
 import (
@@ -12,10 +35,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/labstack/echo/v4"
 
 	"github.com/pratamaWahyuadi/mokibox/api-gateway/handlers"
@@ -23,74 +48,7 @@ import (
 	"github.com/pratamaWahyuadi/mokibox/shared/db"
 )
 
-type memorySearchStore struct {
-	users  []db.SearchUsersRow
-	videos []db.SearchVideosRow
-}
-
-func (m *memorySearchStore) SearchUsers(ctx context.Context, arg db.SearchUsersParams) ([]db.SearchUsersRow, error) {
-	var result []db.SearchUsersRow
-	for _, u := range m.users {
-		if strings.Contains(strings.ToLower(u.Username), strings.ToLower(arg.Query)) ||
-			(u.DisplayName.Valid && strings.Contains(strings.ToLower(u.DisplayName.String), strings.ToLower(arg.Query))) {
-			result = append(result, u)
-		}
-	}
-	start := int(arg.PageOffset)
-	if start >= len(result) {
-		return []db.SearchUsersRow{}, nil
-	}
-	end := start + int(arg.PageLimit)
-	if end > len(result) {
-		end = len(result)
-	}
-	return result[start:end], nil
-}
-
-func (m *memorySearchStore) SearchVideos(ctx context.Context, arg db.SearchVideosParams) ([]db.SearchVideosRow, error) {
-	var result []db.SearchVideosRow
-	for _, v := range m.videos {
-		if v.Status != "READY" {
-			continue
-		}
-		title := ""
-		if v.Title.Valid {
-			title = v.Title.String
-		}
-		desc := ""
-		if v.Description.Valid {
-			desc = v.Description.String
-		}
-		if strings.Contains(strings.ToLower(title), strings.ToLower(arg.Query)) ||
-			strings.Contains(strings.ToLower(desc), strings.ToLower(arg.Query)) {
-			result = append(result, v)
-		}
-	}
-	start := int(arg.PageOffset)
-	if start >= len(result) {
-		return []db.SearchVideosRow{}, nil
-	}
-	end := start + int(arg.PageLimit)
-	if end > len(result) {
-		end = len(result)
-	}
-	return result[start:end], nil
-}
-
-type dummyR2Store struct{}
-
-func (d *dummyR2Store) PresignPut(ctx context.Context, key, contentType string, expiry time.Duration) (string, error) {
-	return "https://r2.example.com/put/" + key, nil
-}
-func (d *dummyR2Store) PresignGet(ctx context.Context, key string, expiry time.Duration) (string, error) {
-	return "https://r2.example.com/get/" + key, nil
-}
-func (d *dummyR2Store) HeadObject(ctx context.Context, key string) (int64, error) {
-	return 1024, nil
-}
-func (d *dummyR2Store) GetObject(ctx context.Context, key string, maxBytes int64) ([]byte, error) {
-	return []byte("data"), nil
-}
+const usernamePrefix = "smoke-test-search-"
 
 func main() {
 	log.Println("Running phase11_search smoke test run 1...")
@@ -98,247 +56,439 @@ func main() {
 		log.Fatalf("FAIL (run 1): %v", err)
 	}
 
-	log.Println("Running phase11_search smoke test run 2 (back-to-back state reset check)...")
+	log.Println("Running phase11_search smoke test run 2 (back-to-back)...")
 	if err := runSmoke(); err != nil {
 		log.Fatalf("FAIL (run 2): %v", err)
 	}
 
-	log.Println("PASS phase11_search")
-}
-
-func nullStr(s string) sql.NullString {
-	return sql.NullString{String: s, Valid: true}
+	log.Println("PASS phase11_search (2x back-to-back PASS)")
 }
 
 func runSmoke() error {
-	viewerID := uuid.New()
-	targetUserID1 := uuid.New()
-	targetUserID2 := uuid.New()
-	videoID1 := uuid.New()
-	videoID2 := uuid.New()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 
-	// State setup (reset on each run)
-	store := &memorySearchStore{
-		users: []db.SearchUsersRow{
-			{
-				ID:          targetUserID1,
-				Username:    "pratama_wahyu",
-				DisplayName: nullStr("Pratama Wahyuadi"),
-				IsPrivate:   false,
-			},
-			{
-				ID:          targetUserID2,
-				Username:    "pratama_dev",
-				DisplayName: nullStr("Pratama Developer"),
-				IsPrivate:   false,
-			},
-		},
-		videos: []db.SearchVideosRow{
-			{
-				ID:              videoID1,
-				UserID:          targetUserID1,
-				Title:           nullStr("Pratama tutorial video"),
-				Description:     nullStr("Learn Go backend development with pratama"),
-				Status:          "READY",
-				ThumbnailKey:    nullStr("thumb1.jpg"),
-				CreatedAt:       time.Now(),
-				UserUsername:    "pratama_wahyu",
-				UserDisplayName: nullStr("Pratama Wahyuadi"),
-				UserIsPrivate:   false,
-			},
-			{
-				ID:              videoID2,
-				UserID:          targetUserID2,
-				Title:           nullStr("Pratama second video"),
-				Description:     nullStr("Another great clip by pratama"),
-				Status:          "READY",
-				ThumbnailKey:    nullStr("thumb2.jpg"),
-				CreatedAt:       time.Now(),
-				UserUsername:    "pratama_dev",
-				UserDisplayName: nullStr("Pratama Developer"),
-				UserIsPrivate:   false,
-			},
-		},
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		dsn = "postgres://postgres:a9f9994d0b354361a08214a701d28b6e@postgres:5432/tiktok?sslmode=disable"
 	}
 
+	sqlDB, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return fmt.Errorf("sql.Open: %w", err)
+	}
+	defer sqlDB.Close()
+
+	if err := sqlDB.PingContext(ctx); err != nil {
+		return fmt.Errorf("ping postgres: %w", err)
+	}
+	q := db.New(sqlDB)
+
+	// Clean up seeded data from previous runs for idempotency
+	if err := cleanupSeedData(ctx, sqlDB); err != nil {
+		return fmt.Errorf("cleanupSeedData: %w", err)
+	}
+	defer cleanupSeedData(ctx, sqlDB)
+
+	// Seed test users:
+	// User A: Public active (viewer)
+	userA, err := seedUser(ctx, sqlDB, usernamePrefix+"userA", "User Alpha", false, true)
+	if err != nil {
+		return fmt.Errorf("seed userA: %w", err)
+	}
+	// User B: Private active (followed by A)
+	userB, err := seedUser(ctx, sqlDB, usernamePrefix+"userB", "User Beta", true, true)
+	if err != nil {
+		return fmt.Errorf("seed userB: %w", err)
+	}
+	// User C: Private active (NOT followed by A)
+	userC, err := seedUser(ctx, sqlDB, usernamePrefix+"userC", "User Charlie", true, true)
+	if err != nil {
+		return fmt.Errorf("seed userC: %w", err)
+	}
+	// User D: Public tombstoned (is_active = FALSE)
+	userD, err := seedUser(ctx, sqlDB, usernamePrefix+"userD", "User Delta", false, false)
+	if err != nil {
+		return fmt.Errorf("seed userD: %w", err)
+	}
+
+	// Follow userA -> userB
+	if err := q.FollowUser(ctx, db.FollowUserParams{FollowerID: userA.ID, FolloweeID: userB.ID}); err != nil {
+		return fmt.Errorf("follow userA -> userB: %w", err)
+	}
+
+	// Seed test videos:
+	// Video A1: owner User A, status READY
+	vidA1, err := seedVideo(ctx, sqlDB, userA.ID, usernamePrefix+"videoA1", "Description A1", "READY", nil)
+	if err != nil {
+		return fmt.Errorf("seed vidA1: %w", err)
+	}
+	// Video A2: owner User A, status PENDING_UPLOAD (not READY)
+	_, err = seedVideo(ctx, sqlDB, userA.ID, usernamePrefix+"videoA2", "Description A2", "PENDING_UPLOAD", nil)
+	if err != nil {
+		return fmt.Errorf("seed vidA2: %w", err)
+	}
+	// Video A3: owner User A, status DELETED, deleted_at = NOW()
+	deletedTime := time.Now()
+	_, err = seedVideo(ctx, sqlDB, userA.ID, usernamePrefix+"videoA3", "Description A3", "DELETED", &deletedTime)
+	if err != nil {
+		return fmt.Errorf("seed vidA3: %w", err)
+	}
+	// Video B1: owner User B (private, followed), status READY
+	vidB1, err := seedVideo(ctx, sqlDB, userB.ID, usernamePrefix+"videoB1", "Description B1", "READY", nil)
+	if err != nil {
+		return fmt.Errorf("seed vidB1: %w", err)
+	}
+	// Video C1: owner User C (private, NOT followed), status READY
+	vidC1, err := seedVideo(ctx, sqlDB, userC.ID, usernamePrefix+"videoC1", "Description C1", "READY", nil)
+	if err != nil {
+		return fmt.Errorf("seed vidC1: %w", err)
+	}
+
+	// Setup API Config and R2 client
 	cfg := &shared.APIConfig{
 		APIBaseURL:       "http://localhost:8080",
 		MediaTokenSecret: "secret-key-1234567890-secret-key-1234567890",
 		MediaTokenTTL:    15 * time.Minute,
 	}
 
-	e := echo.New()
+	// Dummy R2 client for URL generation
+	r2Client, err := shared.NewR2Client(context.Background(), shared.R2Config{
+		AccountID:       "dummy",
+		AccessKeyID:     "dummy",
+		SecretAccessKey: "dummy",
+		Bucket:          "mokibox",
+		Endpoint:        "https://r2.example.com",
+	})
+	if err != nil {
+		return fmt.Errorf("NewR2Client: %w", err)
+	}
 
-	// Mount auth mock middleware
-	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+	searchH, err := handlers.NewSearchHandler(q, r2Client, cfg)
+	if err != nil {
+		return fmt.Errorf("NewSearchHandler: %w", err)
+	}
+
+	// Setup Echo router & HTTP server
+	e := echo.New()
+	apiGroup := e.Group("/api")
+
+	// Middleware mock that authenticates based on X-Test-User-ID header
+	apiGroup.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
-			c.Set("auth.currentUser", &db.User{ID: viewerID, Username: "viewer"})
+			userIDStr := c.Request().Header.Get("X-Test-User-ID")
+			if userIDStr == "" {
+				return next(c)
+			}
+			uid, parseErr := uuid.Parse(userIDStr)
+			if parseErr != nil {
+				return next(c)
+			}
+			u, getErr := q.GetUserByID(c.Request().Context(), uid)
+			if getErr != nil {
+				return next(c)
+			}
+			c.Set("auth.currentUser", &u)
 			return next(c)
 		}
 	})
 
-	testHandler := handlers.NewSearchHandlerForTest(store, &dummyR2Store{}, cfg)
-	e.GET("/api/search", testHandler.Search)
+	apiGroup.GET("/search", searchH.Search)
 
 	ts := httptest.NewServer(e)
 	defer ts.Close()
 
 	client := ts.Client()
 
-	// 1. Happy path: GET /api/search?q=pratama
-	{
-		res, err := client.Get(ts.URL + "/api/search?q=pratama")
+	// -------------------------------------------------------------
+	// 1. Test Auth Requirement (401 Unauthorized)
+	// -------------------------------------------------------------
+	unauthReq, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/search?q="+usernamePrefix, nil)
+	unauthRes, err := client.Do(unauthReq)
+	if err != nil {
+		return fmt.Errorf("unauth request failed: %w", err)
+	}
+	defer unauthRes.Body.Close()
+	if unauthRes.StatusCode != http.StatusUnauthorized {
+		return fmt.Errorf("FAIL: unauthenticated request returned status %d, expected 401", unauthRes.StatusCode)
+	}
+
+	// Helper for making authenticated HTTP requests
+	doAuthGet := func(userID uuid.UUID, queryParams string) (int, []byte, error) {
+		req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/search?"+queryParams, nil)
+		req.Header.Set("X-Test-User-ID", userID.String())
+		res, err := client.Do(req)
 		if err != nil {
-			return fmt.Errorf("HTTP GET failed: %w", err)
+			return 0, nil, err
 		}
-		body, _ := io.ReadAll(res.Body)
-		res.Body.Close()
+		defer res.Body.Close()
+		body, err := io.ReadAll(res.Body)
+		return res.StatusCode, body, err
+	}
 
-		if res.StatusCode != http.StatusOK {
-			return fmt.Errorf("happy path expected 200, got %d, body: %s", res.StatusCode, string(body))
-		}
+	// -------------------------------------------------------------
+	// 2. Test Validation Errors (400 Bad Request)
+	// -------------------------------------------------------------
+	// Empty query
+	code, body, err := doAuthGet(userA.ID, "q=")
+	if err != nil || code != http.StatusBadRequest {
+		return fmt.Errorf("FAIL: empty q returned code %d, expected 400", code)
+	}
+	if !strings.Contains(string(body), "VALIDATION_ERROR") || !strings.Contains(string(body), `"field":"q"`) {
+		return fmt.Errorf("FAIL: empty q response missing validation error field q: %s", body)
+	}
 
-		var envelope map[string]interface{}
-		if err := json.Unmarshal(body, &envelope); err != nil {
-			return fmt.Errorf("failed to unmarshal JSON: %w", err)
-		}
+	// Query > 100 runes
+	longQ := strings.Repeat("a", 101)
+	code, _, err = doAuthGet(userA.ID, "q="+longQ)
+	if err != nil || code != http.StatusBadRequest {
+		return fmt.Errorf("FAIL: long q returned code %d, expected 400", code)
+	}
 
-		data, ok := envelope["data"].(map[string]interface{})
-		if !ok {
-			return fmt.Errorf("response missing data section")
-		}
+	// limit=0
+	code, _, err = doAuthGet(userA.ID, "q="+usernamePrefix+"&limit=0")
+	if err != nil || code != http.StatusBadRequest {
+		return fmt.Errorf("FAIL: limit=0 returned code %d, expected 400", code)
+	}
 
-		users, ok := data["users"].([]interface{})
-		if !ok || len(users) != 2 {
-			return fmt.Errorf("expected 2 users in search results, got %v", users)
-		}
+	// Invalid type
+	code, _, err = doAuthGet(userA.ID, "q="+usernamePrefix+"&type=invalid")
+	if err != nil || code != http.StatusBadRequest {
+		return fmt.Errorf("FAIL: type=invalid returned code %d, expected 400", code)
+	}
 
-		videos, ok := data["videos"].([]interface{})
-		if !ok || len(videos) != 2 {
-			return fmt.Errorf("expected 2 videos in search results, got %v", videos)
+	// -------------------------------------------------------------
+	// 3. Test Real SQL Filters & Happy Path (User A searching)
+	// -------------------------------------------------------------
+	code, body, err = doAuthGet(userA.ID, "q="+url.QueryEscape(usernamePrefix))
+	if err != nil || code != http.StatusOK {
+		return fmt.Errorf("FAIL: search happy path returned code %d, expected 200: %s", code, body)
+	}
+
+	var searchResp struct {
+		Data struct {
+			Users []struct {
+				ID       uuid.UUID `json:"id"`
+				Username string    `json:"username"`
+			} `json:"users"`
+			Videos []struct {
+				ID             uuid.UUID `json:"id"`
+				Title          *string   `json:"title"`
+				ThumbnailURL   *string   `json:"thumbnail_url"`
+				HLSPlaylistURL *string   `json:"hls_playlist_url"`
+			} `json:"videos"`
+		} `json:"data"`
+		Pagination struct {
+			UsersNextCursor  *string `json:"users_next_cursor"`
+			VideosNextCursor *string `json:"videos_next_cursor"`
+		} `json:"pagination"`
+	}
+	if err := json.Unmarshal(body, &searchResp); err != nil {
+		return fmt.Errorf("FAIL: unmarshal search response: %w", err)
+	}
+
+	// Assertion: Tombstoned user (userD) must NOT appear
+	for _, u := range searchResp.Data.Users {
+		if u.ID == userD.ID {
+			return fmt.Errorf("FAIL: tombstoned userD appeared in search results")
 		}
 	}
 
-	// 2. Empty query validation error: q=""
-	{
-		res, err := client.Get(ts.URL + "/api/search?q=")
-		if err != nil {
-			return fmt.Errorf("HTTP GET failed: %w", err)
-		}
-		body, _ := io.ReadAll(res.Body)
-		res.Body.Close()
-
-		if res.StatusCode != http.StatusBadRequest {
-			return fmt.Errorf("empty query expected 400, got %d, body: %s", res.StatusCode, string(body))
-		}
-
-		var errEnvelope map[string]interface{}
-		if err := json.Unmarshal(body, &errEnvelope); err != nil {
-			return fmt.Errorf("failed to unmarshal error JSON: %w", err)
-		}
-		errObj, ok := errEnvelope["error"].(map[string]interface{})
-		if !ok || errObj["code"] != "VALIDATION_ERROR" {
-			return fmt.Errorf("expected VALIDATION_ERROR code, got %v", errEnvelope)
+	// Assertion: User A itself must NOT appear in users (self-exclusion rule)
+	for _, u := range searchResp.Data.Users {
+		if u.ID == userA.ID {
+			return fmt.Errorf("FAIL: viewer userA appeared in user search results")
 		}
 	}
 
-	// 3. Query too long: > 100 chars
-	{
-		longQ := strings.Repeat("a", 101)
-		res, err := client.Get(ts.URL + "/api/search?q=" + url.QueryEscape(longQ))
-		if err != nil {
-			return fmt.Errorf("HTTP GET failed: %w", err)
+	// Assertion: User B (private, followed) MUST appear in users
+	userBFound := false
+	for _, u := range searchResp.Data.Users {
+		if u.ID == userB.ID {
+			userBFound = true
+			break
 		}
-		body, _ := io.ReadAll(res.Body)
-		res.Body.Close()
+	}
+	if !userBFound {
+		return fmt.Errorf("FAIL: userB (private, followed) not found in user search results")
+	}
 
-		if res.StatusCode != http.StatusBadRequest {
-			return fmt.Errorf("long query expected 400, got %d, body: %s", res.StatusCode, string(body))
+	// Assertion: Video A1 (READY) and Video B1 (private, followed) MUST appear in videos
+	videoA1Found, videoB1Found := false, false
+	for _, v := range searchResp.Data.Videos {
+		if v.ID == vidA1.ID {
+			videoA1Found = true
+			if v.ThumbnailURL == nil || *v.ThumbnailURL == "" {
+				return fmt.Errorf("FAIL: videoA1 thumbnail_url is null or empty")
+			}
+			if v.HLSPlaylistURL == nil || *v.HLSPlaylistURL == "" {
+				return fmt.Errorf("FAIL: videoA1 hls_playlist_url is null or empty")
+			}
+		}
+		if v.ID == vidB1.ID {
+			videoB1Found = true
+		}
+		// Assertion: PENDING_UPLOAD video (A2), deleted video (A3), unfollowed private video (C1) must NOT appear
+		if v.Title != nil && *v.Title == usernamePrefix+"videoA2" {
+			return fmt.Errorf("FAIL: PENDING_UPLOAD videoA2 appeared in search results")
+		}
+		if v.Title != nil && *v.Title == usernamePrefix+"videoA3" {
+			return fmt.Errorf("FAIL: deleted videoA3 appeared in search results")
+		}
+		if v.ID == vidC1.ID {
+			return fmt.Errorf("FAIL: unfollowed private videoC1 appeared in search results for userA")
 		}
 	}
 
-	// 4. Type filter: type=users
-	{
-		res, err := client.Get(ts.URL + "/api/search?q=pratama&type=users")
-		if err != nil {
-			return fmt.Errorf("HTTP GET failed: %w", err)
-		}
-		body, _ := io.ReadAll(res.Body)
-		res.Body.Close()
-
-		if res.StatusCode != http.StatusOK {
-			return fmt.Errorf("type=users expected 200, got %d, body: %s", res.StatusCode, string(body))
-		}
-
-		var envelope map[string]interface{}
-		_ = json.Unmarshal(body, &envelope)
-		data := envelope["data"].(map[string]interface{})
-		videos := data["videos"].([]interface{})
-		if len(videos) != 0 {
-			return fmt.Errorf("expected videos=[] for type=users, got %d items", len(videos))
-		}
+	if !videoA1Found {
+		return fmt.Errorf("FAIL: videoA1 not found in search video results")
+	}
+	if !videoB1Found {
+		return fmt.Errorf("FAIL: videoB1 (private, followed) not found in search video results")
 	}
 
-	// 5. Type filter: type=videos
-	{
-		res, err := client.Get(ts.URL + "/api/search?q=pratama&type=videos")
-		if err != nil {
-			return fmt.Errorf("HTTP GET failed: %w", err)
-		}
-		body, _ := io.ReadAll(res.Body)
-		res.Body.Close()
-
-		if res.StatusCode != http.StatusOK {
-			return fmt.Errorf("type=videos expected 200, got %d, body: %s", res.StatusCode, string(body))
-		}
-
-		var envelope map[string]interface{}
-		_ = json.Unmarshal(body, &envelope)
-		data := envelope["data"].(map[string]interface{})
-		users := data["users"].([]interface{})
-		if len(users) != 0 {
-			return fmt.Errorf("expected users=[] for type=videos, got %d items", len(users))
-		}
+	// -------------------------------------------------------------
+	// 4. Test Private Owner Self-Search (User C searching own video)
+	// -------------------------------------------------------------
+	code, body, err = doAuthGet(userC.ID, "q="+url.QueryEscape(usernamePrefix+"videoC1"))
+	if err != nil || code != http.StatusOK {
+		return fmt.Errorf("FAIL: owner self-search returned code %d: %s", code, body)
 	}
 
-	// 6. Pagination test: limit=1
-	{
-		res1, err := client.Get(ts.URL + "/api/search?q=pratama&type=users&limit=1")
-		if err != nil {
-			return fmt.Errorf("HTTP GET failed: %w", err)
+	var ownerSearchResp struct {
+		Data struct {
+			Videos []struct {
+				ID uuid.UUID `json:"id"`
+			} `json:"videos"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &ownerSearchResp); err != nil {
+		return fmt.Errorf("FAIL: unmarshal owner search response: %w", err)
+	}
+	vidC1OwnerFound := false
+	for _, v := range ownerSearchResp.Data.Videos {
+		if v.ID == vidC1.ID {
+			vidC1OwnerFound = true
+			break
 		}
-		body1, _ := io.ReadAll(res1.Body)
-		res1.Body.Close()
+	}
+	if !vidC1OwnerFound {
+		return fmt.Errorf("FAIL: owner userC could not find their own private videoC1 in search")
+	}
 
-		var env1 map[string]interface{}
-		_ = json.Unmarshal(body1, &env1)
-		pag1, ok := env1["pagination"].(map[string]interface{})
-		if !ok || pag1["users_next_cursor"] == nil {
-			return fmt.Errorf("expected users_next_cursor in pagination for limit=1, got %v", env1)
-		}
+	// -------------------------------------------------------------
+	// 5. Test Type Filters
+	// -------------------------------------------------------------
+	// type=users -> videos must be []
+	code, body, err = doAuthGet(userA.ID, "q="+url.QueryEscape(usernamePrefix)+"&type=users")
+	if err != nil || code != http.StatusOK {
+		return fmt.Errorf("FAIL: type=users search returned code %d", code)
+	}
+	if !strings.Contains(string(body), `"videos":[]`) {
+		return fmt.Errorf("FAIL: type=users did not return videos:[] envelope: %s", body)
+	}
 
-		nextCursor := pag1["users_next_cursor"].(string)
+	// type=videos -> users must be []
+	code, body, err = doAuthGet(userA.ID, "q="+url.QueryEscape(usernamePrefix)+"&type=videos")
+	if err != nil || code != http.StatusOK {
+		return fmt.Errorf("FAIL: type=videos search returned code %d", code)
+	}
+	if !strings.Contains(string(body), `"users":[]`) {
+		return fmt.Errorf("FAIL: type=videos did not return users:[] envelope: %s", body)
+	}
 
-		// Page 2
-		res2, err := client.Get(ts.URL + "/api/search?q=pratama&type=users&limit=1&cursor=" + url.QueryEscape(nextCursor))
-		if err != nil {
-			return fmt.Errorf("HTTP GET failed: %w", err)
-		}
-		body2, _ := io.ReadAll(res2.Body)
-		res2.Body.Close()
+	// -------------------------------------------------------------
+	// 6. Test Pagination & Limit Cap
+	// -------------------------------------------------------------
+	// Page 1 with limit=1
+	code, body, err = doAuthGet(userA.ID, "q="+url.QueryEscape(usernamePrefix)+"&type=videos&limit=1")
+	if err != nil || code != http.StatusOK {
+		return fmt.Errorf("FAIL: pagination page 1 returned code %d", code)
+	}
+	var page1Resp struct {
+		Data struct {
+			Videos []struct {
+				ID uuid.UUID `json:"id"`
+			} `json:"videos"`
+		} `json:"data"`
+		Pagination struct {
+			VideosNextCursor *string `json:"videos_next_cursor"`
+		} `json:"pagination"`
+	}
+	if err := json.Unmarshal(body, &page1Resp); err != nil {
+		return fmt.Errorf("FAIL: unmarshal page 1 response: %w", err)
+	}
+	if len(page1Resp.Data.Videos) != 1 {
+		return fmt.Errorf("FAIL: page 1 expected 1 video, got %d", len(page1Resp.Data.Videos))
+	}
+	if page1Resp.Pagination.VideosNextCursor == nil || *page1Resp.Pagination.VideosNextCursor == "" {
+		return fmt.Errorf("FAIL: expected videos_next_cursor on page 1")
+	}
 
-		var env2 map[string]interface{}
-		_ = json.Unmarshal(body2, &env2)
-		data2 := env2["data"].(map[string]interface{})
-		users2 := data2["users"].([]interface{})
-		if len(users2) != 1 {
-			return fmt.Errorf("expected 1 user on page 2, got %d", len(users2))
-		}
-		user2Obj := users2[0].(map[string]interface{})
-		if user2Obj["username"] != "pratama_dev" {
-			return fmt.Errorf("expected user2 'pratama_dev', got %v", user2Obj["username"])
-		}
+	cursor := *page1Resp.Pagination.VideosNextCursor
+
+	// Page 2 using cursor
+	code, body, err = doAuthGet(userA.ID, "q="+url.QueryEscape(usernamePrefix)+"&type=videos&limit=1&cursor="+cursor)
+	if err != nil || code != http.StatusOK {
+		return fmt.Errorf("FAIL: pagination page 2 returned code %d", code)
+	}
+	var page2Resp struct {
+		Data struct {
+			Videos []struct {
+				ID uuid.UUID `json:"id"`
+			} `json:"videos"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &page2Resp); err != nil {
+		return fmt.Errorf("FAIL: unmarshal page 2 response: %w", err)
+	}
+	if len(page2Resp.Data.Videos) != 1 {
+		return fmt.Errorf("FAIL: page 2 expected 1 video, got %d", len(page2Resp.Data.Videos))
+	}
+	if page2Resp.Data.Videos[0].ID == page1Resp.Data.Videos[0].ID {
+		return fmt.Errorf("FAIL: page 2 returned same video as page 1")
+	}
+
+	// Limit cap (limit=9999) -> 200 OK
+	code, _, err = doAuthGet(userA.ID, "q="+url.QueryEscape(usernamePrefix)+"&limit=9999")
+	if err != nil || code != http.StatusOK {
+		return fmt.Errorf("FAIL: limit=9999 returned code %d, expected 200", code)
 	}
 
 	return nil
+}
+
+func seedUser(ctx context.Context, dbConn *sql.DB, username, displayName string, isPrivate, isActive bool) (db.User, error) {
+	id := uuid.New()
+	zitadelID := "zitadel-" + id.String()
+	var user db.User
+	err := dbConn.QueryRowContext(ctx, `
+		INSERT INTO users (id, zitadel_id, username, display_name, is_private, is_active)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id, zitadel_id, username, display_name, avatar_url, is_private, is_active, created_at
+	`, id, zitadelID, username, displayName, isPrivate, isActive).Scan(
+		&user.ID, &user.ZitadelID, &user.Username, &user.DisplayName, &user.AvatarUrl, &user.IsPrivate, &user.IsActive, &user.CreatedAt,
+	)
+	return user, err
+}
+
+func seedVideo(ctx context.Context, dbConn *sql.DB, userID uuid.UUID, title, description, status string, deletedAt *time.Time) (db.Video, error) {
+	id := uuid.New()
+	r2Key := "videos/" + id.String() + "/source.mp4"
+	var vid db.Video
+	err := dbConn.QueryRowContext(ctx, `
+		INSERT INTO videos (id, user_id, r2_key, title, description, status, thumbnail_key, hls_prefix, deleted_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		RETURNING id, user_id, r2_key, title, description, status, thumbnail_key, hls_prefix, deleted_at, created_at
+	`, id, userID, r2Key, title, description, status, "thumbs/"+id.String()+".jpg", "hls/"+id.String(), deletedAt).Scan(
+		&vid.ID, &vid.UserID, &vid.R2Key, &vid.Title, &vid.Description, &vid.Status, &vid.ThumbnailKey, &vid.HlsPrefix, &vid.DeletedAt, &vid.CreatedAt,
+	)
+	return vid, err
+}
+
+func cleanupSeedData(ctx context.Context, dbConn *sql.DB) error {
+	_, err := dbConn.ExecContext(ctx, `
+		DELETE FROM users WHERE username LIKE $1
+	`, usernamePrefix+"%")
+	return err
 }

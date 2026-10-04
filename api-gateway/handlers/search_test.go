@@ -64,9 +64,9 @@ func setupSearchTestContext(method, target string, user *db.User) (echo.Context,
 
 func testConfig() *shared.APIConfig {
 	return &shared.APIConfig{
-		APIBaseURL:        "http://localhost:8080",
-		MediaTokenSecret:  "secret-key-1234567890-secret-key-1234567890",
-		MediaTokenTTL:     15 * time.Minute,
+		APIBaseURL:       "http://localhost:8080",
+		MediaTokenSecret: "secret-key-1234567890-secret-key-1234567890",
+		MediaTokenTTL:    15 * time.Minute,
 	}
 }
 
@@ -270,14 +270,18 @@ func TestSearch_Pagination(t *testing.T) {
 	u1 := db.SearchUsersRow{ID: uuid.New(), Username: "user1"}
 	u2 := db.SearchUsersRow{ID: uuid.New(), Username: "user2"}
 
+	allUsers := []db.SearchUsersRow{u1, u2}
 	store := &mockSearchStore{
 		searchUsersFn: func(ctx context.Context, arg db.SearchUsersParams) ([]db.SearchUsersRow, error) {
-			if arg.PageOffset == 0 {
-				return []db.SearchUsersRow{u1}, nil
-			} else if arg.PageOffset == 1 {
-				return []db.SearchUsersRow{u2}, nil
+			start := int(arg.PageOffset)
+			if start >= len(allUsers) {
+				return []db.SearchUsersRow{}, nil
 			}
-			return []db.SearchUsersRow{}, nil
+			end := start + int(arg.PageLimit)
+			if end > len(allUsers) {
+				end = len(allUsers)
+			}
+			return allUsers[start:end], nil
 		},
 	}
 
@@ -310,5 +314,70 @@ func TestSearch_Pagination(t *testing.T) {
 
 	if len(resp2.Data.Users) != 1 || resp2.Data.Users[0].Username != "user2" {
 		t.Fatalf("page 2 expected user2, got %+v", resp2.Data.Users)
+	}
+}
+
+func TestSearch_Unauthorized(t *testing.T) {
+	h := NewSearchHandlerForTest(&mockSearchStore{}, &mockR2Store{}, testConfig())
+	c, rec := setupSearchTestContext(http.MethodGet, "/api/search?q=test", nil)
+	if err := h.Search(c); err != nil {
+		t.Fatalf("unexpected handler error: %v", err)
+	}
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status 401, got %d", rec.Code)
+	}
+}
+
+func TestSearch_LimitZero(t *testing.T) {
+	viewer := &db.User{ID: uuid.New(), Username: "viewer"}
+	h := NewSearchHandlerForTest(&mockSearchStore{}, &mockR2Store{}, testConfig())
+	c, rec := setupSearchTestContext(http.MethodGet, "/api/search?q=test&limit=0", viewer)
+	if err := h.Search(c); err != nil {
+		t.Fatalf("unexpected handler error: %v", err)
+	}
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400 for limit=0, got %d", rec.Code)
+	}
+}
+
+func TestSearch_LimitCap(t *testing.T) {
+	viewer := &db.User{ID: uuid.New(), Username: "viewer"}
+	var receivedLimit int32
+	store := &mockSearchStore{
+		searchUsersFn: func(ctx context.Context, arg db.SearchUsersParams) ([]db.SearchUsersRow, error) {
+			receivedLimit = arg.PageLimit
+			return nil, nil
+		},
+	}
+	h := NewSearchHandlerForTest(store, &mockR2Store{}, testConfig())
+	c, rec := setupSearchTestContext(http.MethodGet, "/api/search?q=test&type=users&limit=9999", viewer)
+	if err := h.Search(c); err != nil {
+		t.Fatalf("unexpected handler error: %v", err)
+	}
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+	// parseLimit caps at videoListMaxLimit (50) -> pageLimit should be limit + 1 = 51
+	if receivedLimit > 51 {
+		t.Errorf("expected limit capped at max 50 (plus 1 for lookahead = 51), got %d", receivedLimit)
+	}
+}
+
+func TestSearch_RuneCountLimit(t *testing.T) {
+	viewer := &db.User{ID: uuid.New(), Username: "viewer"}
+	h := NewSearchHandlerForTest(&mockSearchStore{}, &mockR2Store{}, testConfig())
+
+	// 101 runes (e.g. 101 Japanese characters, each 3 bytes)
+	longRuneStr := strings.Repeat("あ", 101)
+	c, rec := setupSearchTestContext(http.MethodGet, "/api/search?q="+longRuneStr, viewer)
+	if err := h.Search(c); err != nil {
+		t.Fatalf("unexpected handler error: %v", err)
+	}
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400 for >100 runes query, got %d", rec.Code)
 	}
 }

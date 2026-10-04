@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -84,7 +86,7 @@ func (h *SearchHandler) Search(c echo.Context) error {
 	if q == "" {
 		return shared.RespondError(c, shared.NewAPIError(shared.CodeValidationError, "query must not be empty").WithDetails(shared.FieldError{Field: "q", Message: "query must not be empty"}))
 	}
-	if len(q) > 100 {
+	if utf8.RuneCountInString(q) > 100 {
 		return shared.RespondError(c, shared.NewAPIError(shared.CodeValidationError, "query must not exceed 100 characters").WithDetails(shared.FieldError{Field: "q", Message: "query must not exceed 100 characters"}))
 	}
 
@@ -113,23 +115,29 @@ func (h *SearchHandler) Search(c echo.Context) error {
 	}
 	var pagination SearchPagination
 
+	escapedQ := escapeSQLWildcards(q)
+
 	// Search Users
 	if searchType == "all" || searchType == "users" {
 		userRows, err := h.Queries.SearchUsers(ctx, db.SearchUsersParams{
 			ViewerID:   viewer.ID,
-			Query:      q,
+			Query:      escapedQ,
 			PageOffset: int32(offset),
-			PageLimit:  int32(limit),
+			PageLimit:  int32(limit + 1),
 		})
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			slog.Error("SearchUsers failed", "err", err, "viewer_id", viewer.ID, "query", q)
 			return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "search users failed"))
 		}
+		hasNext := len(userRows) > limit
+		if hasNext {
+			userRows = userRows[:limit]
+		}
 		for _, r := range userRows {
 			data.Users = append(data.Users, userSummaryFromRow(r.DisplayName, r.AvatarUrl, r.ID, r.Username, r.IsPrivate))
 		}
-		if len(userRows) == limit {
-			nc := encodeOffsetCursor(offset + len(userRows))
+		if hasNext {
+			nc := encodeOffsetCursor(offset + limit)
 			pagination.UsersNextCursor = &nc
 		}
 	}
@@ -138,20 +146,24 @@ func (h *SearchHandler) Search(c echo.Context) error {
 	if searchType == "all" || searchType == "videos" {
 		videoRows, err := h.Queries.SearchVideos(ctx, db.SearchVideosParams{
 			ViewerID:   viewer.ID,
-			Query:      q,
+			Query:      escapedQ,
 			PageOffset: int32(offset),
-			PageLimit:  int32(limit),
+			PageLimit:  int32(limit + 1),
 		})
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			slog.Error("SearchVideos failed", "err", err, "viewer_id", viewer.ID, "query", q)
 			return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "search videos failed"))
 		}
+		hasNext := len(videoRows) > limit
+		if hasNext {
+			videoRows = videoRows[:limit]
+		}
 		for _, r := range videoRows {
 			vo := videoObjectFromSearchRow(ctx, h.R2, h.Cfg, r, viewer.ID)
 			data.Videos = append(data.Videos, vo)
 		}
-		if len(videoRows) == limit {
-			nc := encodeOffsetCursor(offset + len(videoRows))
+		if hasNext {
+			nc := encodeOffsetCursor(offset + limit)
 			pagination.VideosNextCursor = &nc
 		}
 	}
@@ -193,24 +205,33 @@ func videoObjectFromSearchRow(ctx context.Context, r2 r2ObjectStore, cfg *shared
 	return out
 }
 
+func escapeSQLWildcards(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
+
+const maxOffset = 100000
+
 func parseOffsetCursor(raw string) (int, error) {
 	if raw == "" {
 		return 0, nil
 	}
-	var offset int
-	if _, err := fmt.Sscanf(raw, "%d", &offset); err == nil && offset >= 0 {
-		return offset, nil
-	}
+	// Check base64 encoded offset:
+	rawStr := raw
 	decoded, err := base64.RawURLEncoding.DecodeString(raw)
 	if err == nil {
-		str := string(decoded)
-		if strings.HasPrefix(str, "offset:") {
-			if _, err := fmt.Sscanf(strings.TrimPrefix(str, "offset:"), "%d", &offset); err == nil && offset >= 0 {
-				return offset, nil
-			}
-		}
+		rawStr = string(decoded)
 	}
-	return 0, fmt.Errorf("invalid cursor format")
+	if strings.HasPrefix(rawStr, "offset:") {
+		rawStr = strings.TrimPrefix(rawStr, "offset:")
+	}
+	val, err := strconv.Atoi(rawStr)
+	if err != nil || val < 0 || val > maxOffset {
+		return 0, fmt.Errorf("invalid cursor format")
+	}
+	return val, nil
 }
 
 func encodeOffsetCursor(offset int) string {
