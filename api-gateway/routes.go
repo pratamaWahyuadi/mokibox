@@ -223,6 +223,12 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	}
 	api.GET("/feed/home", fh.HomeFeed)
 
+	searchH, err := handlers.NewSearchHandler(d.Queries, d.R2, d.Cfg)
+	if err != nil {
+		panic(fmt.Sprintf("api-gateway: NewSearchHandler: %v", err))
+	}
+	api.GET("/search", searchH.Search)
+
 	// Phase 6.B: video read endpoints. All three
 	// share the same VideoHandler from video.go.
 	// - /videos/:id               - full VideoObject

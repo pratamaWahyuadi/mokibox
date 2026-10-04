@@ -436,3 +436,40 @@ scripts/smoketest/phase10_reconcile/   (16-assertion E2E)
 docker-compose.yml                     (gateway+nginx hardening, RECONCILE_* env)
 SECURITY.md                            (audit per-SEC + limitations + policy)
 ```
+
+## Issue #57 — GET /api/search (2026-10-04)
+
+**What shipped:** `GET /api/search?q=<query>&type=<all|users|videos>&limit=<n>&cursor=<c>`
+— search users and videos with offset-based cursor paging, type filter,
+and validation. Endpoint mounted in the authenticated `/api` group.
+
+**Files touched:**
+
+```
+sqlc/queries/search.sql                  NEW — SearchUsers, SearchVideos (:many)
+shared/db/search.sql.go                  GENERATED — make sqlc-gen
+api-gateway/handlers/search.go           NEW — SearchHandler + handler + mapper
+api-gateway/handlers/search_test.go      NEW — 6 unit tests (happy, empty-q, long-q, type-filter, tombstone, pagination)
+api-gateway/routes.go                    MODIFIED — api.GET("/search", searchH.Search)
+scripts/smoketest/phase11_search/main.go NEW — HTTP smoke test (2x back-to-back PASS)
+HANDOFF.md                               MODIFIED — this section
+```
+
+**Deviations from issue:**
+
+- Offset paging encoded via base64 `offset:<n>` cursor (issue recommended offset, cursor is just an opaque wrapper).
+- `NewSearchHandlerForTest` exported (capitalised) for smoketest reuse; issue did not specify visibility.
+- Video search does NOT exclude viewer's own videos (per issue spec: "user mencari kontennya sendiri itu wajar").
+
+**Known Limitations (per issue):**
+
+- Sequential scan `ILIKE '%...%'` — acceptable for current dataset. Add `pg_trgm` GIN index when users table exceeds ~50k rows.
+- Offset paging — acceptable for short search result sets. Switch to keyset/rank paging if result sets grow large.
+- Block filter (issue #10) not implemented — only self-exclusion on user search. TODO when block table lands.
+
+**Verification:**
+
+- `go build ./api-gateway/... ./shared/...` — 0 errors
+- `go vet ./api-gateway/... ./shared/...` — 0 warnings
+- `go test ./api-gateway/... ./shared/...` — all green
+- `go run ./scripts/smoketest/phase11_search` — PASS 2x back-to-back
