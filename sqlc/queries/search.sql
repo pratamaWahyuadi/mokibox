@@ -16,9 +16,9 @@ SELECT
 FROM users u
 WHERE u.is_active = TRUE
   AND u.id <> sqlc.arg('viewer_id')
-  AND (u.username ILIKE '%' || sqlc.arg('query')::text || '%' OR u.display_name ILIKE '%' || sqlc.arg('query')::text || '%')
+  AND (u.username ILIKE '%' || sqlc.arg('query_pattern')::text || '%' OR u.display_name ILIKE '%' || sqlc.arg('query_pattern')::text || '%')
 ORDER BY
-    (LOWER(u.username) = LOWER(sqlc.arg('query')::text)) DESC,
+    (LOWER(u.username) = LOWER(sqlc.arg('raw_query')::text)) DESC,
     length(u.username) ASC,
     COALESCE((SELECT count(*) FROM follows f WHERE f.followee_id = u.id), 0) DESC,
     u.username ASC
@@ -46,7 +46,7 @@ JOIN users u ON u.id = v.user_id
 WHERE v.status = 'READY'
   AND v.deleted_at IS NULL
   AND u.is_active = TRUE
-  AND (v.title ILIKE '%' || sqlc.arg('query')::text || '%' OR v.description ILIKE '%' || sqlc.arg('query')::text || '%')
+  AND (v.title ILIKE '%' || sqlc.arg('query_pattern')::text || '%' OR v.description ILIKE '%' || sqlc.arg('query_pattern')::text || '%')
   AND (u.is_private = FALSE
        OR u.id = sqlc.arg('viewer_id')
        OR EXISTS (
@@ -55,4 +55,5 @@ WHERE v.status = 'READY'
        ))
 ORDER BY v.views_count DESC, v.created_at DESC, v.id DESC
 LIMIT sqlc.arg('page_limit') OFFSET sqlc.arg('page_offset');
+
 

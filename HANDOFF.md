@@ -441,7 +441,7 @@ SECURITY.md                            (audit per-SEC + limitations + policy)
 
 **What shipped:** `GET /api/search?q=<query>&type=<all|users|videos>&limit=<n>&cursor=<c>`
 — search users and videos with offset-based cursor paging, type filter,
-and validation. Endpoint mounted in the authenticated `/api` group.
+and validation. Endpoint mounted in the authenticated `/api` group in `routes.go`.
 
 **Files touched:**
 
@@ -449,16 +449,16 @@ and validation. Endpoint mounted in the authenticated `/api` group.
 sqlc/queries/search.sql                  NEW — SearchUsers, SearchVideos (:many)
 shared/db/search.sql.go                  GENERATED — make sqlc-gen
 api-gateway/handlers/search.go           NEW — SearchHandler + handler + mapper + validation + pagination
-api-gateway/handlers/search_test.go      NEW — 10 unit tests (happy, 401, empty-q, long-q, limit=0, limit-cap, type-filter, tombstone, pagination)
+api-gateway/handlers/search_test.go      NEW — 11 unit tests (happy, 401, empty-q, long-q, limit=0, limit-cap, type-filter, tombstone, pagination, rune-count, underscore)
 api-gateway/routes.go                    MODIFIED — api.GET("/search", searchH.Search)
-scripts/smoketest/phase11_search/main.go NEW — Real HTTP integration smoke test against PostgreSQL (2x back-to-back PASS)
+scripts/smoketest/phase11_search/main.go NEW — Real HTTP integration smoke test using real middleware.Authenticate & PostgreSQL (2x back-to-back PASS)
 HANDOFF.md                               MODIFIED — this section
 ```
 
 **Key Fixes & Refinements (from code review):**
 
 - **SQL queries**:
-  - `LOWER(u.username) = LOWER($2)` for case-insensitive exact match bubble-up.
+  - Separated `query_pattern` (escaped for `ILIKE`) and `raw_query` (raw string for `LOWER(u.username) = LOWER($raw_query)`) so exact match ranking is preserved for queries with underscores/wildcards (e.g. `pratama_dev`).
   - `v.deleted_at IS NULL` to exclude soft-deleted videos.
   - `u.id = $viewer_id` added to private video visibility condition (owner can search own private videos).
 - **Handler & Validation**:
@@ -467,13 +467,14 @@ HANDOFF.md                               MODIFIED — this section
   - `limit + 1` DB lookahead query to accurately omit `next_cursor` when results are exhausted (prevents false cursors).
   - Strict `strconv.Atoi` cursor parsing with max offset cap (100,000) to prevent int32 overflow.
 - **Smoke test**:
-  - Full HTTP integration smoke test against real PostgreSQL database in `mokibox_backend` network.
-  - Seeded test dataset (User A public, User B private followed, User C private unfollowed, User D tombstoned, READY/PENDING/DELETED videos).
-  - Verifies 401 Unauthorized, 400 validation errors, tombstone exclusion, READY status filter, soft-deleted filter, private owner self-search, type filters, pagination, and non-null presigned URLs.
+  - Uses real `middleware.Authenticate` with a `stubTokenVerifier` for authentication testing (tests real route group wiring & 401 response).
+  - Performs direct DB sanity check on seeded dataset before running HTTP assertions.
+  - Removed hardcoded DB passwords; requires `DATABASE_URL` from environment.
+  - Verifies 401 Unauthorized, 400 validation errors, tombstone exclusion, READY status filter, soft-deleted filter, private owner self-search, underscore exact match ranking, type filters, pagination (including next_cursor omission on last page), and non-null presigned URLs.
   - Runs **2x back-to-back PASS**.
 
 **Deviations from issue:**
-
+- Route registered in `routes.go` (`api.GET("/search", ...)`), following gateway architecture convention.
 - Offset paging encoded via base64 `offset:<n>` cursor (issue recommended offset, cursor is an opaque wrapper).
 - Video search does NOT exclude viewer's own videos (per issue spec: "user mencari kontennya sendiri itu wajar").
 
@@ -488,5 +489,6 @@ HANDOFF.md                               MODIFIED — this section
 - `go build ./...` — 0 errors
 - `go vet ./...` — 0 warnings
 - `go test ./...` — all green
-- `docker run --rm --network mokibox_backend -v $PWD:/repo -w /repo -e DATABASE_URL="..." golang:1.25.5-alpine go run ./scripts/smoketest/phase11_search` — PASS 2x back-to-back
+- `scripts/smoketest/phase11_search` — PASS 2x back-to-back
+
 

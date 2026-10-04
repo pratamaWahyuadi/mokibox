@@ -120,10 +120,11 @@ func (h *SearchHandler) Search(c echo.Context) error {
 	// Search Users
 	if searchType == "all" || searchType == "users" {
 		userRows, err := h.Queries.SearchUsers(ctx, db.SearchUsersParams{
-			ViewerID:   viewer.ID,
-			Query:      escapedQ,
-			PageOffset: int32(offset),
-			PageLimit:  int32(limit + 1),
+			ViewerID:     viewer.ID,
+			QueryPattern: escapedQ,
+			RawQuery:     q,
+			PageOffset:   int32(offset),
+			PageLimit:    int32(limit + 1),
 		})
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			slog.Error("SearchUsers failed", "err", err, "viewer_id", viewer.ID, "query", q)
@@ -145,10 +146,10 @@ func (h *SearchHandler) Search(c echo.Context) error {
 	// Search Videos
 	if searchType == "all" || searchType == "videos" {
 		videoRows, err := h.Queries.SearchVideos(ctx, db.SearchVideosParams{
-			ViewerID:   viewer.ID,
-			Query:      escapedQ,
-			PageOffset: int32(offset),
-			PageLimit:  int32(limit + 1),
+			ViewerID:     viewer.ID,
+			QueryPattern: escapedQ,
+			PageOffset:   int32(offset),
+			PageLimit:    int32(limit + 1),
 		})
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			slog.Error("SearchVideos failed", "err", err, "viewer_id", viewer.ID, "query", q)

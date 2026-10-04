@@ -79,7 +79,7 @@ func TestSearch_HappyPath(t *testing.T) {
 
 	store := &mockSearchStore{
 		searchUsersFn: func(ctx context.Context, arg db.SearchUsersParams) ([]db.SearchUsersRow, error) {
-			if arg.Query != "pratama" {
+			if arg.RawQuery != "pratama" {
 				return nil, nil
 			}
 			return []db.SearchUsersRow{
@@ -93,7 +93,7 @@ func TestSearch_HappyPath(t *testing.T) {
 			}, nil
 		},
 		searchVideosFn: func(ctx context.Context, arg db.SearchVideosParams) ([]db.SearchVideosRow, error) {
-			if arg.Query != "pratama" {
+			if arg.QueryPattern != "pratama" {
 				return nil, nil
 			}
 			return []db.SearchVideosRow{
@@ -361,7 +361,7 @@ func TestSearch_LimitCap(t *testing.T) {
 		t.Fatalf("expected status 200, got %d", rec.Code)
 	}
 	// parseLimit caps at videoListMaxLimit (50) -> pageLimit should be limit + 1 = 51
-	if receivedLimit > 51 {
+	if receivedLimit != 51 {
 		t.Errorf("expected limit capped at max 50 (plus 1 for lookahead = 51), got %d", receivedLimit)
 	}
 }
@@ -381,3 +381,33 @@ func TestSearch_RuneCountLimit(t *testing.T) {
 		t.Fatalf("expected status 400 for >100 runes query, got %d", rec.Code)
 	}
 }
+
+func TestSearch_UnderscoreExactMatch(t *testing.T) {
+	viewer := &db.User{ID: uuid.New(), Username: "viewer"}
+	var capturedPattern, capturedRaw string
+
+	store := &mockSearchStore{
+		searchUsersFn: func(ctx context.Context, arg db.SearchUsersParams) ([]db.SearchUsersRow, error) {
+			capturedPattern = arg.QueryPattern
+			capturedRaw = arg.RawQuery
+			return nil, nil
+		},
+	}
+
+	h := NewSearchHandlerForTest(store, &mockR2Store{}, testConfig())
+	c, rec := setupSearchTestContext(http.MethodGet, "/api/search?q=pratama_dev&type=users", viewer)
+	if err := h.Search(c); err != nil {
+		t.Fatalf("unexpected handler error: %v", err)
+	}
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+	if capturedPattern != `pratama\_dev` {
+		t.Errorf("expected QueryPattern to escape underscore to 'pratama\\_dev', got %q", capturedPattern)
+	}
+	if capturedRaw != "pratama_dev" {
+		t.Errorf("expected RawQuery to remain unescaped 'pratama_dev', got %q", capturedRaw)
+	}
+}
+

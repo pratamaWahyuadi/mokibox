@@ -3,24 +3,26 @@
 //
 // This is a real, hermetic HTTP integration smoke test (runs inside
 // the mokibox_backend network against PostgreSQL). It verifies:
-//  1. Auth 401 requirement when unauthenticated.
+//  1. Auth 401 requirement when unauthenticated or invalid token (using real middleware.Authenticate).
 //  2. Validation errors (empty q, q > 100 runes, limit=0, invalid type) return 400.
-//  3. Real SQL filters:
+//  3. Seed sanity check via direct DB queries before assertions.
+//  4. Real SQL filters:
 //     - Tombstoned users (is_active = FALSE) do NOT appear.
 //     - Non-READY videos (status != 'READY') do NOT appear.
 //     - Soft-deleted videos (deleted_at IS NOT NULL) do NOT appear.
 //     - Followed private videos appear; unfollowed private videos do NOT.
 //     - Private owner searching own video DOES appear (owner self-search).
-//  4. Type filters (type=users -> videos=[], type=videos -> users=[]).
-//  5. Pagination (limit=1 returns 1 item + next_cursor; next page returns different item; last page omits next_cursor).
-//  6. Limit cap (limit=9999 is capped).
-//  7. ThumbnailURL and HLSPlaylistURL are non-null and non-empty.
+//     - Underscore search (e.g. user_with_underscore) ranks exact match properly.
+//  5. Type filters (type=users -> videos=[], type=videos -> users=[]).
+//  6. Pagination (limit=1 returns 1 item + next_cursor; next page returns different item; last page omits next_cursor).
+//  7. Limit cap (limit=9999 is capped).
+//  8. ThumbnailURL and HLSPlaylistURL are non-null and non-empty.
 //
 // Usage:
 //
 //	docker run --rm --network mokibox_backend \
 //	    -v $PWD:/repo -w /repo \
-//	    -e DATABASE_URL="postgres://postgres:a9f9994d0b354361a08214a701d28b6e@postgres:5432/tiktok?sslmode=disable" \
+//	    -e DATABASE_URL \
 //	    golang:1.25.5-alpine \
 //	    go run ./scripts/smoketest/phase11_search
 package main
@@ -29,6 +31,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -44,11 +47,23 @@ import (
 	"github.com/labstack/echo/v4"
 
 	"github.com/pratamaWahyuadi/mokibox/api-gateway/handlers"
+	"github.com/pratamaWahyuadi/mokibox/api-gateway/middleware"
 	"github.com/pratamaWahyuadi/mokibox/shared"
 	"github.com/pratamaWahyuadi/mokibox/shared/db"
 )
 
 const usernamePrefix = "smoke-test-search-"
+
+// stubTokenVerifier implements middleware.TokenVerifier for testing.
+// It accepts the raw bearer token as the Zitadel ID (sub).
+type stubTokenVerifier struct{}
+
+func (v *stubTokenVerifier) CheckToken(ctx context.Context, rawToken string) (string, error) {
+	if rawToken == "" || strings.HasPrefix(rawToken, "invalid") {
+		return "", errors.New("unauthorized token")
+	}
+	return rawToken, nil
+}
 
 func main() {
 	log.Println("Running phase11_search smoke test run 1...")
@@ -70,7 +85,7 @@ func runSmoke() error {
 
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
-		dsn = "postgres://postgres:a9f9994d0b354361a08214a701d28b6e@postgres:5432/tiktok?sslmode=disable"
+		return fmt.Errorf("FAIL: DATABASE_URL environment variable is required")
 	}
 
 	sqlDB, err := sql.Open("pgx", dsn)
@@ -111,6 +126,11 @@ func runSmoke() error {
 	if err != nil {
 		return fmt.Errorf("seed userD: %w", err)
 	}
+	// User Underscore: user with underscore in handle for exact match testing
+	userUnderscore, err := seedUser(ctx, sqlDB, usernamePrefix+"user_underscore", "User Underscore", false, true)
+	if err != nil {
+		return fmt.Errorf("seed userUnderscore: %w", err)
+	}
 
 	// Follow userA -> userB
 	if err := q.FollowUser(ctx, db.FollowUserParams{FollowerID: userA.ID, FolloweeID: userB.ID}); err != nil {
@@ -145,6 +165,13 @@ func runSmoke() error {
 		return fmt.Errorf("seed vidC1: %w", err)
 	}
 
+	// -------------------------------------------------------------
+	// Sanity Check Initial Conditions (DB Direct Assertions)
+	// -------------------------------------------------------------
+	if err := verifySeedSanity(ctx, sqlDB, userA.ID, userB.ID, userC.ID, userD.ID, userUnderscore.ID, vidA1.ID, vidB1.ID, vidC1.ID); err != nil {
+		return fmt.Errorf("FAIL: seed sanity check failed: %w", err)
+	}
+
 	// Setup API Config and R2 client
 	cfg := &shared.APIConfig{
 		APIBaseURL:       "http://localhost:8080",
@@ -169,30 +196,12 @@ func runSmoke() error {
 		return fmt.Errorf("NewSearchHandler: %w", err)
 	}
 
-	// Setup Echo router & HTTP server
+	// Setup Echo router & HTTP server using REAL middleware.Authenticate
 	e := echo.New()
-	apiGroup := e.Group("/api")
-
-	// Middleware mock that authenticates based on X-Test-User-ID header
-	apiGroup.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c echo.Context) error {
-			userIDStr := c.Request().Header.Get("X-Test-User-ID")
-			if userIDStr == "" {
-				return next(c)
-			}
-			uid, parseErr := uuid.Parse(userIDStr)
-			if parseErr != nil {
-				return next(c)
-			}
-			u, getErr := q.GetUserByID(c.Request().Context(), uid)
-			if getErr != nil {
-				return next(c)
-			}
-			c.Set("auth.currentUser", &u)
-			return next(c)
-		}
-	})
-
+	apiGroup := e.Group("/api", middleware.Authenticate(middleware.AuthenticateConfig{
+		Verifier: &stubTokenVerifier{},
+		Queries:  q,
+	}))
 	apiGroup.GET("/search", searchH.Search)
 
 	ts := httptest.NewServer(e)
@@ -201,22 +210,35 @@ func runSmoke() error {
 	client := ts.Client()
 
 	// -------------------------------------------------------------
-	// 1. Test Auth Requirement (401 Unauthorized)
+	// 1. Test Auth Requirement (401 Unauthorized via real middleware)
 	// -------------------------------------------------------------
+	// Request without Authorization header
 	unauthReq, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/search?q="+usernamePrefix, nil)
 	unauthRes, err := client.Do(unauthReq)
 	if err != nil {
 		return fmt.Errorf("unauth request failed: %w", err)
 	}
-	defer unauthRes.Body.Close()
+	unauthRes.Body.Close()
 	if unauthRes.StatusCode != http.StatusUnauthorized {
-		return fmt.Errorf("FAIL: unauthenticated request returned status %d, expected 401", unauthRes.StatusCode)
+		return fmt.Errorf("FAIL: unauthenticated request (no header) returned status %d, expected 401", unauthRes.StatusCode)
 	}
 
-	// Helper for making authenticated HTTP requests
-	doAuthGet := func(userID uuid.UUID, queryParams string) (int, []byte, error) {
+	// Request with invalid token
+	invalidTokenReq, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/search?q="+usernamePrefix, nil)
+	invalidTokenReq.Header.Set("Authorization", "Bearer invalid-token-123")
+	invalidTokenRes, err := client.Do(invalidTokenReq)
+	if err != nil {
+		return fmt.Errorf("invalid token request failed: %w", err)
+	}
+	invalidTokenRes.Body.Close()
+	if invalidTokenRes.StatusCode != http.StatusUnauthorized {
+		return fmt.Errorf("FAIL: invalid token request returned status %d, expected 401", invalidTokenRes.StatusCode)
+	}
+
+	// Helper for making authenticated HTTP requests via real middleware.Authenticate
+	doAuthGet := func(user db.User, queryParams string) (int, []byte, error) {
 		req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/search?"+queryParams, nil)
-		req.Header.Set("X-Test-User-ID", userID.String())
+		req.Header.Set("Authorization", "Bearer "+user.ZitadelID)
 		res, err := client.Do(req)
 		if err != nil {
 			return 0, nil, err
@@ -230,7 +252,7 @@ func runSmoke() error {
 	// 2. Test Validation Errors (400 Bad Request)
 	// -------------------------------------------------------------
 	// Empty query
-	code, body, err := doAuthGet(userA.ID, "q=")
+	code, body, err := doAuthGet(userA, "q=")
 	if err != nil || code != http.StatusBadRequest {
 		return fmt.Errorf("FAIL: empty q returned code %d, expected 400", code)
 	}
@@ -240,19 +262,19 @@ func runSmoke() error {
 
 	// Query > 100 runes
 	longQ := strings.Repeat("a", 101)
-	code, _, err = doAuthGet(userA.ID, "q="+longQ)
+	code, _, err = doAuthGet(userA, "q="+longQ)
 	if err != nil || code != http.StatusBadRequest {
 		return fmt.Errorf("FAIL: long q returned code %d, expected 400", code)
 	}
 
 	// limit=0
-	code, _, err = doAuthGet(userA.ID, "q="+usernamePrefix+"&limit=0")
+	code, _, err = doAuthGet(userA, "q="+usernamePrefix+"&limit=0")
 	if err != nil || code != http.StatusBadRequest {
 		return fmt.Errorf("FAIL: limit=0 returned code %d, expected 400", code)
 	}
 
 	// Invalid type
-	code, _, err = doAuthGet(userA.ID, "q="+usernamePrefix+"&type=invalid")
+	code, _, err = doAuthGet(userA, "q="+usernamePrefix+"&type=invalid")
 	if err != nil || code != http.StatusBadRequest {
 		return fmt.Errorf("FAIL: type=invalid returned code %d, expected 400", code)
 	}
@@ -260,7 +282,7 @@ func runSmoke() error {
 	// -------------------------------------------------------------
 	// 3. Test Real SQL Filters & Happy Path (User A searching)
 	// -------------------------------------------------------------
-	code, body, err = doAuthGet(userA.ID, "q="+url.QueryEscape(usernamePrefix))
+	code, body, err = doAuthGet(userA, "q="+url.QueryEscape(usernamePrefix))
 	if err != nil || code != http.StatusOK {
 		return fmt.Errorf("FAIL: search happy path returned code %d, expected 200: %s", code, body)
 	}
@@ -348,9 +370,31 @@ func runSmoke() error {
 	}
 
 	// -------------------------------------------------------------
-	// 4. Test Private Owner Self-Search (User C searching own video)
+	// 4. Test Underscore Search Exact Match Ranking
 	// -------------------------------------------------------------
-	code, body, err = doAuthGet(userC.ID, "q="+url.QueryEscape(usernamePrefix+"videoC1"))
+	code, body, err = doAuthGet(userA, "q="+url.QueryEscape(usernamePrefix+"user_underscore"))
+	if err != nil || code != http.StatusOK {
+		return fmt.Errorf("FAIL: underscore search returned code %d: %s", code, body)
+	}
+	var underscoreResp struct {
+		Data struct {
+			Users []struct {
+				ID       uuid.UUID `json:"id"`
+				Username string    `json:"username"`
+			} `json:"users"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &underscoreResp); err != nil {
+		return fmt.Errorf("FAIL: unmarshal underscore search response: %w", err)
+	}
+	if len(underscoreResp.Data.Users) == 0 || underscoreResp.Data.Users[0].ID != userUnderscore.ID {
+		return fmt.Errorf("FAIL: underscore exact match user not returned as top result")
+	}
+
+	// -------------------------------------------------------------
+	// 5. Test Private Owner Self-Search (User C searching own video)
+	// -------------------------------------------------------------
+	code, body, err = doAuthGet(userC, "q="+url.QueryEscape(usernamePrefix+"videoC1"))
 	if err != nil || code != http.StatusOK {
 		return fmt.Errorf("FAIL: owner self-search returned code %d: %s", code, body)
 	}
@@ -377,10 +421,10 @@ func runSmoke() error {
 	}
 
 	// -------------------------------------------------------------
-	// 5. Test Type Filters
+	// 6. Test Type Filters
 	// -------------------------------------------------------------
 	// type=users -> videos must be []
-	code, body, err = doAuthGet(userA.ID, "q="+url.QueryEscape(usernamePrefix)+"&type=users")
+	code, body, err = doAuthGet(userA, "q="+url.QueryEscape(usernamePrefix)+"&type=users")
 	if err != nil || code != http.StatusOK {
 		return fmt.Errorf("FAIL: type=users search returned code %d", code)
 	}
@@ -389,7 +433,7 @@ func runSmoke() error {
 	}
 
 	// type=videos -> users must be []
-	code, body, err = doAuthGet(userA.ID, "q="+url.QueryEscape(usernamePrefix)+"&type=videos")
+	code, body, err = doAuthGet(userA, "q="+url.QueryEscape(usernamePrefix)+"&type=videos")
 	if err != nil || code != http.StatusOK {
 		return fmt.Errorf("FAIL: type=videos search returned code %d", code)
 	}
@@ -398,10 +442,10 @@ func runSmoke() error {
 	}
 
 	// -------------------------------------------------------------
-	// 6. Test Pagination & Limit Cap
+	// 7. Test Pagination & Last Page Next Cursor Omission
 	// -------------------------------------------------------------
 	// Page 1 with limit=1
-	code, body, err = doAuthGet(userA.ID, "q="+url.QueryEscape(usernamePrefix)+"&type=videos&limit=1")
+	code, body, err = doAuthGet(userA, "q="+url.QueryEscape(usernamePrefix)+"&type=videos&limit=1")
 	if err != nil || code != http.StatusOK {
 		return fmt.Errorf("FAIL: pagination page 1 returned code %d", code)
 	}
@@ -427,8 +471,8 @@ func runSmoke() error {
 
 	cursor := *page1Resp.Pagination.VideosNextCursor
 
-	// Page 2 using cursor
-	code, body, err = doAuthGet(userA.ID, "q="+url.QueryEscape(usernamePrefix)+"&type=videos&limit=1&cursor="+cursor)
+	// Page 2 using cursor (limit=10 to fetch all remaining)
+	code, body, err = doAuthGet(userA, "q="+url.QueryEscape(usernamePrefix)+"&type=videos&limit=10&cursor="+cursor)
 	if err != nil || code != http.StatusOK {
 		return fmt.Errorf("FAIL: pagination page 2 returned code %d", code)
 	}
@@ -438,21 +482,72 @@ func runSmoke() error {
 				ID uuid.UUID `json:"id"`
 			} `json:"videos"`
 		} `json:"data"`
+		Pagination struct {
+			VideosNextCursor *string `json:"videos_next_cursor"`
+		} `json:"pagination"`
 	}
 	if err := json.Unmarshal(body, &page2Resp); err != nil {
 		return fmt.Errorf("FAIL: unmarshal page 2 response: %w", err)
 	}
-	if len(page2Resp.Data.Videos) != 1 {
-		return fmt.Errorf("FAIL: page 2 expected 1 video, got %d", len(page2Resp.Data.Videos))
+	if len(page2Resp.Data.Videos) == 0 {
+		return fmt.Errorf("FAIL: page 2 expected remaining videos, got 0")
 	}
 	if page2Resp.Data.Videos[0].ID == page1Resp.Data.Videos[0].ID {
 		return fmt.Errorf("FAIL: page 2 returned same video as page 1")
 	}
+	// Assertion: Last page must omit videos_next_cursor (nil)
+	if page2Resp.Pagination.VideosNextCursor != nil {
+		return fmt.Errorf("FAIL: last page expected videos_next_cursor to be omitted (nil), got %s", *page2Resp.Pagination.VideosNextCursor)
+	}
 
 	// Limit cap (limit=9999) -> 200 OK
-	code, _, err = doAuthGet(userA.ID, "q="+url.QueryEscape(usernamePrefix)+"&limit=9999")
+	code, _, err = doAuthGet(userA, "q="+url.QueryEscape(usernamePrefix)+"&limit=9999")
 	if err != nil || code != http.StatusOK {
 		return fmt.Errorf("FAIL: limit=9999 returned code %d, expected 200", code)
+	}
+
+	return nil
+}
+
+func verifySeedSanity(ctx context.Context, dbConn *sql.DB, userAID, userBID, userCID, userDID, userUnderscoreID, vidA1ID, vidB1ID, vidC1ID uuid.UUID) error {
+	// 1. Verify user counts and statuses
+	var activeCount, tombstoneCount int
+	err := dbConn.QueryRowContext(ctx, `
+		SELECT 
+			COUNT(*) FILTER (WHERE is_active = TRUE),
+			COUNT(*) FILTER (WHERE is_active = FALSE)
+		FROM users WHERE username LIKE $1
+	`, usernamePrefix+"%").Scan(&activeCount, &tombstoneCount)
+	if err != nil {
+		return fmt.Errorf("query user counts: %w", err)
+	}
+	if activeCount != 4 { // UserA, UserB, UserC, UserUnderscore
+		return fmt.Errorf("expected 4 active seeded users, got %d", activeCount)
+	}
+	if tombstoneCount != 1 { // UserD
+		return fmt.Errorf("expected 1 tombstoned seeded user, got %d", tombstoneCount)
+	}
+
+	// 2. Verify video counts and statuses
+	var readyCount, pendingCount, deletedCount int
+	err = dbConn.QueryRowContext(ctx, `
+		SELECT
+			COUNT(*) FILTER (WHERE status = 'READY' AND deleted_at IS NULL),
+			COUNT(*) FILTER (WHERE status = 'PENDING_UPLOAD'),
+			COUNT(*) FILTER (WHERE deleted_at IS NOT NULL)
+		FROM videos WHERE title LIKE $1
+	`, usernamePrefix+"%").Scan(&readyCount, &pendingCount, &deletedCount)
+	if err != nil {
+		return fmt.Errorf("query video counts: %w", err)
+	}
+	if readyCount != 3 { // VidA1, VidB1, VidC1
+		return fmt.Errorf("expected 3 READY videos, got %d", readyCount)
+	}
+	if pendingCount != 1 { // VidA2
+		return fmt.Errorf("expected 1 PENDING_UPLOAD video, got %d", pendingCount)
+	}
+	if deletedCount != 1 { // VidA3
+		return fmt.Errorf("expected 1 DELETED video, got %d", deletedCount)
 	}
 
 	return nil

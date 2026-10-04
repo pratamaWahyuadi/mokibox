@@ -26,18 +26,19 @@ WHERE u.is_active = TRUE
   AND u.id <> $1
   AND (u.username ILIKE '%' || $2::text || '%' OR u.display_name ILIKE '%' || $2::text || '%')
 ORDER BY
-    (LOWER(u.username) = LOWER($2::text)) DESC,
+    (LOWER(u.username) = LOWER($3::text)) DESC,
     length(u.username) ASC,
     COALESCE((SELECT count(*) FROM follows f WHERE f.followee_id = u.id), 0) DESC,
     u.username ASC
-LIMIT $4 OFFSET $3
+LIMIT $5 OFFSET $4
 `
 
 type SearchUsersParams struct {
-	ViewerID   uuid.UUID `json:"viewer_id"`
-	Query      string    `json:"query"`
-	PageOffset int32     `json:"page_offset"`
-	PageLimit  int32     `json:"page_limit"`
+	ViewerID     uuid.UUID `json:"viewer_id"`
+	QueryPattern string    `json:"query_pattern"`
+	RawQuery     string    `json:"raw_query"`
+	PageOffset   int32     `json:"page_offset"`
+	PageLimit    int32     `json:"page_limit"`
 }
 
 type SearchUsersRow struct {
@@ -58,7 +59,8 @@ type SearchUsersRow struct {
 func (q *Queries) SearchUsers(ctx context.Context, arg SearchUsersParams) ([]SearchUsersRow, error) {
 	rows, err := q.db.QueryContext(ctx, searchUsers,
 		arg.ViewerID,
-		arg.Query,
+		arg.QueryPattern,
+		arg.RawQuery,
 		arg.PageOffset,
 		arg.PageLimit,
 	)
@@ -121,10 +123,10 @@ LIMIT $4 OFFSET $3
 `
 
 type SearchVideosParams struct {
-	ViewerID   uuid.UUID `json:"viewer_id"`
-	Query      string    `json:"query"`
-	PageOffset int32     `json:"page_offset"`
-	PageLimit  int32     `json:"page_limit"`
+	ViewerID     uuid.UUID `json:"viewer_id"`
+	QueryPattern string    `json:"query_pattern"`
+	PageOffset   int32     `json:"page_offset"`
+	PageLimit    int32     `json:"page_limit"`
 }
 
 type SearchVideosRow struct {
@@ -156,7 +158,7 @@ type SearchVideosRow struct {
 func (q *Queries) SearchVideos(ctx context.Context, arg SearchVideosParams) ([]SearchVideosRow, error) {
 	rows, err := q.db.QueryContext(ctx, searchVideos,
 		arg.ViewerID,
-		arg.Query,
+		arg.QueryPattern,
 		arg.PageOffset,
 		arg.PageLimit,
 	)
