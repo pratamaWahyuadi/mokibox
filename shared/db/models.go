@@ -21,6 +21,22 @@ type Comment struct {
 	CreatedAt time.Time     `json:"created_at"`
 }
 
+type Conversation struct {
+	ID        uuid.UUID      `json:"id"`
+	Type      string         `json:"type"`
+	Name      sql.NullString `json:"name"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+}
+
+type ConversationMember struct {
+	ConversationID uuid.UUID `json:"conversation_id"`
+	UserID         uuid.UUID `json:"user_id"`
+	Role           string    `json:"role"`
+	JoinedAt       time.Time `json:"joined_at"`
+	LastReadAt     time.Time `json:"last_read_at"`
+}
+
 type Follow struct {
 	FollowerID uuid.UUID `json:"follower_id"`
 	FolloweeID uuid.UUID `json:"followee_id"`
@@ -31,6 +47,18 @@ type Like struct {
 	UserID    uuid.UUID `json:"user_id"`
 	VideoID   uuid.UUID `json:"video_id"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+type Message struct {
+	ID             uuid.UUID       `json:"id"`
+	ConversationID uuid.UUID       `json:"conversation_id"`
+	SenderID       uuid.UUID       `json:"sender_id"`
+	MessageType    string          `json:"message_type"`
+	Content        sql.NullString  `json:"content"`
+	MediaUrl       sql.NullString  `json:"media_url"`
+	MediaMetadata  json.RawMessage `json:"media_metadata"`
+	CreatedAt      time.Time       `json:"created_at"`
+	DeletedAt      sql.NullTime    `json:"deleted_at"`
 }
 
 type Notification struct {

@@ -1,7 +1,10 @@
 version: "2"
 sql:
   - engine: "postgresql"
-    schema: "../migrations/001_init.sql"
+    schema:
+      - "../migrations/001_init.sql"
+      - "../migrations/002_reconcile_users_grant.sql"
+      - "../migrations/003_chat.sql"
     # Queries live in per-table files under sqlc/queries/.
     # sqlc picks up every *.sql file in the directory in
     # alphabetical order; split was introduced in phase-1.5

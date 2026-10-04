@@ -47,6 +47,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
@@ -311,6 +312,19 @@ func NewRouter(d RouterDeps) *echo.Echo {
 		panic(fmt.Sprintf("api-gateway: NewAccountHandler: %v", err))
 	}
 	api.DELETE("/users/me", ah.DeleteMe)
+
+	// Chat system (WhatsApp-style messaging)
+	chatHub := handlers.NewChatHub()
+	go chatHub.Run(context.Background())
+
+	ch := handlers.NewChatHandler(d.Queries, d.R2, chatHub, d.Cfg)
+	api.POST("/chat/conversations", ch.CreateConversation)
+	api.GET("/chat/conversations", ch.ListConversations)
+	api.GET("/chat/conversations/:id/messages", ch.ListMessages)
+	api.POST("/chat/conversations/:id/messages", ch.SendMessage)
+	api.POST("/chat/conversations/:id/read", ch.MarkRead)
+	api.POST("/chat/upload-intent", ch.UploadIntent)
+	api.GET("/chat/ws", ch.HandleWebSocket)
 
 	return e
 }
