@@ -410,4 +410,3 @@ func TestSearch_UnderscoreExactMatch(t *testing.T) {
 		t.Errorf("expected RawQuery to remain unescaped 'pratama_dev', got %q", capturedRaw)
 	}
 }
-
