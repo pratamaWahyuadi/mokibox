@@ -436,3 +436,59 @@ scripts/smoketest/phase10_reconcile/   (16-assertion E2E)
 docker-compose.yml                     (gateway+nginx hardening, RECONCILE_* env)
 SECURITY.md                            (audit per-SEC + limitations + policy)
 ```
+
+## Issue #57 — GET /api/search (2026-10-04)
+
+**What shipped:** `GET /api/search?q=<query>&type=<all|users|videos>&limit=<n>&cursor=<c>`
+— search users and videos with offset-based cursor paging, type filter,
+and validation. Endpoint mounted in the authenticated `/api` group in `routes.go`.
+
+**Files touched:**
+
+```
+sqlc/queries/search.sql                  NEW — SearchUsers, SearchVideos (:many)
+shared/db/search.sql.go                  GENERATED — make sqlc-gen
+api-gateway/handlers/search.go           NEW — SearchHandler + handler + mapper + validation + pagination
+api-gateway/handlers/search_test.go      NEW — 11 unit tests (happy, 401, empty-q, long-q, limit=0, limit-cap, type-filter, tombstone, pagination, rune-count, underscore)
+api-gateway/routes.go                    MODIFIED — api.GET("/search", searchH.Search)
+scripts/smoketest/phase11_search/main.go NEW — Real HTTP integration smoke test using real middleware.Authenticate & PostgreSQL (2x back-to-back PASS)
+HANDOFF.md                               MODIFIED — this section
+```
+
+**Key Fixes & Refinements (from code review):**
+
+- **SQL queries**:
+  - Separated `query_pattern` (escaped for `ILIKE`) and `raw_query` (raw string for `LOWER(u.username) = LOWER($raw_query)`) so exact match ranking is preserved for queries with underscores/wildcards (e.g. `pratama_dev`).
+  - `v.deleted_at IS NULL` to exclude soft-deleted videos.
+  - `u.id = $viewer_id` added to private video visibility condition (owner can search own private videos).
+- **Handler & Validation**:
+  - `utf8.RuneCountInString` for exact 100-character length check.
+  - `escapeSQLWildcards` helper to escape `%` and `_` SQL wildcards in user input.
+  - `limit + 1` DB lookahead query to accurately omit `next_cursor` when results are exhausted (prevents false cursors).
+  - Strict `strconv.Atoi` cursor parsing with max offset cap (100,000) to prevent int32 overflow.
+- **Smoke test**:
+  - Uses real `middleware.Authenticate` with a `stubTokenVerifier` for authentication testing (tests real route group wiring & 401 response).
+  - Performs direct DB sanity check on seeded dataset before running HTTP assertions.
+  - Removed hardcoded DB passwords; requires `DATABASE_URL` from environment.
+  - Verifies 401 Unauthorized, 400 validation errors, tombstone exclusion, READY status filter, soft-deleted filter, private owner self-search, underscore exact match ranking, type filters, pagination (including next_cursor omission on last page), and non-null presigned URLs.
+  - Runs **2x back-to-back PASS**.
+
+**Deviations from issue:**
+- Route registered in `routes.go` (`api.GET("/search", ...)`), following gateway architecture convention.
+- Offset paging encoded via base64 `offset:<n>` cursor (issue recommended offset, cursor is an opaque wrapper).
+- Video search does NOT exclude viewer's own videos (per issue spec: "user mencari kontennya sendiri itu wajar").
+
+**Known Limitations (per issue):**
+
+- Sequential scan `ILIKE '%...%'` — acceptable for current dataset. Add `pg_trgm` GIN index when users table exceeds ~50k rows.
+- Offset paging — acceptable for short search result sets. Switch to keyset/rank paging if result sets grow large.
+- Block filter (issue #10) not implemented — only self-exclusion on user search. TODO when block table lands.
+
+**Verification:**
+
+- `go build ./...` — 0 errors
+- `go vet ./...` — 0 warnings
+- `go test ./...` — all green
+- `scripts/smoketest/phase11_search` — PASS 2x back-to-back
+
+
