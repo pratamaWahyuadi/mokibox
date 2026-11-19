@@ -89,11 +89,10 @@ func formatVideoTime(t time.Time) string {
 	return t.UTC().Format("2006-01-02T15:04:05.999999Z07:00")
 }
 
-// userSummaryFromRow builds a UserSummary from the user
-// fields sqlc returns in GetVideoDetail / ListFeedVideos.
-// A nil receiver would panic; the caller must pass a
-// populated row.
-func userSummaryFromRow(displayName, avatarURL sql.NullString, id uuid.UUID, username string, isPrivate bool) UserSummary {
+// userSummaryFromRow builds a UserSummary from a joined user row.
+func userSummaryFromRow(ctx context.Context, r2 r2ObjectStore, cfg *shared.APIConfig,
+	displayName, avatarURL, avatarKey sql.NullString, id uuid.UUID, username string, isPrivate bool,
+) (UserSummary, error) {
 	out := UserSummary{
 		ID:        id,
 		Username:  username,
@@ -103,11 +102,33 @@ func userSummaryFromRow(displayName, avatarURL sql.NullString, id uuid.UUID, use
 		v := displayName.String
 		out.DisplayName = &v
 	}
-	if avatarURL.Valid {
-		v := avatarURL.String
-		out.AvatarURL = &v
+	url, err := resolveAvatarURL(ctx, r2, cfg, avatarURL, avatarKey)
+	if err != nil {
+		return UserSummary{}, err
 	}
-	return out
+	out.AvatarURL = url
+	return out, nil
+}
+
+func resolveAvatarURL(ctx context.Context, r2 r2ObjectStore, cfg *shared.APIConfig, avatarURL, avatarKey sql.NullString) (*string, error) {
+	if avatarKey.Valid && avatarKey.String != "" {
+		if r2 == nil {
+			return nil, fmt.Errorf("avatar R2 store is not configured")
+		}
+		url, err := r2.PresignGet(ctx, avatarKey.String, presignTTL(cfg))
+		if err != nil {
+			return nil, fmt.Errorf("presign avatar %s: %w", avatarKey.String, err)
+		}
+		if url == "" {
+			return nil, fmt.Errorf("presign avatar %s returned an empty URL", avatarKey.String)
+		}
+		return &url, nil
+	}
+	if avatarURL.Valid && avatarURL.String != "" {
+		url := avatarURL.String
+		return &url, nil
+	}
+	return nil, nil
 }
 
 // buildThumbnailURL returns nil if the video is not

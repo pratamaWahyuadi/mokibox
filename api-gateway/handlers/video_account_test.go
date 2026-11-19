@@ -500,6 +500,7 @@ func TestUploadIntent_ReusesPendingRowAndRotatesKey(t *testing.T) {
 // stubAccountTx records the delete cascade call order.
 type stubAccountTx struct {
 	listVideoKeys      func(ctx context.Context, userID uuid.UUID) ([]db.ListVideoKeysByUserRow, error)
+	avatarKeys         db.GetUserAvatarKeysRow
 	tombstoneErr       error
 	calls              []string
 }
@@ -510,6 +511,10 @@ func (s *stubAccountTx) ListVideoKeysByUser(ctx context.Context, userID uuid.UUI
 		return nil, errors.New("stubAccountTx: listVideoKeys not scripted")
 	}
 	return s.listVideoKeys(ctx, userID)
+}
+func (s *stubAccountTx) GetUserAvatarKeys(ctx context.Context, id uuid.UUID) (db.GetUserAvatarKeysRow, error) {
+	s.calls = append(s.calls, "GetUserAvatarKeys")
+	return s.avatarKeys, nil
 }
 func (s *stubAccountTx) DecrementLikesForUser(ctx context.Context, userID uuid.UUID) error {
 	s.calls = append(s.calls, "DecrementLikesForUser")
@@ -579,6 +584,10 @@ func TestDeleteMe_HappyPathCascadeAndEnqueue(t *testing.T) {
 				{R2Key: "uploads/x/2/source.mp4"},
 			}, nil
 		},
+		avatarKeys: db.GetUserAvatarKeysRow{
+			AvatarKey:        sql.NullString{String: "avatars/user/current.png", Valid: true},
+			PendingAvatarKey: sql.NullString{String: "avatars/user/pending.png", Valid: true},
+		},
 	}
 	runner := &stubAccountRunner{tx: tx}
 	enq := &stubEnqueuer{}
@@ -601,7 +610,7 @@ func TestDeleteMe_HappyPathCascadeAndEnqueue(t *testing.T) {
 	}
 	// Full cascade order (LLD section 11).
 	wantOrder := []string{
-		"ListVideoKeysByUser", "DecrementLikesForUser", "DecrementCommentsForUser",
+		"ListVideoKeysByUser", "GetUserAvatarKeys", "DecrementLikesForUser", "DecrementCommentsForUser",
 		"DeleteVideosByUser", "DeleteFollowsByFollower", "DeleteFollowsByFollowee",
 		"DeleteLikesByUser", "DeleteCommentsByUser", "DeleteNotificationsForUser",
 		"DeleteNotificationsByActor", "TombstoneUser",
@@ -617,9 +626,9 @@ func TestDeleteMe_HappyPathCascadeAndEnqueue(t *testing.T) {
 	if !runner.committed {
 		t.Error("successful delete must commit")
 	}
-	// r2_key + valid thumbnail key per video = 3 keys.
-	if len(enq.cleanupObjectsKeys) != 1 || len(enq.cleanupObjectsKeys[0]) != 3 {
-		t.Errorf("cleanup keys = %+v, want 1 batch with 3 keys", enq.cleanupObjectsKeys)
+	// Video and current/pending avatar keys are all removed.
+	if len(enq.cleanupObjectsKeys) != 1 || len(enq.cleanupObjectsKeys[0]) != 5 {
+		t.Errorf("cleanup keys = %+v, want 1 batch with 5 keys", enq.cleanupObjectsKeys)
 	}
 }
 

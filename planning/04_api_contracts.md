@@ -27,9 +27,9 @@
 
 3. **HLS private** membutuhkan endpoint tambahan `GET /api/videos/:id/playlist.m3u8`. `hls_playlist_url` pada video detail akan menunjuk ke endpoint ini, bukan URL statis R2. Endpoint ini me-rewrite playlist agar berisi presigned URL untuk tiap segmen `.ts`.
 
-4. **`avatar_url`** di response API dapat berupa presigned URL jika file avatar disimpan di R2 private.
+4. **Avatar privat di R2:** `avatar_url` response adalah presigned GET URL untuk `avatar_key`; avatar tetap dapat dilihat siapa pun yang memiliki URL, termasuk dari akun privat.
 
-5. **Username dianggap immutable** melalui API. `PUT /api/users/me` hanya mengubah `display_name`, `bio`, `avatar_url`, dan `is_private`.
+5. **Username dianggap immutable** melalui API. `PUT /api/users/me` mengubah `display_name`, `bio`, `avatar_url` eksternal (kompatibilitas), dan `is_private`; bila `avatar_url` diberikan, avatar R2 aktif dan intent upload tertunda dibersihkan.
 
 6. **Visibility**:
    - User non-aktif (`is_active = false`) tidak bisa diakses publik.
@@ -172,6 +172,8 @@ Contoh per status:
 |---|---|---|---|
 | GET | `/api/users/me` | Profil sendiri | JWT |
 | PUT | `/api/users/me` | Update profil sendiri | JWT |
+| POST | `/api/users/me/avatar/upload-intent` | Minta presigned URL foto profil | JWT |
+| POST | `/api/users/me/avatar/confirm` | Validasi dan aktifkan foto profil | JWT |
 | DELETE | `/api/users/me` | Hapus akun sendiri + data lokal | JWT |
 | GET | `/api/users/:id` | Profil user lain | JWT |
 | GET | `/api/users/:id/videos` | List video milik user | JWT |
@@ -368,6 +370,7 @@ Request body:
 ```
 
 Semua field opsional. `username` tidak bisa diubah.
+`avatar_url` hanya untuk URL eksternal lama. Untuk foto yang diunggah ke MokiBox gunakan endpoint upload-intent/confirm. Jika field `avatar_url` diberikan, referensi avatar R2 aktif dan upload tertunda dibersihkan.
 
 Response `200 OK`:
 
@@ -387,6 +390,73 @@ Response `200 OK`:
 ```
 
 Error: `400 VALIDATION_ERROR`, `401`, `500`.
+
+---
+
+### `POST /api/users/me/avatar/upload-intent`
+
+Minta presigned PUT URL untuk mengunggah foto profil langsung ke R2 privat.
+
+Headers: `Authorization: Bearer <access_token>`, `Content-Type: application/json`.
+
+Request body:
+
+```json
+{
+  "content_type": "image/png"
+}
+```
+
+`content_type` hanya boleh `image/jpeg`, `image/png`, atau `image/webp`.
+
+Response `201 Created`:
+
+```json
+{
+  "data": {
+    "avatar_key": "avatars/<userID>/<uploadUUID>.png",
+    "http_method": "PUT",
+    "upload_url": "https://r2.example.com/...",
+    "upload_headers": {
+      "Content-Type": "image/png"
+    },
+    "max_size_bytes": 5242880,
+    "expires_at": "2025-01-01T10:15:00Z"
+  }
+}
+```
+
+Client wajib mengirim PUT dengan header `Content-Type` yang sama. URL berlaku sesuai `PRESIGN_UPLOAD_EXPIRY` (default 15 menit). Batas 5 MiB diverifikasi saat confirm; presigned PUT tidak membatasi ukuran di sisi R2. R2 bucket CORS harus mengizinkan metode `PUT`, header `Content-Type`, dan origin frontend.
+
+Error: `400 VALIDATION_ERROR`, `401`, `404`, `500`.
+
+---
+
+### `POST /api/users/me/avatar/confirm`
+
+Memvalidasi dan mengaktifkan foto yang sudah di-upload.
+
+Request body:
+
+```json
+{
+  "avatar_key": "avatars/<userID>/<uploadUUID>.png"
+}
+```
+
+Backend memastikan key cocok dengan intent user yang masih berlaku, object ada di R2, ukuran aktual > 0 dan ≤ 5 MiB, serta format hasil decode cocok dengan JPEG/PNG/WebP yang diminta. Key aktif disimpan pada `users.avatar_key`; response memberi URL GET bertanda tangan:
+
+```json
+{
+  "data": {
+    "avatar_url": "https://r2.example.com/<presigned-get>"
+  }
+}
+```
+
+Avatar bersifat publik, termasuk pada akun privat. URL presigned dapat diakses siapa pun yang memilikinya hingga kedaluwarsa. Foto lama dan upload yang ditolak dijadwalkan untuk cleanup.
+
+Error: `400 VALIDATION_ERROR`, `400 UPLOAD_SIZE_INVALID`, `401`, `409 UPLOAD_MISSING`, `409 AVATAR_UPLOAD_CONFLICT`, `500`.
 
 ---
 

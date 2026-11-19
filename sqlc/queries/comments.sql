@@ -9,7 +9,7 @@ VALUES ($1, $2, $3, $4)
 RETURNING *;
 
 -- name: GetCommentByID :one
-SELECT c.*, u.username, u.display_name, u.avatar_url, u.is_private
+SELECT c.*, u.username, u.display_name, u.avatar_url, u.avatar_key, u.is_private
 FROM comments c
 JOIN users u ON u.id = c.user_id
 WHERE c.id = $1
@@ -28,6 +28,7 @@ SELECT
     u.username,
     u.display_name,
     u.avatar_url,
+    u.avatar_key,
     u.is_private
 FROM comments c
 JOIN users u ON u.id = c.user_id

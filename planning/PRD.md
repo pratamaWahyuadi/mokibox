@@ -47,7 +47,7 @@ Masalah yang dibereskan PRD ini:
 | ID | User Story | Prioritas |
 |---|---|---|
 | US-01 | Sebagai user, saya bisa login via Zitadel (email/password atau Google) dan API otomatis mengenali saya | P0 |
-| US-02 | Sebagai user, saya bisa melihat dan mengupdate profil saya | P0 |
+| US-02 | Sebagai user, saya bisa melihat dan mengupdate profil, termasuk mengganti foto profil | P0 |
 | US-03 | Sebagai user, saya bisa upload video 30–60 detik dan melihat status processing sampai READY/FAILED | P0 |
 | US-04 | Sebagai user, saya bisa melihat feed video dari akun publik + akun yang saya follow | P0 |
 | US-05 | Sebagai user, saya bisa follow/unfollow user lain | P0 |
@@ -71,9 +71,11 @@ Masalah yang dibereskan PRD ini:
 | FR-AUTH-02 | **Tidak ada logika refresh token di sisi Go.** Refresh token rotation sepenuhnya ditangani Zitadel. Kalau token expired, API cukup return `401` dan client redirect ke Zitadel. |
 | FR-AUTH-03 | Auth middleware melakukan **get-or-create user** berdasarkan `sub` (zitadel_id). Kalau user sudah dinonaktifkan (`is_active = false`), tolak request. |
 | FR-AUTH-04 | Zitadel di-self-host via docker-compose terpisah (`../zitadel-compose/`, lihat LLD asumsi A11), dikonfigurasi dengan hosted UI, email/password internal, **dan Google Sign-In**. Compose project MokiBox refer Zitadel sebagai external dependency lewat `ZITADEL_ISSUER_URL`; tidak ada service `zitadel` di MokiBox `docker-compose.yml`. |
-| FR-AUTH-05 | Backend wajib menyediakan endpoint webhook Zitadel untuk event `user.deleted` / `user.deactivated`. Webhook wajib diverifikasi signature/secret-nya. Jika event valid, backend harus menonaktifkan user di PostgreSQL (`is_active = false`) untuk `user.deactivated`, atau menjalankan prosedur penghapusan data lokal untuk `user.deleted`. || FR-USER-01 | Endpoint profil: `GET /api/users/me`, `PUT /api/users/me`, `GET /api/users/:id`, `GET /api/users/:id/videos`. |
-| FR-USER-02 | Data PII yang disimpan hanya: `username`, `display_name`, `bio`, `avatar_url`. **Email dari Zitadel tidak disimpan di PostgreSQL.** |
-| FR-USER-03 | Delete account P0: hapus semua data user (profil, video, like, comment, follow, notifikasi) + file di R2. Penghapusan di Zitadel bisa via UI/admin atau webhook, tapi data lokal harus bersih. |
+| FR-AUTH-05 | Backend wajib menyediakan endpoint webhook Zitadel untuk event `user.deleted` / `user.deactivated`. Webhook wajib diverifikasi signature/secret-nya. Jika event valid, backend harus menonaktifkan user di PostgreSQL (`is_active = false`) untuk `user.deactivated`, atau menjalankan prosedur penghapusan data lokal untuk `user.deleted`. |
+| FR-USER-01 | Endpoint profil: `GET /api/users/me`, `PUT /api/users/me`, `GET /api/users/:id`, `GET /api/users/:id/videos`. |
+| FR-USER-02 | Data profil yang disimpan: `username`, `display_name`, `bio`, dan referensi avatar. File avatar ada di R2; API mengembalikan URL bertanda tangan. **Email dari Zitadel tidak disimpan di PostgreSQL.** |
+| FR-USER-03 | Delete account P0: hapus semua data user (profil, video, avatar di R2, like, comment, follow, notifikasi). Penghapusan di Zitadel bisa via UI/admin atau webhook, tapi data lokal harus bersih. |
+| FR-USER-04 | User terautentikasi dapat mengganti foto profil melalui upload-intent dan confirm. Hanya JPEG, PNG, atau WebP dengan ukuran maksimum 5 MiB; backend memeriksa pemilik intent, masa berlaku, ukuran aktual, dan format file sebelum mengaktifkan avatar baru. Avatar dapat dilihat publik, termasuk pada akun privat. |
 
 ### 4.2 Upload & Transcode
 
@@ -504,6 +506,8 @@ Sibling (di luar repo):
 |---|---|---|---|---|
 | GET | `/api/users/me` | JWT | Profil sendiri | P0 |
 | PUT | `/api/users/me` | JWT | Update profil | P0 |
+| POST | `/api/users/me/avatar/upload-intent` | JWT | Minta presigned URL untuk foto profil | P0 |
+| POST | `/api/users/me/avatar/confirm` | JWT | Validasi dan aktifkan foto profil | P0 |
 | GET | `/api/users/:id` | JWT | Profil user lain | P0 |
 | GET | `/api/users/:id/videos` | JWT | Video milik user | P0 |
 | POST | `/api/users/:id/follow` | JWT | Follow | P0 |

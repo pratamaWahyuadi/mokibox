@@ -11,7 +11,7 @@ Dokumen ini adalah turunan langsung dari PRD. Skema memakai **PostgreSQL 16**, *
    - set `is_active = false`  
    - set `deleted_at = now()`  
    - hapus semua baris terkait: videos, likes, comments, follows, notifications  
-   - bersihkan `display_name`, `bio`, `avatar_url`  
+   - bersihkan `display_name`, `bio`, `avatar_url`, `avatar_key`, `pending_avatar_key`, dan `pending_avatar_expires_at`
    - `username` diubah menjadi placeholder unik seperti `deleted_<uuid>` karena kolom `username` tetap `NOT NULL`
 
 2. **Status `DELETED` pada `videos` tidak langsung menghapus baris.**  
@@ -42,6 +42,9 @@ erDiagram
         text display_name
         text bio
         text avatar_url
+        text avatar_key
+        text pending_avatar_key
+        timestamptz pending_avatar_expires_at
         boolean is_private
         boolean is_active
         timestamptz deleted_at
@@ -250,6 +253,17 @@ CREATE INDEX idx_notifications_actor
 
 ---
 
+## DDL Migration — `003_user_avatar_upload.sql`
+
+```sql
+ALTER TABLE users
+    ADD COLUMN avatar_key TEXT,
+    ADD COLUMN pending_avatar_key TEXT,
+    ADD COLUMN pending_avatar_expires_at TIMESTAMPTZ,
+    ADD CONSTRAINT chk_users_pending_avatar_upload
+        CHECK ((pending_avatar_key IS NULL) = (pending_avatar_expires_at IS NULL));
+```
+
 ## Penjelasan Tabel dan Kolom
 
 ---
@@ -265,7 +279,10 @@ Menyimpan data profil minimal. **Email dari Zitadel tidak disimpan.**
 | `username` | `TEXT` | NOT NULL, UNIQUE | – | Username publik. Saat tombstone, diganti placeholder unik `deleted_<uuid>`. |
 | `display_name` | `TEXT` | NULL | – | Nama tampilan. |
 | `bio` | `TEXT` | NULL | – | Bio profil. |
-| `avatar_url` | `TEXT` | NULL | – | URL avatar. Hanya referensi; file tetap di R2. |
+| `avatar_url` | `TEXT` | NULL | – | URL avatar eksternal lama (kompatibilitas); file upload baru direferensikan oleh `avatar_key`. |
+| `avatar_key` | `TEXT` | NULL | – | Object key avatar aktif di R2 privat; API mengubahnya menjadi presigned GET URL. |
+| `pending_avatar_key` | `TEXT` | NULL | – | Key upload avatar yang menunggu confirm, terikat pada user. |
+| `pending_avatar_expires_at` | `TIMESTAMPTZ` | NULL | – | Batas waktu confirm upload avatar; harus NULL bersamaan dengan `pending_avatar_key`. |
 | `is_private` | `BOOLEAN` | NOT NULL | `FALSE` | Akun private. Jika `TRUE`, hanya follower yang bisa lihat video. |
 | `is_active` | `BOOLEAN` | NOT NULL | `TRUE` | `FALSE` untuk user dinonaktifkan/dihapus. Cek di auth middleware. |
 | `deleted_at` | `TIMESTAMPTZ` | NULL | – | Diisi saat event `user.deleted`. |

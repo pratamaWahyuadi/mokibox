@@ -140,6 +140,7 @@ SELECT
     u.username,
     u.display_name,
     u.avatar_url,
+    u.avatar_key,
     u.is_private,
     f.created_at,
     EXISTS (
@@ -168,6 +169,7 @@ type ListFollowersRow struct {
 	Username        string         `json:"username"`
 	DisplayName     sql.NullString `json:"display_name"`
 	AvatarUrl       sql.NullString `json:"avatar_url"`
+	AvatarKey       sql.NullString `json:"avatar_key"`
 	IsPrivate       bool           `json:"is_private"`
 	CreatedAt       time.Time      `json:"created_at"`
 	IsFollowingBack bool           `json:"is_following_back"`
@@ -195,6 +197,7 @@ func (q *Queries) ListFollowers(ctx context.Context, arg ListFollowersParams) ([
 			&i.Username,
 			&i.DisplayName,
 			&i.AvatarUrl,
+			&i.AvatarKey,
 			&i.IsPrivate,
 			&i.CreatedAt,
 			&i.IsFollowingBack,
@@ -218,6 +221,7 @@ SELECT
     u.username,
     u.display_name,
     u.avatar_url,
+    u.avatar_key,
     u.is_private,
     f.created_at
 FROM follows f
@@ -241,6 +245,7 @@ type ListFollowingRow struct {
 	Username    string         `json:"username"`
 	DisplayName sql.NullString `json:"display_name"`
 	AvatarUrl   sql.NullString `json:"avatar_url"`
+	AvatarKey   sql.NullString `json:"avatar_key"`
 	IsPrivate   bool           `json:"is_private"`
 	CreatedAt   time.Time      `json:"created_at"`
 }
@@ -265,6 +270,7 @@ func (q *Queries) ListFollowing(ctx context.Context, arg ListFollowingParams) ([
 			&i.Username,
 			&i.DisplayName,
 			&i.AvatarUrl,
+			&i.AvatarKey,
 			&i.IsPrivate,
 			&i.CreatedAt,
 		); err != nil {

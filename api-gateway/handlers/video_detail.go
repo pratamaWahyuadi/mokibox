@@ -153,14 +153,19 @@ func (h *VideoHandler) GetVideoDetail(c echo.Context) error {
 		}
 	}
 
-	return shared.RespondOK(c, videoObjectFromDetail(ctx, h.R2, h.Cfg, row, isOwner))
+	response, err := videoObjectFromDetail(ctx, h.R2, h.Cfg, row, isOwner)
+	if err != nil {
+		slog.Error("presign video owner avatar failed", "err", err, "user_id", row.UserID2)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load video avatar URL"))
+	}
+	return shared.RespondOK(c, response)
 }
 
 // videoObjectFromDetail maps a sqlc GetVideoDetailRow
 // into the wire VideoObject. The row carries the full
 // user join + liked_by_me so no extra queries are
 // needed.
-func videoObjectFromDetail(ctx context.Context, r2 r2ObjectStore, cfg *shared.APIConfig, r db.GetVideoDetailRow, isOwner bool) VideoObject {
+func videoObjectFromDetail(ctx context.Context, r2 r2ObjectStore, cfg *shared.APIConfig, r db.GetVideoDetailRow, isOwner bool) (VideoObject, error) {
 	out := VideoObject{
 		ID:            r.ID,
 		UserID:        r.UserID,
@@ -187,20 +192,12 @@ func videoObjectFromDetail(ctx context.Context, r2 r2ObjectStore, cfg *shared.AP
 	}
 	out.ThumbnailURL = buildThumbnailURL(ctx, r2, cfg, r.ThumbnailKey, r.Status)
 	out.HLSPlaylistURL = buildPlaylistURL(cfg, r.ID, r.Status)
-	out.User = &UserSummary{
-		ID:        r.UserID2,
-		Username:  r.UserUsername,
-		IsPrivate: r.UserIsPrivate,
+	user, err := userSummaryFromRow(ctx, r2, cfg, r.UserDisplayName, r.UserAvatarUrl, r.UserAvatarKey, r.UserID2, r.UserUsername, r.UserIsPrivate)
+	if err != nil {
+		return VideoObject{}, err
 	}
-	if r.UserDisplayName.Valid {
-		v := r.UserDisplayName.String
-		out.User.DisplayName = &v
-	}
-	if r.UserAvatarUrl.Valid {
-		v := r.UserAvatarUrl.String
-		out.User.AvatarURL = &v
-	}
-	return out
+	out.User = userSummaryPtr(user)
+	return out, nil
 }
 
 // videoStatusResponse is the on-the-wire shape of

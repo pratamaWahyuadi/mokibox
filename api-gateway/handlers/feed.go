@@ -142,7 +142,12 @@ func (h *FeedHandler) HomeFeed(c echo.Context) error {
 
 	items := make([]VideoObject, 0, len(rows))
 	for _, r := range rows {
-		items = append(items, videoObjectFromFeedRow(ctx, h.R2, h.Cfg, r))
+		item, err := videoObjectFromFeedRow(ctx, h.R2, h.Cfg, r)
+		if err != nil {
+			slog.Error("presign feed owner avatar failed", "err", err, "user_id", r.UserID2)
+			return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load feed avatar URLs"))
+		}
+		items = append(items, item)
 	}
 
 	var nextCursor *string
@@ -159,7 +164,7 @@ func (h *FeedHandler) HomeFeed(c echo.Context) error {
 // into the wire VideoObject. is_owner is always false
 // because the feed query excludes the viewer's own
 // videos upstream (v.user_id <> $1).
-func videoObjectFromFeedRow(ctx context.Context, r2 r2ObjectStore, cfg *shared.APIConfig, r db.ListFeedVideosRow) VideoObject {
+func videoObjectFromFeedRow(ctx context.Context, r2 r2ObjectStore, cfg *shared.APIConfig, r db.ListFeedVideosRow) (VideoObject, error) {
 	out := VideoObject{
 		ID:            r.ID,
 		UserID:        r.UserID,
@@ -186,8 +191,12 @@ func videoObjectFromFeedRow(ctx context.Context, r2 r2ObjectStore, cfg *shared.A
 	}
 	out.ThumbnailURL = buildThumbnailURL(ctx, r2, cfg, r.ThumbnailKey, r.Status)
 	out.HLSPlaylistURL = buildPlaylistURL(cfg, r.ID, r.Status)
-	out.User = userSummaryPtr(userSummaryFromRow(r.UserDisplayName, r.UserAvatarUrl, r.UserID2, r.UserUsername, r.UserIsPrivate))
-	return out
+	user, err := userSummaryFromRow(ctx, r2, cfg, r.UserDisplayName, r.UserAvatarUrl, r.UserAvatarKey, r.UserID2, r.UserUsername, r.UserIsPrivate)
+	if err != nil {
+		return VideoObject{}, err
+	}
+	out.User = userSummaryPtr(user)
+	return out, nil
 }
 
 // userSummaryPtr returns a *UserSummary so the JSON

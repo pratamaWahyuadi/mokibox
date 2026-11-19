@@ -3,6 +3,20 @@
 State captured 2026-09-09, post domain-migration lokal (DOMAIN-MIGRATION-LOCAL-PROMPT.md).
 Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
 
+## Profile avatar upload — implementasi lokal
+
+- Backend menyediakan `POST /api/users/me/avatar/upload-intent` dan
+  `POST /api/users/me/avatar/confirm` untuk upload langsung ke R2 privat.
+- Format JPEG/PNG/WebP, maksimum 5 MiB (divalidasi saat confirm), dengan
+  intent ber-expiry; avatar dapat dilihat publik termasuk dari akun privat.
+- `avatar_key` aktif/pending disimpan terpisah dari `avatar_url` legacy.
+  Update URL legacy, confirm, dan penghapusan akun menjadwalkan cleanup key.
+- Kontrak API, PRD, schema, dan LLD telah diperbarui. `make sqlc-gen`,
+  `go test ./...`, dan `go vet ./...` lulus untuk checkout lokal.
+- Belum dijalankan smoke test PostgreSQL/R2 langsung. Working directory
+  yang tersedia tidak memiliki metadata Git, sehingga branch/PR baru belum
+  dapat dibuat; perubahan ini tidak mengubah atau menggabungkan PR #68.
+
 ## Production deploy VPS (2026-09-10) — AKTIF (prompt 2 selesai)
 
 MokiBox production live di VPS multi-tenant `43.157.227.130`,

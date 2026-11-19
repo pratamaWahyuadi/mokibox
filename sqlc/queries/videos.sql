@@ -77,6 +77,7 @@ SELECT
     u.username      AS user_username,
     u.display_name  AS user_display_name,
     u.avatar_url    AS user_avatar_url,
+    u.avatar_key    AS user_avatar_key,
     u.is_private    AS user_is_private,
     EXISTS (
         SELECT 1 FROM likes l
@@ -129,6 +130,7 @@ SELECT
     u.username      AS user_username,
     u.display_name  AS user_display_name,
     u.avatar_url    AS user_avatar_url,
+    u.avatar_key    AS user_avatar_key,
     u.is_private    AS user_is_private,
     EXISTS (
         SELECT 1 FROM likes l

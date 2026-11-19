@@ -53,7 +53,7 @@ func (q *Queries) DeleteCommentsByUser(ctx context.Context, userID uuid.UUID) er
 }
 
 const getCommentByID = `-- name: GetCommentByID :one
-SELECT c.id, c.video_id, c.user_id, c.parent_id, c.content, c.created_at, u.username, u.display_name, u.avatar_url, u.is_private
+SELECT c.id, c.video_id, c.user_id, c.parent_id, c.content, c.created_at, u.username, u.display_name, u.avatar_url, u.avatar_key, u.is_private
 FROM comments c
 JOIN users u ON u.id = c.user_id
 WHERE c.id = $1
@@ -70,6 +70,7 @@ type GetCommentByIDRow struct {
 	Username    string         `json:"username"`
 	DisplayName sql.NullString `json:"display_name"`
 	AvatarUrl   sql.NullString `json:"avatar_url"`
+	AvatarKey   sql.NullString `json:"avatar_key"`
 	IsPrivate   bool           `json:"is_private"`
 }
 
@@ -86,6 +87,7 @@ func (q *Queries) GetCommentByID(ctx context.Context, id uuid.UUID) (GetCommentB
 		&i.Username,
 		&i.DisplayName,
 		&i.AvatarUrl,
+		&i.AvatarKey,
 		&i.IsPrivate,
 	)
 	return i, err
@@ -139,6 +141,7 @@ SELECT
     u.username,
     u.display_name,
     u.avatar_url,
+    u.avatar_key,
     u.is_private
 FROM comments c
 JOIN users u ON u.id = c.user_id
@@ -166,6 +169,7 @@ type ListCommentsByVideoRow struct {
 	Username    string         `json:"username"`
 	DisplayName sql.NullString `json:"display_name"`
 	AvatarUrl   sql.NullString `json:"avatar_url"`
+	AvatarKey   sql.NullString `json:"avatar_key"`
 	IsPrivate   bool           `json:"is_private"`
 }
 
@@ -195,6 +199,7 @@ func (q *Queries) ListCommentsByVideo(ctx context.Context, arg ListCommentsByVid
 			&i.Username,
 			&i.DisplayName,
 			&i.AvatarUrl,
+			&i.AvatarKey,
 			&i.IsPrivate,
 		); err != nil {
 			return nil, err

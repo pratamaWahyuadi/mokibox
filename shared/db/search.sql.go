@@ -20,6 +20,7 @@ SELECT
     u.username,
     u.display_name,
     u.avatar_url,
+    u.avatar_key,
     u.is_private
 FROM users u
 WHERE u.is_active = TRUE
@@ -46,6 +47,7 @@ type SearchUsersRow struct {
 	Username    string         `json:"username"`
 	DisplayName sql.NullString `json:"display_name"`
 	AvatarUrl   sql.NullString `json:"avatar_url"`
+	AvatarKey   sql.NullString `json:"avatar_key"`
 	IsPrivate   bool           `json:"is_private"`
 }
 
@@ -76,6 +78,7 @@ func (q *Queries) SearchUsers(ctx context.Context, arg SearchUsersParams) ([]Sea
 			&i.Username,
 			&i.DisplayName,
 			&i.AvatarUrl,
+			&i.AvatarKey,
 			&i.IsPrivate,
 		); err != nil {
 			return nil, err
@@ -101,6 +104,7 @@ SELECT
     u.username      AS user_username,
     u.display_name  AS user_display_name,
     u.avatar_url    AS user_avatar_url,
+    u.avatar_key    AS user_avatar_key,
     u.is_private    AS user_is_private,
     EXISTS (
         SELECT 1 FROM likes l
@@ -149,6 +153,7 @@ type SearchVideosRow struct {
 	UserUsername    string         `json:"user_username"`
 	UserDisplayName sql.NullString `json:"user_display_name"`
 	UserAvatarUrl   sql.NullString `json:"user_avatar_url"`
+	UserAvatarKey   sql.NullString `json:"user_avatar_key"`
 	UserIsPrivate   bool           `json:"user_is_private"`
 	LikedByMe       bool           `json:"liked_by_me"`
 }
@@ -189,6 +194,7 @@ func (q *Queries) SearchVideos(ctx context.Context, arg SearchVideosParams) ([]S
 			&i.UserUsername,
 			&i.UserDisplayName,
 			&i.UserAvatarUrl,
+			&i.UserAvatarKey,
 			&i.UserIsPrivate,
 			&i.LikedByMe,
 		); err != nil {

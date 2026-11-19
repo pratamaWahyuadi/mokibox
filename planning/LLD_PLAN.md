@@ -16,7 +16,7 @@ Beberapa celah teknis yang tidak dieksplisitkan di dokumen sumber saya tutup den
 | A4 | **HLS multi-variant 480p + 720p.** | Worker menghasilkan `master.m3u8` + `480p/index.m3u8` + `720p/index.m3u8`. Endpoint `GET /api/videos/:id/playlist.m3u8` mengembalikan master playlist yang sudah di-rewrite; `?variant=480p|720p` untuk variant playlist. URL variant memakai media token. |
 | A5 | **Media token HMAC untuk akses playlist**, bukan JWT di query string. | Video response berisi `hls_playlist_url` dengan `?token=<short-lived-hmac>`. Token valid 15 menit, terikat ke `video_id`. Endpoint playlist menerima `Authorization: Bearer` JWT **atau** `?token=`. |
 | A6 | **Delete user = tombstone, bukan hard delete `users`.** | `is_active=false`, `deleted_at=NOW()`, `username` diubah placeholder `deleted_<uuid>`, PII di-null. Semua data relasional dihapus. Ini mencegah JWT lama membuat user baru lagi. |
-| A7 | **`avatar_url` dianggap URL eksternal / hasil upload di luar scope.** | Tidak ada endpoint upload avatar. API hanya menyimpan dan mengembalikan URL string. |
+| A7 | **Avatar upload termasuk scope setelah keputusan user.** | Upload memakai presigned PUT ke R2 privat. `avatar_key` menyimpan key aktif; `avatar_url` tetap kompatibel untuk URL eksternal lama. Confirm memeriksa intent, ukuran ≤ 5 MiB, serta format JPEG/PNG/WebP; semua response avatar memakai presigned GET. |
 | A8 | **Worker role PostgreSQL dibatasi.** | Role `tiktok_api` dapat CRUD semua tabel app. Role `tiktok_worker` hanya `SELECT, UPDATE, DELETE` pada `videos`. Tidak ada superuser untuk worker. |
 | A9 | **Counter `likes_count`, `comments_count`, `views_count` diupdate di aplikasi dalam transaksi**, bukan trigger. | Konsisten dengan catatan ERD. Untuk delete comment dengan reply, dipakai recursive CTE untuk menghitung seluruh subtree sebelum delete. |
 | A10 | **Endpoint `DELETE /api/users/me` wajib ada**, walau tidak ada di tabel endpoint PRD asli, karena API Contract menambahkannya untuk US-09. | Diimplementasikan di Fase 8. |
@@ -529,9 +529,15 @@ Semua endpoint `/api/*` kecuali webhook bisa mengenali user dari JWT Zitadel. Us
      ```
    - `GetMe`: return `UserProfile`.
    - `UpdateMe`:
-     - Body: `display_name`, `bio`, `avatar_url`, `is_private` — semua opsional.
+     - Body: `display_name`, `bio`, `avatar_url` (legacy URL eksternal), `is_private` — semua opsional.
      - `username` immutable.
-     - Pakai `UpdateUserProfile` dengan `sqlc.narg`.
+     - Pakai `UpdateUserProfile` dengan `sqlc.narg`. Bila `avatar_url` dikirim, key avatar R2 aktif dan pending dibersihkan; key lama dijadwalkan untuk cleanup.
+   - Penggantian foto profil memakai endpoint terpisah:
+     - `POST /api/users/me/avatar/upload-intent`: buat key `avatars/<userID>/<uploadUUID>.<ext>`, simpan intent kedaluwarsa, dan kembalikan presigned PUT.
+     - `POST /api/users/me/avatar/confirm`: hanya menerima intent aktif milik user; periksa object size dan decode format aktual, lalu pindahkan key ke `avatar_key`.
+     - Upload langsung ke R2 privat; jangan mengalirkan file melalui API. URL response `avatar_url` adalah presigned GET dan avatar bersifat publik termasuk pada akun privat.
+     - Batas: JPEG, PNG, atau WebP; maksimum 5 MiB diperiksa saat confirm (presigned PUT tidak membatasi ukuran pada R2); expiry mengikuti `PRESIGN_UPLOAD_EXPIRY` (default 15 menit).
+     - Bucket CORS harus mengizinkan `PUT` dan header `Content-Type` dari origin frontend.
    - `GetUserProfile`:
      - `GetUserProfileWithStats`.
      - Jika user tidak ada / `is_active=false` → `404 NOT_FOUND`.

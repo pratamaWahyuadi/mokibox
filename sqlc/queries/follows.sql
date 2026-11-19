@@ -39,6 +39,7 @@ SELECT
     u.username,
     u.display_name,
     u.avatar_url,
+    u.avatar_key,
     u.is_private,
     f.created_at,
     EXISTS (
@@ -60,6 +61,7 @@ SELECT
     u.username,
     u.display_name,
     u.avatar_url,
+    u.avatar_key,
     u.is_private,
     f.created_at
 FROM follows f

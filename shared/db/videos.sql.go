@@ -248,6 +248,7 @@ SELECT
     u.username      AS user_username,
     u.display_name  AS user_display_name,
     u.avatar_url    AS user_avatar_url,
+    u.avatar_key    AS user_avatar_key,
     u.is_private    AS user_is_private,
     EXISTS (
         SELECT 1 FROM likes l
@@ -285,6 +286,7 @@ type GetVideoDetailRow struct {
 	UserUsername    string         `json:"user_username"`
 	UserDisplayName sql.NullString `json:"user_display_name"`
 	UserAvatarUrl   sql.NullString `json:"user_avatar_url"`
+	UserAvatarKey   sql.NullString `json:"user_avatar_key"`
 	UserIsPrivate   bool           `json:"user_is_private"`
 	LikedByMe       bool           `json:"liked_by_me"`
 }
@@ -315,6 +317,7 @@ func (q *Queries) GetVideoDetail(ctx context.Context, arg GetVideoDetailParams) 
 		&i.UserUsername,
 		&i.UserDisplayName,
 		&i.UserAvatarUrl,
+		&i.UserAvatarKey,
 		&i.UserIsPrivate,
 		&i.LikedByMe,
 	)
@@ -474,6 +477,7 @@ SELECT
     u.username      AS user_username,
     u.display_name  AS user_display_name,
     u.avatar_url    AS user_avatar_url,
+    u.avatar_key    AS user_avatar_key,
     u.is_private    AS user_is_private,
     EXISTS (
         SELECT 1 FROM likes l
@@ -523,6 +527,7 @@ type ListFeedVideosRow struct {
 	UserUsername    string         `json:"user_username"`
 	UserDisplayName sql.NullString `json:"user_display_name"`
 	UserAvatarUrl   sql.NullString `json:"user_avatar_url"`
+	UserAvatarKey   sql.NullString `json:"user_avatar_key"`
 	UserIsPrivate   bool           `json:"user_is_private"`
 	LikedByMe       bool           `json:"liked_by_me"`
 }
@@ -574,6 +579,7 @@ func (q *Queries) ListFeedVideos(ctx context.Context, arg ListFeedVideosParams) 
 			&i.UserUsername,
 			&i.UserDisplayName,
 			&i.UserAvatarUrl,
+			&i.UserAvatarKey,
 			&i.UserIsPrivate,
 			&i.LikedByMe,
 		); err != nil {

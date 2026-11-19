@@ -8,7 +8,7 @@
 // process crashes or Redis blips between the two, the DB no
 // longer has any row pointing at the R2 keys - the objects
 // under uploads/<userID>/, thumbs/<userID>/, hls/<userID>/
-// are permanent orphans that only storage bills will ever
+// and avatars/<userID>/ are permanent orphans that only storage bills will ever
 // find.
 //
 // This sweeper closes that gap. It does NOT touch the
@@ -26,7 +26,7 @@
 //     never returned by the query - the sweeper cannot
 //     touch them even if it wanted to.
 //  2. For each user (batch-capped, default 100), list the
-//     three R2 prefixes. Any object found there is, by
+//     four R2 prefixes. Any object found there is, by
 //     definition, an orphan: the user is past grace, so
 //     the post-commit enqueue had every chance to run.
 //  3. Dry-run mode (RECONCILE_DRY_RUN=true): log the
@@ -37,8 +37,8 @@
 //     auditability (issue Safety criteria).
 //
 // Safety (issue Safety criteria):
-//   - only the three whitelisted prefixes are ever listed
-//     (uploads/, thumbs/, hls/ + "/<userID>/"); the helper
+//   - only the four whitelisted prefixes are ever listed
+//     (uploads/, thumbs/, hls/, avatars/ + "/<userID>/"); the helper
 //     itself additionally refuses empty / slash-only /
 //     unterminated prefixes (bucket-wipe impossible);
 //   - corrupt rows (tombstone flag without deleted_at, or
@@ -70,7 +70,7 @@ import (
 // ever look at (issue Safety criteria: refuse to operate
 // outside these). Each is composed with "/<userID>/" so a
 // user's subtree cannot escape its own prefix.
-var reconcilePrefixes = [3]string{"uploads", "thumbs", "hls"}
+var reconcilePrefixes = [4]string{"uploads", "thumbs", "hls", "avatars"}
 
 // HandleReconcileTick is the asynq handler for
 // shared.TypeReconcileTick. See the package comment for
@@ -175,7 +175,7 @@ func (w *Worker) HandleReconcileTick(ctx context.Context, t *asynq.Task) error {
 
 // listUserOrphanKeys lists every object the given
 // (already tombstoned, past-grace) user still holds under
-// the three whitelisted prefixes. Sequential per user per
+// the four whitelisted prefixes. Sequential per user per
 // issue Technical Notes (v1: avoid R2 rate limits).
 func (w *Worker) listUserOrphanKeys(ctx context.Context, userID uuid.UUID) ([]string, error) {
 	var keys []string

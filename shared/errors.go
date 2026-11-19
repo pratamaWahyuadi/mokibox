@@ -50,6 +50,11 @@ const (
 	// 409.
 	CodeVideoStatusConflict ErrorCode = "VIDEO_STATUS_CONFLICT"
 
+	// CodeAvatarUploadConflict is returned when an avatar
+	// upload intent is expired, replaced, or otherwise stale.
+	// 409.
+	CodeAvatarUploadConflict ErrorCode = "AVATAR_UPLOAD_CONFLICT"
+
 	// CodeVideoNotReady is returned when a client tries to
 	// consume a video (play, like, comment) that has not
 	// finished processing. 409.
@@ -114,6 +119,7 @@ var knownErrorCodes = []ErrorCode{
 	CodeForbidden,
 	CodeNotFound,
 	CodeVideoStatusConflict,
+	CodeAvatarUploadConflict,
 	CodeVideoNotReady,
 	CodeUploadMissing,
 	CodeUploadSizeInvalid,
@@ -133,6 +139,7 @@ var (
 	ErrForbidden           = errors.New("forbidden")
 	ErrNotFound            = errors.New("not found")
 	ErrVideoStatusConflict = errors.New("video status conflict")
+	ErrAvatarUploadConflict = errors.New("avatar upload conflict")
 	ErrVideoNotReady       = errors.New("video not ready")
 	ErrUploadMissing       = errors.New("upload missing")
 	ErrUploadSizeInvalid   = errors.New("upload size invalid")
@@ -158,6 +165,8 @@ func httpStatusFor(err error) int {
 	case errors.Is(err, ErrNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, ErrVideoStatusConflict):
+		return http.StatusConflict
+	case errors.Is(err, ErrAvatarUploadConflict):
 		return http.StatusConflict
 	case errors.Is(err, ErrVideoNotReady):
 		return http.StatusConflict
@@ -200,7 +209,7 @@ func httpStatusForCode(code ErrorCode) int {
 		return http.StatusForbidden
 	case CodeNotFound:
 		return http.StatusNotFound
-	case CodeVideoStatusConflict, CodeVideoNotReady, CodeUploadMissing:
+	case CodeVideoStatusConflict, CodeAvatarUploadConflict, CodeVideoNotReady, CodeUploadMissing:
 		return http.StatusConflict
 	case CodeRateLimited:
 		return http.StatusTooManyRequests
@@ -224,6 +233,8 @@ func codeFor(err error) ErrorCode {
 		return CodeNotFound
 	case errors.Is(err, ErrVideoStatusConflict):
 		return CodeVideoStatusConflict
+	case errors.Is(err, ErrAvatarUploadConflict):
+		return CodeAvatarUploadConflict
 	case errors.Is(err, ErrVideoNotReady):
 		return CodeVideoNotReady
 	case errors.Is(err, ErrUploadMissing):
