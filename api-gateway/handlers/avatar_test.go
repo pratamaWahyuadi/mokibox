@@ -348,3 +348,21 @@ func TestAvatarURLMappingPresignsPrivateAvatarForProfileAndSummary(t *testing.T)
 		t.Errorf("PresignGet calls = %d, want 2", presignCalls)
 	}
 }
+
+func TestUserSummaryOmitsAvatarWhenPresignFails(t *testing.T) {
+	r2 := &stubR2{
+		presignGet: func(context.Context, string, time.Duration) (string, error) {
+			return "", errors.New("R2 unavailable")
+		},
+	}
+	key := "avatars/" + testViewerID.String() + "/" + uuid.NewString() + ".png"
+	got, err := userSummaryFromRow(context.Background(), r2, &shared.APIConfig{},
+		sql.NullString{}, sql.NullString{}, sql.NullString{String: key, Valid: true},
+		testViewerID, "viewer", false)
+	if err != nil {
+		t.Fatalf("userSummaryFromRow error = %v, want nil", err)
+	}
+	if got.AvatarURL != nil {
+		t.Errorf("avatar_url = %v, want nil when presigning fails", got.AvatarURL)
+	}
+}

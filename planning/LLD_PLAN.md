@@ -531,7 +531,7 @@ Semua endpoint `/api/*` kecuali webhook bisa mengenali user dari JWT Zitadel. Us
    - `UpdateMe`:
      - Body: `display_name`, `bio`, `avatar_url` (legacy URL eksternal), `is_private` — semua opsional.
      - `username` immutable.
-     - Pakai `UpdateUserProfile` dengan `sqlc.narg`. Bila `avatar_url` dikirim, key avatar R2 aktif dan pending dibersihkan; key lama dijadwalkan untuk cleanup.
+     - Pakai `UpdateUserProfile` dengan `sqlc.narg`. Presigned URL avatar milik user sendiri yang di-echo diperlakukan sebagai no-op agar key aktif tidak terhapus; penggantian avatar upload hanya melalui confirm. URL eksternal legacy yang berbeda masih dapat mengganti avatar dan menjadwalkan key lama untuk cleanup.
    - Penggantian foto profil memakai endpoint terpisah:
      - `POST /api/users/me/avatar/upload-intent`: buat key `avatars/<userID>/<uploadUUID>.<ext>`, simpan intent kedaluwarsa, dan kembalikan presigned PUT.
      - `POST /api/users/me/avatar/confirm`: hanya menerima intent aktif milik user; periksa object size dan decode format aktual, lalu pindahkan key ke `avatar_key`.

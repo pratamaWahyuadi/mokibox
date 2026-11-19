@@ -370,7 +370,7 @@ Request body:
 ```
 
 Semua field opsional. `username` tidak bisa diubah.
-`avatar_url` hanya untuk URL eksternal lama. Untuk foto yang diunggah ke MokiBox gunakan endpoint upload-intent/confirm. Jika field `avatar_url` diberikan, referensi avatar R2 aktif dan upload tertunda dibersihkan.
+`avatar_url` hanya untuk URL eksternal lama. Untuk foto yang diunggah ke MokiBox gunakan endpoint upload-intent/confirm. Jika URL eksternal yang berbeda diberikan, referensi avatar R2 aktif dan upload tertunda dibersihkan. Jika `avatar_url` berisi presigned URL avatar R2 milik user yang sama (misalnya klien mengirim balik nilai dari GET), backend memperlakukannya sebagai nilai tidak berubah dan mempertahankan avatar. Klien sebaiknya tidak mengirim `avatar_url` kecuali memang mengubah URL eksternal legacy.
 
 Response `200 OK`:
 

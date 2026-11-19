@@ -179,8 +179,7 @@ func (w *Worker) HandleReconcileTick(ctx context.Context, t *asynq.Task) error {
 // issue Technical Notes (v1: avoid R2 rate limits).
 func (w *Worker) listUserOrphanKeys(ctx context.Context, userID uuid.UUID) ([]string, error) {
 	var keys []string
-	for _, root := range reconcilePrefixes {
-		prefix := fmt.Sprintf("%s/%s/", root, userID)
+	for _, prefix := range reconcileUserPrefixes(userID) {
 		found, err := w.R2.ListObjectsByPrefix(ctx, prefix, 0)
 		if err != nil {
 			return nil, fmt.Errorf("list %s: %w", prefix, err)
@@ -188,6 +187,14 @@ func (w *Worker) listUserOrphanKeys(ctx context.Context, userID uuid.UUID) ([]st
 		keys = append(keys, found...)
 	}
 	return keys, nil
+}
+
+func reconcileUserPrefixes(userID uuid.UUID) [len(reconcilePrefixes)]string {
+	var prefixes [len(reconcilePrefixes)]string
+	for i, root := range reconcilePrefixes {
+		prefixes[i] = fmt.Sprintf("%s/%s/", root, userID)
+	}
+	return prefixes
 }
 
 // sampleKeys returns up to n keys for log lines so a huge

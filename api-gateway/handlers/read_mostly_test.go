@@ -323,6 +323,62 @@ func TestUpdateMe_ExternalAvatarCleansActiveAndPendingObjects(t *testing.T) {
 	}
 }
 
+func TestUpdateMe_EchoedPresignedAvatarURLKeepsR2Avatar(t *testing.T) {
+	activeKey := "avatars/" + testViewerID.String() + "/active.png"
+	echoedURL := "https://acct.r2.example/mokibox/" + activeKey +
+		"?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=smoke&X-Amz-Signature=signature"
+	const refreshedURL = "https://acct.r2.example/mokibox/avatars/refreshed.png?X-Amz-Signature=fresh"
+	store := &stubUserStore{
+		updateProfile: func(_ context.Context, arg db.UpdateUserProfileParams) (db.UpdateUserProfileRow, error) {
+			if arg.AvatarUrl.Valid {
+				t.Errorf("echoed presigned avatar URL must not be persisted: %+v", arg.AvatarUrl)
+			}
+			return db.UpdateUserProfileRow{
+				ID:        arg.ID,
+				Username:  "viewer",
+				IsActive:  true,
+				AvatarKey: sql.NullString{String: activeKey, Valid: true},
+			}, nil
+		},
+	}
+	r2 := &stubR2{
+		presignGet: func(_ context.Context, key string, _ time.Duration) (string, error) {
+			if key != activeKey {
+				t.Errorf("PresignGet key = %q, want %q", key, activeKey)
+			}
+			return refreshedURL, nil
+		},
+	}
+	queue := &stubEnqueuer{}
+	uh := newUserHandlerForTest(store)
+	uh.R2 = r2
+	uh.Queue = queue
+	uh.Cfg = &shared.APIConfig{
+		R2Endpoint: "https://acct.r2.example",
+		R2Bucket:   "mokibox",
+	}
+	e := harnessAuthEcho(viewerUser(), http.MethodPut, "/api/users/me", uh.UpdateMe)
+
+	body, err := json.Marshal(map[string]string{"avatar_url": echoedURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := doJSON(e, http.MethodPut, "/api/users/me", string(body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		AvatarURL *string `json:"avatar_url"`
+	}
+	decodeData(t, rec, &got)
+	if got.AvatarURL == nil || *got.AvatarURL != refreshedURL {
+		t.Errorf("avatar_url = %v, want refreshed URL %q", got.AvatarURL, refreshedURL)
+	}
+	if len(queue.cleanupObjectsKeys) != 0 {
+		t.Errorf("echoed URL must not clean up active avatar: %v", queue.cleanupObjectsKeys)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Follow endpoints.
 // ---------------------------------------------------------------------------

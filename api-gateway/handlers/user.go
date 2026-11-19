@@ -25,6 +25,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
@@ -196,6 +198,10 @@ func (h *UserHandler) UpdateMe(c echo.Context) error {
 		return shared.RespondError(c, err)
 	}
 
+	if req.AvatarURL != nil && isPresignedAvatarURLForUser(*req.AvatarURL, user.ID, h.Cfg) {
+		req.AvatarURL = nil
+	}
+
 	updated, err := h.Queries.UpdateUserProfile(c.Request().Context(), db.UpdateUserProfileParams{
 		ID:          user.ID,
 		DisplayName: nullStringPtr(req.DisplayName),
@@ -236,6 +242,29 @@ func (h *UserHandler) UpdateMe(c echo.Context) error {
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load avatar URL"))
 	}
 	return shared.RespondOK(c, resp)
+}
+
+func isPresignedAvatarURLForUser(rawURL string, userID uuid.UUID, cfg *shared.APIConfig) bool {
+	if cfg == nil || cfg.R2Endpoint == "" || cfg.R2Bucket == "" {
+		return false
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.User != nil || parsed.Fragment != "" {
+		return false
+	}
+	endpoint, err := url.Parse(cfg.R2Endpoint)
+	if err != nil || !strings.EqualFold(parsed.Scheme, "https") ||
+		!strings.EqualFold(parsed.Host, endpoint.Host) {
+		return false
+	}
+	prefix := strings.TrimRight(endpoint.Path, "/") + "/" + cfg.R2Bucket + "/avatars/" + userID.String() + "/"
+	if !strings.HasPrefix(parsed.Path, prefix) {
+		return false
+	}
+	query := parsed.Query()
+	return query.Get("X-Amz-Algorithm") == "AWS4-HMAC-SHA256" &&
+		query.Get("X-Amz-Credential") != "" &&
+		query.Get("X-Amz-Signature") != ""
 }
 
 func (h *UserHandler) enqueueProfileAvatarCleanup(userID uuid.UUID, key string) {

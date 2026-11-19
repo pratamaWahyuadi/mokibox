@@ -253,7 +253,7 @@ CREATE INDEX idx_notifications_actor
 
 ---
 
-## DDL Migration — `003_user_avatar_upload.sql`
+## DDL Migration — `008_user_avatar_upload.sql`
 
 ```sql
 ALTER TABLE users

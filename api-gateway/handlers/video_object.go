@@ -24,6 +24,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -104,7 +105,8 @@ func userSummaryFromRow(ctx context.Context, r2 r2ObjectStore, cfg *shared.APICo
 	}
 	url, err := resolveAvatarURL(ctx, r2, cfg, avatarURL, avatarKey)
 	if err != nil {
-		return UserSummary{}, err
+		slog.Warn("presign user avatar failed; omitting avatar URL", "err", err, "user_id", id)
+		return out, nil
 	}
 	out.AvatarURL = url
 	return out, nil

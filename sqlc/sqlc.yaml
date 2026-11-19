@@ -3,7 +3,7 @@ sql:
   - engine: "postgresql"
     schema:
       - "../migrations/001_init.sql"
-      - "../migrations/003_user_avatar_upload.sql"
+      - "../migrations/008_user_avatar_upload.sql"
     # Queries live in per-table files under sqlc/queries/.
     # sqlc picks up every *.sql file in the directory in
     # alphabetical order; split was introduced in phase-1.5
