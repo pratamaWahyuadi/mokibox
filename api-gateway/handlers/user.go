@@ -334,18 +334,18 @@ func (h *UserHandler) GetUserProfile(c echo.Context) error {
 // subset of the full VideoObject defined in the API
 // contract:
 //
-//   - thumbnail_url and hls_playlist_url are nil because
-//     presigned R2 GET + media-token signing is wired in
-//     phase 6 (feed + video detail). The API contract
-//     already says these fields are null for non-READY
-//     videos, so the same wire value works for both
-//     phases.
-//   - liked_by_me is also nil for the same reason (phase
-//     7 implements the like flow).
-//   - user is nil for the same reason (the contract's
-//     nested UserSummary is filled in by phase 6, which
-//     has the R2 presigner and follow-graph query
-//     available).
+//	- thumbnail_url and hls_playlist_url are nil because
+//	  presigned R2 GET + media-token signing is wired in
+//	  phase 6 (feed + video detail). The API contract
+//	  already says these fields are null for non-READY
+//	  videos, so the same wire value works for both
+//	  phases.
+//	- liked_by_me is also nil for the same reason (phase
+//	  7 implements the like flow).
+//	- user is nil for the same reason (the contract's
+//	  nested UserSummary is filled in by phase 6, which
+//	  has the R2 presigner and follow-graph query
+//	  available).
 //
 // Listing this subset keeps phase 3 honest with the
 // LLD "JANGAN lebih" rule; phase 6 will replace the
@@ -372,15 +372,15 @@ type userVideoItem struct {
 // URLs are intentional (see userVideoItem doc).
 func videoToItem(v db.Video, isOwner bool) userVideoItem {
 	item := userVideoItem{
-		ID:            v.ID,
-		UserID:        v.UserID,
-		Status:        v.Status,
-		RetryCount:    int(v.RetryCount),
-		LikesCount:    int(v.LikesCount),
-		ViewsCount:    int(v.ViewsCount),
+		ID:          v.ID,
+		UserID:      v.UserID,
+		Status:      v.Status,
+		RetryCount:  int(v.RetryCount),
+		LikesCount:  int(v.LikesCount),
+		ViewsCount:  int(v.ViewsCount),
 		CommentsCount: int(v.CommentsCount),
-		CreatedAt:     v.CreatedAt.UTC().Format("2006-01-02T15:04:05.999999Z07:00"),
-		IsOwner:       isOwner,
+		CreatedAt:   v.CreatedAt.UTC().Format("2006-01-02T15:04:05.999999Z07:00"),
+		IsOwner:     isOwner,
 	}
 	if v.Title.Valid {
 		t := v.Title.String
@@ -416,7 +416,7 @@ const (
 //     the owner AND viewer is not a
 //     follower                        -> 404
 //   - viewer is the owner              -> all statuses
-//     except DELETED
+//                                         except DELETED
 //   - otherwise                        -> status = READY
 //
 // Pagination uses (created_at, id) descending via the

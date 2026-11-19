@@ -134,20 +134,20 @@ var knownErrorCodes = []ErrorCode{
 // ErrXxx) so the central error handler can match with
 // errors.Is.
 var (
-	ErrValidation          = errors.New("validation error")
-	ErrUnauthorized        = errors.New("unauthorized")
-	ErrForbidden           = errors.New("forbidden")
-	ErrNotFound            = errors.New("not found")
-	ErrVideoStatusConflict = errors.New("video status conflict")
+	ErrValidation           = errors.New("validation error")
+	ErrUnauthorized         = errors.New("unauthorized")
+	ErrForbidden            = errors.New("forbidden")
+	ErrNotFound             = errors.New("not found")
+	ErrVideoStatusConflict  = errors.New("video status conflict")
 	ErrAvatarUploadConflict = errors.New("avatar upload conflict")
-	ErrVideoNotReady       = errors.New("video not ready")
-	ErrUploadMissing       = errors.New("upload missing")
-	ErrUploadSizeInvalid   = errors.New("upload size invalid")
-	ErrSelfFollow          = errors.New("self follow not allowed")
-	ErrWebhookSignature    = errors.New("webhook invalid signature")
-	ErrWebhookEvent        = errors.New("webhook event unsupported")
-	ErrInternal            = errors.New("internal error")
-	ErrRateLimited         = errors.New("rate limited")
+	ErrVideoNotReady        = errors.New("video not ready")
+	ErrUploadMissing        = errors.New("upload missing")
+	ErrUploadSizeInvalid    = errors.New("upload size invalid")
+	ErrSelfFollow           = errors.New("self follow not allowed")
+	ErrWebhookSignature     = errors.New("webhook invalid signature")
+	ErrWebhookEvent         = errors.New("webhook event unsupported")
+	ErrInternal             = errors.New("internal error")
+	ErrRateLimited          = errors.New("rate limited")
 )
 
 // httpStatusFor maps a sentinel error to the HTTP status

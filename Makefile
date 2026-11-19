@@ -73,6 +73,15 @@ db-migrate: ## Apply migrations/001_init.sql (forward-only, no rollback).
 	@cat $(MIGRATIONS)/001_init.sql | $(COMPOSE) exec -T $(SERVICE_DB) \
 		psql -U $(POSTGRES_USER) -d $(DB_NAME) -v ON_ERROR_STOP=1
 
+.PHONY: db-migrate-avatar
+db-migrate-avatar: ## Apply migrations/003_user_avatar_upload.sql before deploying avatar-aware gateway.
+	@if [ ! -f $(MIGRATIONS)/003_user_avatar_upload.sql ]; then \
+		echo "ERROR: $(MIGRATIONS)/003_user_avatar_upload.sql not found."; \
+		exit 1; \
+	fi
+	@cat $(MIGRATIONS)/003_user_avatar_upload.sql | $(COMPOSE) exec -T $(SERVICE_DB) \
+		psql -U $(POSTGRES_USER) -d $(DB_NAME) -v ON_ERROR_STOP=1
+
 .PHONY: db-psql
 db-psql: ## Open a psql shell as POSTGRES_USER on $(DB_NAME).
 	$(COMPOSE) exec $(SERVICE_DB) psql -U $(POSTGRES_USER) -d $(DB_NAME)

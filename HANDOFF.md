@@ -3,7 +3,7 @@
 State captured 2026-09-09, post domain-migration lokal (DOMAIN-MIGRATION-LOCAL-PROMPT.md).
 Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
 
-## Profile avatar upload — implementasi lokal
+## Profile avatar upload — PR #72
 
 - Backend menyediakan `POST /api/users/me/avatar/upload-intent` dan
   `POST /api/users/me/avatar/confirm` untuk upload langsung ke R2 privat.
@@ -12,10 +12,16 @@ Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
 - `avatar_key` aktif/pending disimpan terpisah dari `avatar_url` legacy.
   Update URL legacy, confirm, dan penghapusan akun menjadwalkan cleanup key.
 - Kontrak API, PRD, schema, dan LLD telah diperbarui. `make sqlc-gen`,
-  `go test ./...`, dan `go vet ./...` lulus untuk checkout lokal.
-- Belum dijalankan smoke test PostgreSQL/R2 langsung. Working directory
-  yang tersedia tidak memiliki metadata Git, sehingga branch/PR baru belum
-  dapat dibuat; perubahan ini tidak mengubah atau menggabungkan PR #68.
+  `go test ./...`, `go vet ./...`, dan build gateway/worker lulus.
+- PR untuk review: https://github.com/pratamaWahyuadi/mokibox/pull/72
+- **Deploy order:** apply `migrations/003_user_avatar_upload.sql` before
+  deploying the avatar-aware gateway. The existing `make db-migrate` only
+  applies `001_init.sql`; after the existing `002_reconcile_users_grant.sql`
+  migration, run `make db-migrate-avatar`. The auth middleware reads user
+  rows containing the new avatar columns, so deploying the gateway first
+  can break authenticated endpoints.
+- Belum dijalankan smoke test PostgreSQL/R2 langsung. PR #68 (search) tidak
+  diubah; fitur avatar diajukan sebagai PR terpisah.
 
 ## Production deploy VPS (2026-09-10) — AKTIF (prompt 2 selesai)
 
