@@ -21,6 +21,25 @@ type Comment struct {
 	CreatedAt time.Time     `json:"created_at"`
 }
 
+type DmConversation struct {
+	ID                 uuid.UUID     `json:"id"`
+	ParticipantLowID   uuid.UUID     `json:"participant_low_id"`
+	ParticipantHighID  uuid.UUID     `json:"participant_high_id"`
+	RequestRecipientID uuid.NullUUID `json:"request_recipient_id"`
+	RequestStatus      string        `json:"request_status"`
+	CreatedAt          time.Time     `json:"created_at"`
+	UpdatedAt          time.Time     `json:"updated_at"`
+}
+
+type DmMessage struct {
+	ID             uuid.UUID    `json:"id"`
+	ConversationID uuid.UUID    `json:"conversation_id"`
+	SenderID       uuid.UUID    `json:"sender_id"`
+	Content        string       `json:"content"`
+	CreatedAt      time.Time    `json:"created_at"`
+	ReadAt         sql.NullTime `json:"read_at"`
+}
+
 type Follow struct {
 	FollowerID uuid.UUID `json:"follower_id"`
 	FolloweeID uuid.UUID `json:"followee_id"`

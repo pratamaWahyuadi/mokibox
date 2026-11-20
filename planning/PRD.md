@@ -525,6 +525,12 @@ Sibling (di luar repo):
 | POST | `/api/videos/:id/view` | JWT | Track view | P0 |
 | GET | `/api/notifications` | JWT | List notifikasi | P0 |
 | PUT | `/api/notifications/read-all` | JWT | Tandai semua dibaca | P0 |
+| POST | `/api/messages` | JWT | Kirim pesan teks 1:1 / mulai conversation | P3 |
+| GET | `/api/messages/conversations` | JWT | Inbox, message requests, sent requests | P3 |
+| GET | `/api/messages/conversations/:id` | JWT | Riwayat pesan | P3 |
+| PUT | `/api/messages/conversations/:id/read` | JWT | Read receipt | P3 |
+| POST | `/api/messages/conversations/:id/accept` | JWT | Terima message request | P3 |
+| POST | `/api/messages/conversations/:id/decline` | JWT | Tolak message request | P3 |
 | POST | `/api/webhooks/zitadel` | Signature | Event user deleted/deactivated | P0 |
 
 ---

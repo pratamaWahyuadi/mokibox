@@ -67,6 +67,7 @@ type accountTxStore interface {
 	DeleteCommentsByUser(ctx context.Context, userID uuid.UUID) error
 	DeleteNotificationsForUser(ctx context.Context, userID uuid.UUID) error
 	DeleteNotificationsByActor(ctx context.Context, actorID uuid.UUID) error
+	DeleteDMConversationsForUser(ctx context.Context, userID uuid.UUID) error
 	TombstoneUser(ctx context.Context, id uuid.UUID) (db.User, error)
 }
 
@@ -173,7 +174,8 @@ func DeleteUserData(ctx context.Context, q *db.Queries, dbHandle *sql.DB, queue 
 //     this user's own videos) -> delete follow edges
 //     both directions -> delete the user's own like +
 //     comment rows -> delete notifications where the
-//     user is recipient or actor -> TombstoneUser.
+//     user is recipient or actor -> DeleteDMConversationsForUser
+//     (messages cascade with their conversations) -> TombstoneUser.
 //  2. Commit (runner).
 //  3. AFTER commit: enqueue cleanup:objects with the
 //     raw + thumbnail keys (hls_prefix is left to the
@@ -302,6 +304,10 @@ func collectUserR2Keys(ctx context.Context, runner txRunner[accountTxStore], use
 		}
 		if err := qtx.DeleteNotificationsByActor(ctx, userID); err != nil {
 			return shared.Wrap(shared.ErrInternal, fmt.Sprintf("delete notifications (actor): %v", err))
+		}
+
+		if err := qtx.DeleteDMConversationsForUser(ctx, userID); err != nil {
+			return shared.Wrap(shared.ErrInternal, fmt.Sprintf("delete direct messages: %v", err))
 		}
 
 		// Step 8: tombstone. Username placeholder is

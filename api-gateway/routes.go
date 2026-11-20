@@ -39,6 +39,12 @@
 //   - POST /api/comments/:id/reply           (auth)
 //   - GET  /api/notifications                (auth)
 //   - PUT  /api/notifications/read-all       (auth)
+//   - POST /api/messages                     (auth)
+//   - GET  /api/messages/conversations       (auth)
+//   - GET  /api/messages/conversations/:id   (auth)
+//   - POST /api/messages/conversations/:id/accept (auth)
+//   - POST /api/messages/conversations/:id/decline (auth)
+//   - PUT  /api/messages/conversations/:id/read (auth)
 //   - DELETE /api/users/me                   (auth)
 //
 // Phase 9 finalises the global HTTP error handler, the
@@ -304,6 +310,14 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	nh := handlers.NewNotificationHandler(d.Queries)
 	api.GET("/notifications", nh.List)
 	api.PUT("/notifications/read-all", nh.MarkAllRead)
+
+	mh := handlers.NewMessageHandler(d.Queries)
+	api.POST("/messages", mh.Send)
+	api.GET("/messages/conversations", mh.ListConversations)
+	api.GET("/messages/conversations/:id", mh.ListMessages)
+	api.PUT("/messages/conversations/:id/read", mh.MarkRead)
+	api.POST("/messages/conversations/:id/accept", mh.AcceptRequest)
+	api.POST("/messages/conversations/:id/decline", mh.DeclineRequest)
 
 	// Phase 8.A: self-service account deletion.
 	// Single route, single tx, no R2 in the request

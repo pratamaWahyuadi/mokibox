@@ -73,6 +73,15 @@ db-migrate: ## Apply migrations/001_init.sql (forward-only, no rollback).
 	@cat $(MIGRATIONS)/001_init.sql | $(COMPOSE) exec -T $(SERVICE_DB) \
 		psql -U $(POSTGRES_USER) -d $(DB_NAME) -v ON_ERROR_STOP=1
 
+.PHONY: db-migrate-dm
+db-migrate-dm: ## Apply migrations/009_direct_messages.sql before deploying direct-message routes.
+	@if [ ! -f $(MIGRATIONS)/009_direct_messages.sql ]; then \
+		echo "ERROR: $(MIGRATIONS)/009_direct_messages.sql not found."; \
+		exit 1; \
+	fi
+	@cat $(MIGRATIONS)/009_direct_messages.sql | $(COMPOSE) exec -T $(SERVICE_DB) \
+		psql -U $(POSTGRES_USER) -d $(DB_NAME) -v ON_ERROR_STOP=1
+
 .PHONY: db-psql
 db-psql: ## Open a psql shell as POSTGRES_USER on $(DB_NAME).
 	$(COMPOSE) exec $(SERVICE_DB) psql -U $(POSTGRES_USER) -d $(DB_NAME)

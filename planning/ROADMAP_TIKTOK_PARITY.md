@@ -104,9 +104,13 @@ logging + `/readyz`, idempotency key, test gap.
 Explore-by-interest, kategori video, download original, duet & stitch, live
 streaming, AI moderation, watermark, email digest, data export, admin analytics.
 
-## 6. P3 — 5 issue (eval dulu, jangan dijadwalkan)
+## 6. P3 — backlog (evaluasi dulu, jangan dijadwalkan)
 
-DM, live go-to + gift, multi-region, monetisasi, A/B testing framework.
+Live go-to + gift, multi-region, monetisasi, A/B testing framework.
+Atas prioritas produk terbaru, DM sedang diimplementasikan terpisah dari
+search: MVP teks 1:1, message requests, inbox/history/read receipt, HTTP
+polling. Implementasi DM ditinjau terpisah dan belum dianggap selesai sebelum
+PR-nya diterima.
 
 ---
 

@@ -390,6 +390,26 @@ Notifikasi in-app untuk event follow, like, dan comment.
 
 ---
 
+## DDL Migration — `009_direct_messages.sql`
+
+DM MVP memakai `dm_conversations` untuk pasangan user dan state message request,
+serta `dm_messages` untuk pesan teks. Pesan request hanya masuk inbox utama
+setelah diterima. Foreign key cascade menghapus pesan bersama conversation.
+
+- Conversation unik untuk pasangan user dengan ID disimpan dalam urutan UUID
+  canonical (`participant_low_id < participant_high_id`).
+- `request_status`: `pending`, `accepted`, atau `declined`. Request dibuat saat
+  penerima belum follow pengirim; hanya penerima yang boleh accept/decline.
+- Pesan teks 1–2000 karakter. Media, grup, typing indicator, dan push
+  notification belum termasuk MVP.
+- `read_at` menyimpan read receipt. Pesan request tidak ditandai terbaca
+  sebelum penerima menerima request.
+- Index conversation dan message mendukung inbox serta cursor pagination.
+- `DeleteDMConversationsForUser` menghapus semua conversation dan pesan dalam
+  transaksi penghapusan akun.
+
+---
+
 ## Catatan Penting untuk Implementasi
 
 - `likes_count`, `views_count`, dan `comments_count` adalah **denormalized counter**. Update counter harus dilakukan dalam transaksi yang sama dengan operasi insert/delete di tabel `likes` dan `comments`.
