@@ -19,6 +19,9 @@ decision and corresponding planning/issue updates.
 The working product goals discussed so far are:
 
 - 1:1 text messages; no media in the initial scope.
+- Sharing a MokiBox video in a DM is an important capability to evaluate. The
+  proposed E2EE shape is to include a video reference/ID inside the encrypted
+  message, not to expose the reference in server-readable message metadata.
 - Multiple devices per account.
 - No server-side recovery of private encryption keys.
 - Message requests for first contact.
@@ -28,6 +31,23 @@ The working product goals discussed so far are:
   backed-up, exported, or copied plaintext.
 
 These are planning inputs, not a finalized protocol or client contract.
+
+## Feature coverage and boundaries
+
+This is a status of the design work, not implemented product functionality:
+
+| Capability | Current design status | Boundary or open point |
+|---|---|---|
+| 1:1 text | Proposed for evaluation | No DM implementation exists in this proposal. |
+| First-contact message requests | Proposed for evaluation | Policy and a limit on messages before acceptance remain undecided. |
+| Read receipts, typing, and online status | Proposed for evaluation | Requires a realtime delivery design and discloses activity metadata. |
+| Push notifications | Privacy requirement documented | No plaintext or preview in FCM/APNs payloads; the client decrypts locally. |
+| Block and report | Needed, not designed | Blocking behavior and a user-controlled report flow need decisions; reporting may disclose selected plaintext to moderators. |
+| Share a MokiBox video in DM | Important proposed capability, missing from the prior design | Put the video ID/reference inside encrypted message content. Define recipient authorization, deleted/private video behavior, previews, and the metadata exposed when the recipient opens it. |
+| Media, voice notes, reactions, replies, and unsend | Outside initial scope | Do not imply support in the first version. |
+| Group chat | Outside initial scope | Requires a separate protocol and product-scope review. |
+| Server-side message search | Not available over opaque E2EE content | Client-side search over locally decrypted history is a separate, undecided capability. |
+| History on a new device | Limited without key recovery | Without an approved transfer/recovery design, local history may be lost when a device is lost. |
 
 ## Security goals
 
@@ -74,6 +94,9 @@ These are planning inputs, not a finalized protocol or client contract.
   recipient disclosure.
 - Hiding account identities, IP addresses, device identifiers, message
   timing/size, delivery patterns, or presence from the service.
+- Hiding a video-view request from the service when a recipient opens a shared
+  video through the normal MokiBox video APIs; the encrypted message reference
+  itself must not be exposed as server-readable DM content.
 - Guaranteed deletion from devices that are offline, backups, exports, or
   copies.
 - Availability, traffic-analysis resistance, and sender anonymity.
@@ -190,6 +213,10 @@ Before production scope is approved, document:
   app identifiers, routing data, and delivery timing). Push payloads must not
   include plaintext or previews; message decryption and display happen on the
   client.
+- For video sharing, how the client resolves an encrypted video reference,
+  checks the recipient's access under existing video visibility rules, and
+  handles deleted or newly private videos without exposing message content to
+  the server.
 - Retention and deletion rules for ciphertext, public keys, prekeys, delivery
   state, logs, metrics, and backups.
 - Message-request limits, recipient blocking/reporting, prekey-exhaustion
@@ -211,6 +238,9 @@ Before production scope is approved, document:
   retention, and idempotency contract.
 - Decide transport and fanout architecture for delivery, receipts, and
   ephemeral presence.
+- Decide whether encrypted video references are part of the initial DM
+  capability and specify authorization, deleted/private-video behavior, and
+  client rendering.
 - Decide the offline-delivery and push-notification design, including payload
   contents and which metadata platform push providers can observe.
 - Define abuse limits and the account-deletion contract for other participants'
