@@ -19,8 +19,14 @@ sesuai keputusan user: main bebas perubahan yang menyesuaikan aaPanel).
   (volumes bootstrap+postgres-data fresh), Traefik publish
   `127.0.0.1:8181:80`, deny-list DEFAULT (tanpa bypass dev).
 - vhost aaPanel: `mokiboxapi.binery.my.id` → 127.0.0.1:8180,
+<<<<<<< HEAD
   `auth.binery.my.id` → 127.0.0.1:8181 (file
   `/www/server/panel/vhost/nginx/{mokiboxapi.,auth.}binery.my.id.conf`;
+=======
+  `auth.mokibox.my.id` → 127.0.0.1:8181 (file
+  `/www/server/panel/vhost/nginx/mokiboxapi.binery.my.id.conf`,
+  `/www/server/panel/vhost/nginx/auth.mokibox.my.id.conf`;
+>>>>>>> 3a44170249f694a35585b1519195808f3b35dc1d
   HSTS max-age=63072000, X-Content-Type-Options, X-Frame-Options,
   Referrer-Policy; /demo/ alias ke repo; /callback 302).
 - TLS: wildcard LE `*.binery.my.id` + apex via acme.sh DNS-01
@@ -28,8 +34,15 @@ sesuai keputusan user: main bebas perubahan yang menyesuaikan aaPanel).
   `/www/server/panel/vhost/cert/<domain>/{fullchain,privkey}.pem`,
   renewal otomatis (cron acme.sh, ARI window Nov 2026).
   HTTP→HTTPS 301 aktif.
+<<<<<<< HEAD
 - DNS: `mokiboxapi`+`auth` A-record 43.157.227.130 **DNS-only** (grey).
   `mokibox` (frontend) belum dibuat — frontend memang di-host terpisah.
+=======
+- DNS: `mokiboxapi` + `auth` A-record 43.157.227.130 **DNS-only** (grey).
+  `mokibox` (frontend) belum dibuat — frontend memang di-host terpisah.
+  Zitadel domain baru: `auth.mokibox.my.id` (migrasi dari `auth.binery.my.id`
+  2026-09-24, fresh re-init Zitadel + re-provisioning penuh).
+>>>>>>> 3a44170249f694a35585b1519195808f3b35dc1d
 
 ### Provisioning (Zitadel v4.16.0, script `scripts/zitadel-provision-prod.sh`)
 - Project mokibox + apps: `mokibox_web` (confidential BASIC),
@@ -43,12 +56,23 @@ sesuai keputusan user: main bebas perubahan yang menyesuaikan aaPanel).
 - Secrets di VPS `/root/mokibox-secrets/` (client secret, signing key,
   test passwords); .env prod `chmod 600` di repo dir.
 
+<<<<<<< HEAD
 ### Verifikasi prod (semua hijau 2026-09-10)
 - integration_test.sh **16 PASS × 2 run berturut-turut** di VPS
   (healthz, OIDC discovery issuer=https, headless login JWT,
   SPA PKCE, users/me, upload→transcode→READY→playlist 480p,
   feed exclusion, follow feed, webhook real user.deactivated
   (aggregateID), soft delete + cleanup).
+=======
+### Verifikasi prod (semua hijau 2026-09-24)
+- integration_test.sh **16 PASS × 2 run berturut-turut** di VPS
+  (healthz, OIDC discovery issuer=https://auth.mokibox.my.id, headless login JWT,
+  SPA PKCE, users/me, upload→transcode→READY→playlist 480p,
+  feed exclusion, follow feed, webhook real user.deactivated
+  (aggregateID), soft delete + cleanup).
+- integration_test.sh diperbaiki: `ADMIN_LOGIN` domain update ke
+  `zitadel-admin@zitadel.auth.mokibox.my.id` (commit 061f46d).
+>>>>>>> 3a44170249f694a35585b1519195808f3b35dc1d
 - R2 CORS origin `https://mokiboxapi.binery.my.id` terverifikasi
   (ACAO header muncul di presigned GET — lesson prompt-1 #8 closed).
 - /api/users/me 401 envelope; anonymous video-GET 401
@@ -68,6 +92,14 @@ sesuai keputusan user: main bebas perubahan yang menyesuaikan aaPanel).
   perlu efek pending-verification — v1
   `POST /management/v1/users/{id}/password` + `noVerification:true`
   yang live-works.
+<<<<<<< HEAD
+=======
+- **Zitadel domain migration** = fresh re-init WAJIB (domain ter-catat
+  di eventstore DB; volume bootstrap+postgres-data harus dihapus).
+  Admin login domain mengikuti external domain:
+  `zitadel-admin@zitadel.<external-domain>`. integration_test.sh
+  ADMIN_LOGIN harus disync.
+>>>>>>> 3a44170249f694a35585b1519195808f3b35dc1d
 - Container env beku: setelah update .env R2, WAJIB
   `docker compose ... up -d --force-recreate` (restart saja tidak
   reload env) — root cause itest run-2 403 massal.
@@ -426,3 +458,59 @@ scripts/smoketest/phase10_reconcile/   (16-assertion E2E)
 docker-compose.yml                     (gateway+nginx hardening, RECONCILE_* env)
 SECURITY.md                            (audit per-SEC + limitations + policy)
 ```
+
+## Issue #57 — GET /api/search (2026-10-04)
+
+**What shipped:** `GET /api/search?q=<query>&type=<all|users|videos>&limit=<n>&cursor=<c>`
+— search users and videos with offset-based cursor paging, type filter,
+and validation. Endpoint mounted in the authenticated `/api` group in `routes.go`.
+
+**Files touched:**
+
+```
+sqlc/queries/search.sql                  NEW — SearchUsers, SearchVideos (:many)
+shared/db/search.sql.go                  GENERATED — make sqlc-gen
+api-gateway/handlers/search.go           NEW — SearchHandler + handler + mapper + validation + pagination
+api-gateway/handlers/search_test.go      NEW — 11 unit tests (happy, 401, empty-q, long-q, limit=0, limit-cap, type-filter, tombstone, pagination, rune-count, underscore)
+api-gateway/routes.go                    MODIFIED — api.GET("/search", searchH.Search)
+scripts/smoketest/phase11_search/main.go NEW — Real HTTP integration smoke test using real middleware.Authenticate & PostgreSQL (2x back-to-back PASS)
+HANDOFF.md                               MODIFIED — this section
+```
+
+**Key Fixes & Refinements (from code review):**
+
+- **SQL queries**:
+  - Separated `query_pattern` (escaped for `ILIKE`) and `raw_query` (raw string for `LOWER(u.username) = LOWER($raw_query)`) so exact match ranking is preserved for queries with underscores/wildcards (e.g. `pratama_dev`).
+  - `v.deleted_at IS NULL` to exclude soft-deleted videos.
+  - `u.id = $viewer_id` added to private video visibility condition (owner can search own private videos).
+- **Handler & Validation**:
+  - `utf8.RuneCountInString` for exact 100-character length check.
+  - `escapeSQLWildcards` helper to escape `%` and `_` SQL wildcards in user input.
+  - `limit + 1` DB lookahead query to accurately omit `next_cursor` when results are exhausted (prevents false cursors).
+  - Strict `strconv.Atoi` cursor parsing with max offset cap (100,000) to prevent int32 overflow.
+- **Smoke test**:
+  - Uses real `middleware.Authenticate` with a `stubTokenVerifier` for authentication testing (tests real route group wiring & 401 response).
+  - Performs direct DB sanity check on seeded dataset before running HTTP assertions.
+  - Removed hardcoded DB passwords; requires `DATABASE_URL` from environment.
+  - Verifies 401 Unauthorized, 400 validation errors, tombstone exclusion, READY status filter, soft-deleted filter, private owner self-search, underscore exact match ranking, type filters, pagination (including next_cursor omission on last page), and non-null presigned URLs.
+  - Runs **2x back-to-back PASS**.
+
+**Deviations from issue:**
+- Route registered in `routes.go` (`api.GET("/search", ...)`), following gateway architecture convention.
+- Offset paging encoded via base64 `offset:<n>` cursor (issue recommended offset, cursor is an opaque wrapper).
+- Video search does NOT exclude viewer's own videos (per issue spec: "user mencari kontennya sendiri itu wajar").
+
+**Known Limitations (per issue):**
+
+- Sequential scan `ILIKE '%...%'` — acceptable for current dataset. Add `pg_trgm` GIN index when users table exceeds ~50k rows.
+- Offset paging — acceptable for short search result sets. Switch to keyset/rank paging if result sets grow large.
+- Block filter (issue #10) not implemented — only self-exclusion on user search. TODO when block table lands.
+
+**Verification:**
+
+- `go build ./...` — 0 errors
+- `go vet ./...` — 0 warnings
+- `go test ./...` — all green
+- `scripts/smoketest/phase11_search` — PASS 2x back-to-back
+
+
