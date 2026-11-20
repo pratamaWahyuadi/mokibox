@@ -176,23 +176,36 @@ cryptography cannot be implemented or validated here yet.
 
 ## Protocol and library decision gate
 
-No protocol or library is selected. Evaluate established asynchronous
-multi-device messaging designs and their client bindings. Candidate families
-may include the Signal protocol suite (for example, PQXDH/X3DH, Double Ratchet,
-and multi-device session management) and MLS where its group model is
-appropriate. These are investigation leads, not recommendations or approvals.
+No protocol or library is selected. This preliminary shortlist is based on
+official project documentation checked on 2026-11-20. A cryptographic library
+is only one component: it does not by itself define MokiBox's device directory,
+identity verification, delivery service, storage, abuse policy, media
+encryption, recovery, or complete client behavior.
+
+| Candidate | Officially documented scope and license | Relevance and integration risks to validate |
+|---|---|---|
+| [Signal `libsignal`](https://github.com/signalapp/libsignal) | Signal Protocol implementation; repo exposes Java, Swift, and TypeScript APIs over Rust. AGPL-3.0. | Strong candidate to evaluate for asynchronous 1:1 and device features, but Signal states use outside its own clients is unsupported. No official Dart/Flutter binding is documented; Flutter platform bridges and API stability need proof-of-concept work. AGPL compatibility needs legal review before adoption. |
+| [Matrix `vodozemac`](https://github.com/matrix-org/vodozemac) | Rust implementation of Olm and Megolm; Apache-2.0. The project README reports one Least Authority audit with no significant findings. | Relevant for pairwise and group messaging patterns used by Matrix, but it is a cryptographic component, not a complete MokiBox messaging stack. No official Dart/Flutter binding is documented; Matrix-specific device/key-management semantics and native bridges require evaluation. |
+| [OpenMLS](https://github.com/openmls/openmls) | Rust implementation of MLS (RFC 9420); MIT. The README lists Android/iOS targets as built on CI but not tested there. | Relevant to the required group-chat target. It is an MLS building block, not a complete 1:1/multi-device product design. Mobile runtime support, Flutter integration, asynchronous delivery, device semantics, and the project's audit scope need verification. |
+
+These are candidates for due diligence, not recommendations or approvals.
+License compatibility is not legal advice. None is documented here as having
+an official Dart/Flutter binding.
 
 For each candidate, review:
 
 - Protocol coverage for 1:1 asynchronous messaging and multiple devices.
-- Current maintenance, security policy, and independently reviewed audit
-  scope.
+- Current maintenance, security policy, and the precise scope and date of any
+  independent audit; an audit of a library does not audit MokiBox integration.
 - Client-platform support, secure-storage integration, interoperability, and
   test-vector coverage.
 - License compatibility, including copyleft obligations and distribution
   model.
 - Build provenance, dependency update process, vulnerability response, and
   migration/rollback behavior.
+- A proof of concept in the actual Flutter repository, including Android and
+  iOS build, key persistence, device lifecycle, multi-device fanout, media
+  encryption, and group membership changes.
 
 Passing tests, popularity, a verified package publisher, or use by another
 product is not by itself evidence of a security audit. Security review is
