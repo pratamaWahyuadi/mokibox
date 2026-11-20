@@ -135,7 +135,12 @@ func (h *SearchHandler) Search(c echo.Context) error {
 			userRows = userRows[:limit]
 		}
 		for _, r := range userRows {
-			data.Users = append(data.Users, userSummaryFromRow(r.DisplayName, r.AvatarUrl, r.ID, r.Username, r.IsPrivate))
+			user, err := userSummaryFromRow(ctx, h.R2, h.Cfg, r.DisplayName, r.AvatarUrl, r.AvatarKey, r.ID, r.Username, r.IsPrivate)
+			if err != nil {
+				slog.Error("presign search user avatar failed", "err", err, "user_id", r.ID)
+				return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load search avatar URLs"))
+			}
+			data.Users = append(data.Users, user)
 		}
 		if hasNext {
 			nc := encodeOffsetCursor(offset + limit)
@@ -160,7 +165,11 @@ func (h *SearchHandler) Search(c echo.Context) error {
 			videoRows = videoRows[:limit]
 		}
 		for _, r := range videoRows {
-			vo := videoObjectFromSearchRow(ctx, h.R2, h.Cfg, r, viewer.ID)
+			vo, err := videoObjectFromSearchRow(ctx, h.R2, h.Cfg, r, viewer.ID)
+			if err != nil {
+				slog.Error("presign search video owner avatar failed", "err", err, "user_id", r.UserID2)
+				return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load search avatar URLs"))
+			}
 			data.Videos = append(data.Videos, vo)
 		}
 		if hasNext {
@@ -175,7 +184,7 @@ func (h *SearchHandler) Search(c echo.Context) error {
 	})
 }
 
-func videoObjectFromSearchRow(ctx context.Context, r2 r2ObjectStore, cfg *shared.APIConfig, r db.SearchVideosRow, viewerID uuid.UUID) VideoObject {
+func videoObjectFromSearchRow(ctx context.Context, r2 r2ObjectStore, cfg *shared.APIConfig, r db.SearchVideosRow, viewerID uuid.UUID) (VideoObject, error) {
 	out := VideoObject{
 		ID:            r.ID,
 		UserID:        r.UserID,
@@ -202,8 +211,12 @@ func videoObjectFromSearchRow(ctx context.Context, r2 r2ObjectStore, cfg *shared
 	}
 	out.ThumbnailURL = buildThumbnailURL(ctx, r2, cfg, r.ThumbnailKey, r.Status)
 	out.HLSPlaylistURL = buildPlaylistURL(cfg, r.ID, r.Status)
-	out.User = userSummaryPtr(userSummaryFromRow(r.UserDisplayName, r.UserAvatarUrl, r.UserID2, r.UserUsername, r.UserIsPrivate))
-	return out
+	user, err := userSummaryFromRow(ctx, r2, cfg, r.UserDisplayName, r.UserAvatarUrl, r.UserAvatarKey, r.UserID2, r.UserUsername, r.UserIsPrivate)
+	if err != nil {
+		return VideoObject{}, err
+	}
+	out.User = userSummaryPtr(user)
+	return out, nil
 }
 
 func escapeSQLWildcards(s string) string {

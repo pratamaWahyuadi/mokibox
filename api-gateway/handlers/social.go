@@ -95,6 +95,8 @@ type socialTxStore interface {
 type SocialHandler struct {
 	Queries socialStore
 	Run     txRunner[socialTxStore]
+	R2      r2ObjectStore
+	Cfg     *shared.APIConfig
 }
 
 // NewSocialHandler builds a SocialHandler from the production
@@ -103,15 +105,23 @@ type SocialHandler struct {
 // bug and refuses construction early. The tx runner binds
 // the same Queries to each transaction it opens, so reads
 // and writes share the single *sql.DB pool.
-func NewSocialHandler(queries *db.Queries, dbHandle *sql.DB) (*SocialHandler, error) {
+func NewSocialHandler(queries *db.Queries, dbHandle *sql.DB, r2 *shared.R2Client, cfg *shared.APIConfig) (*SocialHandler, error) {
 	if queries == nil || dbHandle == nil {
 		return nil, fmt.Errorf("NewSocialHandler: queries and db must be non-nil")
+	}
+	if r2 == nil {
+		return nil, fmt.Errorf("NewSocialHandler: r2 is nil")
+	}
+	if cfg == nil {
+		return nil, fmt.Errorf("NewSocialHandler: config is nil")
 	}
 	return &SocialHandler{
 		Queries: queries,
 		Run: NewSQLTxRunner(dbHandle, func(tx *sql.Tx) socialTxStore {
 			return queries.WithTx(tx)
 		}),
+		R2:  r2,
+		Cfg: cfg,
 	}, nil
 }
 
@@ -390,35 +400,28 @@ func bindCommentContent(c echo.Context) (string, error) {
 // commentObjectFromRow maps a joined comment row
 // (GetCommentByIDRow / ListCommentsByVideoRow share
 // the same projection) into the wire shape.
-func commentObjectFromRow(id, videoID, userID uuid.UUID, parentID uuid.NullUUID,
+func commentObjectFromRow(ctx context.Context, r2 r2ObjectStore, cfg *shared.APIConfig,
+	id, videoID, userID uuid.UUID, parentID uuid.NullUUID,
 	content string, createdAt time.Time, username string,
-	displayName, avatarURL sql.NullString, isPrivate bool,
-) CommentObject {
+	displayName, avatarURL, avatarKey sql.NullString, isPrivate bool,
+) (CommentObject, error) {
 	out := CommentObject{
 		ID:        id,
 		VideoID:   videoID,
 		UserID:    userID,
 		Content:   content,
 		CreatedAt: formatVideoTime(createdAt),
-		User: &UserSummary{
-			ID:        userID,
-			Username:  username,
-			IsPrivate: isPrivate,
-		},
 	}
 	if parentID.Valid {
 		v := parentID.UUID
 		out.ParentID = &v
 	}
-	if displayName.Valid {
-		v := displayName.String
-		out.User.DisplayName = &v
+	user, err := userSummaryFromRow(ctx, r2, cfg, displayName, avatarURL, avatarKey, userID, username, isPrivate)
+	if err != nil {
+		return CommentObject{}, err
 	}
-	if avatarURL.Valid {
-		v := avatarURL.String
-		out.User.AvatarURL = &v
-	}
-	return out
+	out.User = userSummaryPtr(user)
+	return out, nil
 }
 
 // CreateComment handles POST /api/videos/:id/comments.
@@ -484,11 +487,16 @@ func (h *SocialHandler) CreateComment(c echo.Context) error {
 		slog.Error("GetCommentByID after insert failed", "err", err, "comment_id", commentID)
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load comment"))
 	}
-	return shared.RespondCreated(c, commentObjectFromRow(
+	response, err := commentObjectFromRow(ctx, h.R2, h.Cfg,
 		row.ID, row.VideoID, row.UserID, row.ParentID,
 		row.Content, row.CreatedAt, row.Username,
-		row.DisplayName, row.AvatarUrl, row.IsPrivate,
-	))
+		row.DisplayName, row.AvatarUrl, row.AvatarKey, row.IsPrivate,
+	)
+	if err != nil {
+		slog.Error("presign comment author avatar failed", "err", err, "user_id", row.UserID)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load comment avatar URL"))
+	}
+	return shared.RespondCreated(c, response)
 }
 
 // ListComments handles GET /api/videos/:id/comments.
@@ -534,11 +542,16 @@ func (h *SocialHandler) ListComments(c echo.Context) error {
 
 	items := make([]CommentObject, 0, len(rows))
 	for _, r := range rows {
-		items = append(items, commentObjectFromRow(
+		item, err := commentObjectFromRow(ctx, h.R2, h.Cfg,
 			r.ID, r.VideoID, r.UserID, r.ParentID,
 			r.Content, r.CreatedAt, r.Username,
-			r.DisplayName, r.AvatarUrl, r.IsPrivate,
-		))
+			r.DisplayName, r.AvatarUrl, r.AvatarKey, r.IsPrivate,
+		)
+		if err != nil {
+			slog.Error("presign comment author avatar failed", "err", err, "user_id", r.UserID)
+			return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load comment avatar URLs"))
+		}
+		items = append(items, item)
 	}
 	var nextCursor *string
 	if len(rows) == limit {
@@ -704,9 +717,14 @@ func (h *SocialHandler) ReplyComment(c echo.Context) error {
 		slog.Error("GetCommentByID after reply failed", "err", err, "comment_id", replyID)
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load reply"))
 	}
-	return shared.RespondCreated(c, commentObjectFromRow(
+	response, err := commentObjectFromRow(ctx, h.R2, h.Cfg,
 		row.ID, row.VideoID, row.UserID, row.ParentID,
 		row.Content, row.CreatedAt, row.Username,
-		row.DisplayName, row.AvatarUrl, row.IsPrivate,
-	))
+		row.DisplayName, row.AvatarUrl, row.AvatarKey, row.IsPrivate,
+	)
+	if err != nil {
+		slog.Error("presign reply author avatar failed", "err", err, "user_id", row.UserID)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load reply avatar URL"))
+	}
+	return shared.RespondCreated(c, response)
 }

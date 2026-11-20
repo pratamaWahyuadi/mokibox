@@ -17,6 +17,8 @@
 //       signature verified inside the handler)
 //   - GET  /api/users/me                     (auth)
 //   - PUT  /api/users/me                     (auth)
+//   - POST /api/users/me/avatar/upload-intent (auth)
+//   - POST /api/users/me/avatar/confirm       (auth)
 //   - GET  /api/users/:id                    (auth)
 //   - GET  /api/users/:id/videos             (auth)
 //   - POST /api/users/:id/follow             (auth)
@@ -173,11 +175,21 @@ func NewRouter(d RouterDeps) *echo.Echo {
 		authRateLimit,
 	)
 
-	uh := handlers.NewUserHandler(d.Queries)
+	uh, err := handlers.NewUserHandler(d.Queries, d.R2, d.Queue, d.Cfg)
+	if err != nil {
+		panic(fmt.Sprintf("api-gateway: NewUserHandler: %v", err))
+	}
 	api.GET("/users/me", uh.GetMe)
 	api.PUT("/users/me", uh.UpdateMe)
 	api.GET("/users/:id", uh.GetUserProfile)
 	api.GET("/users/:id/videos", uh.GetUserVideos)
+
+	avatarH, err := handlers.NewAvatarHandler(d.Queries, d.R2, d.Queue, d.Cfg)
+	if err != nil {
+		panic(fmt.Sprintf("api-gateway: NewAvatarHandler: %v", err))
+	}
+	api.POST("/users/me/avatar/upload-intent", avatarH.UploadIntent)
+	api.POST("/users/me/avatar/confirm", avatarH.ConfirmUpload)
 
 	// Phase 6.C: follow endpoints. POST/DELETE are
 	// idempotent (FollowUser is ON CONFLICT DO
@@ -277,7 +289,7 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	// increment with no per-user dedup
 	// (FR-FEED-05). All three enforce the video
 	// visibility rule (404 on unauthorised).
-	sh, err := handlers.NewSocialHandler(d.Queries, d.DB)
+	sh, err := handlers.NewSocialHandler(d.Queries, d.DB, d.R2, d.Cfg)
 	if err != nil {
 		panic(fmt.Sprintf("api-gateway: NewSocialHandler: %v", err))
 	}

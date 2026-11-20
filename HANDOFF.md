@@ -3,6 +3,44 @@
 State captured 2026-09-09, post domain-migration lokal (DOMAIN-MIGRATION-LOCAL-PROMPT.md).
 Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
 
+## Profile avatar upload — PR #72
+
+- Backend menyediakan `POST /api/users/me/avatar/upload-intent` dan
+  `POST /api/users/me/avatar/confirm` untuk upload langsung ke R2 privat.
+- Format JPEG/PNG/WebP, maksimum 5 MiB (divalidasi saat confirm), dengan
+  intent ber-expiry; avatar dapat dilihat publik termasuk dari akun privat.
+- `avatar_key` aktif/pending disimpan terpisah dari `avatar_url` legacy.
+  Update URL legacy, confirm, dan penghapusan akun menjadwalkan cleanup key.
+- `PUT /api/users/me` mempertahankan avatar R2 jika klien mengirim balik
+  presigned URL avatar milik user sendiri; upload baru tetap memakai
+  upload-intent/confirm. Issue acceptance criteria: #73.
+- Kontrak API, PRD, schema, dan LLD telah diperbarui. `make sqlc-gen`,
+  `go test ./...`, `go vet ./...`, dan build gateway/worker lulus.
+- PR untuk review: https://github.com/pratamaWahyuadi/mokibox/pull/72
+- Dependency `golang.org/x/image/webp` dipakai untuk memeriksa format WebP
+  aktual dari konten upload, bukan hanya mempercayai header `Content-Type`.
+- **Deploy order:** apply `migrations/008_user_avatar_upload.sql` before
+  deploying the avatar-aware gateway. The existing `make db-migrate` only
+  applies `001_init.sql`; after `002_reconcile_users_grant.sql`, run
+  `make db-migrate-avatar`. Migration numbers 003–007 remain reserved by the
+  parity roadmap; avatar migration 008 is independent and can be applied now
+  to the existing database. The auth middleware reads user rows containing
+  the new avatar columns, so deploying the gateway first can break
+  authenticated endpoints.
+- **R2 orphan trade-off:** an upload-intent that is never confirmed leaves
+  its pending object in R2 until another intent replaces it, an invalid
+  confirm removes it, or the account is deleted. The reconciler scans avatar
+  prefixes only for tombstoned users; it does not yet expire abandoned
+  pending uploads for active users.
+- **Upload limitations:** a presigned PUT URL can be reused until it expires,
+  including after confirm; image dimensions are not currently bounded. The
+  5 MiB byte limit and decoded format validation still apply at confirm.
+- **Live smoke:** `scripts/smoketest/phase12_avatar` performs real HTTP
+  upload/confirm/GET, R2 CORS preflight, DB state checks, and PUT echo
+  validation twice. It has not been run here because this checkout has no
+  `.env`, configured R2 credentials, or running compose services.
+- PR #68 (search) tidak diubah; fitur avatar diajukan sebagai PR terpisah.
+
 ## Production deploy VPS (2026-09-10) — AKTIF (prompt 2 selesai)
 
 MokiBox production live di VPS multi-tenant `43.157.227.130`,

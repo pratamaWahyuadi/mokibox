@@ -116,7 +116,9 @@ DM, live go-to + gift, multi-region, monetisasi, A/B testing framework.
    P0 butuh 4 migration baru, satu per domain:
    `003_hashtags.sql`, `004_sounds.sql`, `005_video_history.sql`,
    `006_favorites.sql`, `007_blocks.sql`. Satu file per domain supaya
-   rollback per fitur possible dan diff-nya reviewable.
+   rollback per fitur possible dan diff-nya reviewable. Profile avatar
+   upload menggunakan `008_user_avatar_upload.sql`, di luar urutan migration
+   P0 tersebut, agar nomor 003–007 tetap tersedia.
 2. **`sqlc.yaml` perlu di-update** — sekarang `schema:` hanya list
    `../migrations/001_init.sql`. Issue migration baru **wajib** menambahkan
    file-nya ke list itu, kalau tidak sqlc tidak pernah tahu kolom baru dan

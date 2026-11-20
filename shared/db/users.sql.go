@@ -13,11 +13,78 @@ import (
 	"github.com/google/uuid"
 )
 
+const clearPendingAvatarUpload = `-- name: ClearPendingAvatarUpload :execrows
+UPDATE users
+SET pending_avatar_key = NULL,
+    pending_avatar_expires_at = NULL
+WHERE id = $1 AND pending_avatar_key = $2
+`
+
+type ClearPendingAvatarUploadParams struct {
+	ID               uuid.UUID      `json:"id"`
+	PendingAvatarKey sql.NullString `json:"pending_avatar_key"`
+}
+
+func (q *Queries) ClearPendingAvatarUpload(ctx context.Context, arg ClearPendingAvatarUploadParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, clearPendingAvatarUpload, arg.ID, arg.PendingAvatarKey)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const confirmAvatarUpload = `-- name: ConfirmAvatarUpload :one
+WITH previous AS (
+    SELECT users.avatar_key
+    FROM users
+    WHERE users.id = $1
+      AND users.is_active = TRUE
+      AND users.pending_avatar_key = $2
+      AND users.pending_avatar_expires_at > NOW()
+    FOR UPDATE
+),
+updated AS (
+    UPDATE users
+    SET avatar_url = NULL,
+        avatar_key = $2,
+        pending_avatar_key = NULL,
+        pending_avatar_expires_at = NULL
+    WHERE users.id = $1
+      AND EXISTS (SELECT 1 FROM previous)
+    RETURNING id, avatar_key
+)
+SELECT updated.id,
+       updated.avatar_key,
+       previous.avatar_key AS previous_avatar_key
+FROM updated
+CROSS JOIN previous
+`
+
+type ConfirmAvatarUploadParams struct {
+	ID               uuid.UUID      `json:"id"`
+	PendingAvatarKey sql.NullString `json:"pending_avatar_key"`
+}
+
+type ConfirmAvatarUploadRow struct {
+	ID                uuid.UUID      `json:"id"`
+	AvatarKey         sql.NullString `json:"avatar_key"`
+	PreviousAvatarKey sql.NullString `json:"previous_avatar_key"`
+}
+
+// Promotes only the currently pending, unexpired key. The old key is
+// returned so the caller can enqueue storage cleanup after the update.
+func (q *Queries) ConfirmAvatarUpload(ctx context.Context, arg ConfirmAvatarUploadParams) (ConfirmAvatarUploadRow, error) {
+	row := q.db.QueryRowContext(ctx, confirmAvatarUpload, arg.ID, arg.PendingAvatarKey)
+	var i ConfirmAvatarUploadRow
+	err := row.Scan(&i.ID, &i.AvatarKey, &i.PreviousAvatarKey)
+	return i, err
+}
+
 const createUser = `-- name: CreateUser :one
 INSERT INTO users (zitadel_id, username, display_name)
 VALUES ($1, $2, $3)
 ON CONFLICT (zitadel_id) DO NOTHING
-RETURNING id, zitadel_id, username, display_name, bio, avatar_url, is_private, is_active, deleted_at, created_at
+RETURNING id, zitadel_id, username, display_name, bio, avatar_url, is_private, is_active, deleted_at, created_at, avatar_key, pending_avatar_key, pending_avatar_expires_at
 `
 
 type CreateUserParams struct {
@@ -42,6 +109,9 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&i.IsActive,
 		&i.DeletedAt,
 		&i.CreatedAt,
+		&i.AvatarKey,
+		&i.PendingAvatarKey,
+		&i.PendingAvatarExpiresAt,
 	)
 	return i, err
 }
@@ -51,7 +121,7 @@ UPDATE users
 SET is_active  = FALSE,
     deleted_at = COALESCE(deleted_at, NOW())
 WHERE id = $1
-RETURNING id, zitadel_id, username, display_name, bio, avatar_url, is_private, is_active, deleted_at, created_at
+RETURNING id, zitadel_id, username, display_name, bio, avatar_url, is_private, is_active, deleted_at, created_at, avatar_key, pending_avatar_key, pending_avatar_expires_at
 `
 
 // Triggered by webhook event user.deactivated.
@@ -69,14 +139,36 @@ func (q *Queries) DeactivateUser(ctx context.Context, id uuid.UUID) (User, error
 		&i.IsActive,
 		&i.DeletedAt,
 		&i.CreatedAt,
+		&i.AvatarKey,
+		&i.PendingAvatarKey,
+		&i.PendingAvatarExpiresAt,
 	)
 	return i, err
 }
 
-const getUserByID = `-- name: GetUserByID :one
-SELECT id, zitadel_id, username, display_name, bio, avatar_url, is_private, is_active, deleted_at, created_at
+const getUserAvatarKeys = `-- name: GetUserAvatarKeys :one
+SELECT avatar_key, pending_avatar_key
 FROM users
 WHERE id = $1
+FOR UPDATE
+`
+
+type GetUserAvatarKeysRow struct {
+	AvatarKey        sql.NullString `json:"avatar_key"`
+	PendingAvatarKey sql.NullString `json:"pending_avatar_key"`
+}
+
+func (q *Queries) GetUserAvatarKeys(ctx context.Context, id uuid.UUID) (GetUserAvatarKeysRow, error) {
+	row := q.db.QueryRowContext(ctx, getUserAvatarKeys, id)
+	var i GetUserAvatarKeysRow
+	err := row.Scan(&i.AvatarKey, &i.PendingAvatarKey)
+	return i, err
+}
+
+const getUserByID = `-- name: GetUserByID :one
+SELECT id, zitadel_id, username, display_name, bio, avatar_url, is_private, is_active, deleted_at, created_at, avatar_key, pending_avatar_key, pending_avatar_expires_at
+FROM users
+WHERE users.id = $1
 LIMIT 1
 `
 
@@ -94,13 +186,16 @@ func (q *Queries) GetUserByID(ctx context.Context, id uuid.UUID) (User, error) {
 		&i.IsActive,
 		&i.DeletedAt,
 		&i.CreatedAt,
+		&i.AvatarKey,
+		&i.PendingAvatarKey,
+		&i.PendingAvatarExpiresAt,
 	)
 	return i, err
 }
 
 const getUserByZitadelID = `-- name: GetUserByZitadelID :one
 
-SELECT id, zitadel_id, username, display_name, bio, avatar_url, is_private, is_active, deleted_at, created_at
+SELECT id, zitadel_id, username, display_name, bio, avatar_url, is_private, is_active, deleted_at, created_at, avatar_key, pending_avatar_key, pending_avatar_expires_at
 FROM users
 WHERE zitadel_id = $1
 LIMIT 1
@@ -129,13 +224,16 @@ func (q *Queries) GetUserByZitadelID(ctx context.Context, zitadelID string) (Use
 		&i.IsActive,
 		&i.DeletedAt,
 		&i.CreatedAt,
+		&i.AvatarKey,
+		&i.PendingAvatarKey,
+		&i.PendingAvatarExpiresAt,
 	)
 	return i, err
 }
 
 const getUserProfileWithStats = `-- name: GetUserProfileWithStats :one
 SELECT
-    u.id, u.zitadel_id, u.username, u.display_name, u.bio, u.avatar_url, u.is_private, u.is_active, u.deleted_at, u.created_at,
+    u.id, u.zitadel_id, u.username, u.display_name, u.bio, u.avatar_url, u.is_private, u.is_active, u.deleted_at, u.created_at, u.avatar_key, u.pending_avatar_key, u.pending_avatar_expires_at,
     (SELECT COUNT(*) FROM follows f WHERE f.followee_id = u.id) AS follower_count,
     (SELECT COUNT(*) FROM follows f WHERE f.follower_id = u.id) AS following_count,
     EXISTS (
@@ -154,19 +252,22 @@ type GetUserProfileWithStatsParams struct {
 }
 
 type GetUserProfileWithStatsRow struct {
-	ID             uuid.UUID      `json:"id"`
-	ZitadelID      string         `json:"zitadel_id"`
-	Username       string         `json:"username"`
-	DisplayName    sql.NullString `json:"display_name"`
-	Bio            sql.NullString `json:"bio"`
-	AvatarUrl      sql.NullString `json:"avatar_url"`
-	IsPrivate      bool           `json:"is_private"`
-	IsActive       bool           `json:"is_active"`
-	DeletedAt      sql.NullTime   `json:"deleted_at"`
-	CreatedAt      time.Time      `json:"created_at"`
-	FollowerCount  int64          `json:"follower_count"`
-	FollowingCount int64          `json:"following_count"`
-	IsFollowing    bool           `json:"is_following"`
+	ID                     uuid.UUID      `json:"id"`
+	ZitadelID              string         `json:"zitadel_id"`
+	Username               string         `json:"username"`
+	DisplayName            sql.NullString `json:"display_name"`
+	Bio                    sql.NullString `json:"bio"`
+	AvatarUrl              sql.NullString `json:"avatar_url"`
+	IsPrivate              bool           `json:"is_private"`
+	IsActive               bool           `json:"is_active"`
+	DeletedAt              sql.NullTime   `json:"deleted_at"`
+	CreatedAt              time.Time      `json:"created_at"`
+	AvatarKey              sql.NullString `json:"avatar_key"`
+	PendingAvatarKey       sql.NullString `json:"pending_avatar_key"`
+	PendingAvatarExpiresAt sql.NullTime   `json:"pending_avatar_expires_at"`
+	FollowerCount          int64          `json:"follower_count"`
+	FollowingCount         int64          `json:"following_count"`
+	IsFollowing            bool           `json:"is_following"`
 }
 
 // Profile + follower/following counts + is_following for
@@ -187,6 +288,9 @@ func (q *Queries) GetUserProfileWithStats(ctx context.Context, arg GetUserProfil
 		&i.IsActive,
 		&i.DeletedAt,
 		&i.CreatedAt,
+		&i.AvatarKey,
+		&i.PendingAvatarKey,
+		&i.PendingAvatarExpiresAt,
 		&i.FollowerCount,
 		&i.FollowingCount,
 		&i.IsFollowing,
@@ -241,6 +345,47 @@ func (q *Queries) ListUsersEligibleForReconcile(ctx context.Context, limit int32
 	return items, nil
 }
 
+const setPendingAvatarUpload = `-- name: SetPendingAvatarUpload :one
+WITH previous AS (
+    SELECT pending_avatar_key
+    FROM users
+    WHERE users.id = $1 AND is_active = TRUE
+    FOR UPDATE
+),
+updated AS (
+    UPDATE users
+    SET pending_avatar_key = $2,
+        pending_avatar_expires_at = $3
+    WHERE users.id = $1 AND is_active = TRUE
+    RETURNING pending_avatar_key, pending_avatar_expires_at
+)
+SELECT updated.pending_avatar_key,
+       updated.pending_avatar_expires_at,
+       previous.pending_avatar_key AS previous_pending_avatar_key
+FROM updated
+CROSS JOIN previous
+`
+
+type SetPendingAvatarUploadParams struct {
+	ID                     uuid.UUID      `json:"id"`
+	PendingAvatarKey       sql.NullString `json:"pending_avatar_key"`
+	PendingAvatarExpiresAt sql.NullTime   `json:"pending_avatar_expires_at"`
+}
+
+type SetPendingAvatarUploadRow struct {
+	PendingAvatarKey         sql.NullString `json:"pending_avatar_key"`
+	PendingAvatarExpiresAt   sql.NullTime   `json:"pending_avatar_expires_at"`
+	PreviousPendingAvatarKey sql.NullString `json:"previous_pending_avatar_key"`
+}
+
+// Replaces any earlier, unconfirmed avatar upload for the user.
+func (q *Queries) SetPendingAvatarUpload(ctx context.Context, arg SetPendingAvatarUploadParams) (SetPendingAvatarUploadRow, error) {
+	row := q.db.QueryRowContext(ctx, setPendingAvatarUpload, arg.ID, arg.PendingAvatarKey, arg.PendingAvatarExpiresAt)
+	var i SetPendingAvatarUploadRow
+	err := row.Scan(&i.PendingAvatarKey, &i.PendingAvatarExpiresAt, &i.PreviousPendingAvatarKey)
+	return i, err
+}
+
 const tombstoneUser = `-- name: TombstoneUser :one
 UPDATE users
 SET is_active     = FALSE,
@@ -248,9 +393,12 @@ SET is_active     = FALSE,
     username      = 'deleted_' || id::text,
     display_name  = NULL,
     bio           = NULL,
-    avatar_url    = NULL
+    avatar_url    = NULL,
+    avatar_key    = NULL,
+    pending_avatar_key = NULL,
+    pending_avatar_expires_at = NULL
 WHERE id = $1
-RETURNING id, zitadel_id, username, display_name, bio, avatar_url, is_private, is_active, deleted_at, created_at
+RETURNING id, zitadel_id, username, display_name, bio, avatar_url, is_private, is_active, deleted_at, created_at, avatar_key, pending_avatar_key, pending_avatar_expires_at
 `
 
 // Triggered by user.removed. Username is replaced with a
@@ -270,19 +418,50 @@ func (q *Queries) TombstoneUser(ctx context.Context, id uuid.UUID) (User, error)
 		&i.IsActive,
 		&i.DeletedAt,
 		&i.CreatedAt,
+		&i.AvatarKey,
+		&i.PendingAvatarKey,
+		&i.PendingAvatarExpiresAt,
 	)
 	return i, err
 }
 
 const updateUserProfile = `-- name: UpdateUserProfile :one
-UPDATE users
-SET
-    display_name = COALESCE($2, display_name),
-    bio          = COALESCE($3,          bio),
-    avatar_url   = COALESCE($4,   avatar_url),
-    is_private   = COALESCE($5,   is_private)
-WHERE id = $1
-RETURNING id, zitadel_id, username, display_name, bio, avatar_url, is_private, is_active, deleted_at, created_at
+WITH previous AS (
+    SELECT users.avatar_key, users.pending_avatar_key
+    FROM users
+    WHERE users.id = $1
+    FOR UPDATE
+),
+updated AS (
+    UPDATE users
+    SET
+        display_name = COALESCE($2, display_name),
+        bio          = COALESCE($3,          bio),
+        avatar_url   = COALESCE($4,   avatar_url),
+        avatar_key   = CASE WHEN $4 IS NOT NULL THEN NULL ELSE avatar_key END,
+        pending_avatar_key = CASE WHEN $4 IS NOT NULL THEN NULL ELSE pending_avatar_key END,
+        pending_avatar_expires_at = CASE WHEN $4 IS NOT NULL THEN NULL ELSE pending_avatar_expires_at END,
+        is_private   = COALESCE($5,   is_private)
+    WHERE users.id = $1
+    RETURNING users.id, users.zitadel_id, users.username, users.display_name, users.bio, users.avatar_url, users.is_private, users.is_active, users.deleted_at, users.created_at, users.avatar_key, users.pending_avatar_key, users.pending_avatar_expires_at
+)
+SELECT updated.id,
+       updated.zitadel_id,
+       updated.username,
+       updated.display_name,
+       updated.bio,
+       updated.avatar_url,
+       updated.is_private,
+       updated.is_active,
+       updated.deleted_at,
+       updated.created_at,
+       updated.avatar_key,
+       updated.pending_avatar_key,
+       updated.pending_avatar_expires_at,
+       previous.avatar_key AS previous_avatar_key,
+       previous.pending_avatar_key AS previous_pending_avatar_key
+FROM updated
+CROSS JOIN previous
 `
 
 type UpdateUserProfileParams struct {
@@ -293,8 +472,26 @@ type UpdateUserProfileParams struct {
 	IsPrivate   sql.NullBool   `json:"is_private"`
 }
 
+type UpdateUserProfileRow struct {
+	ID                       uuid.UUID      `json:"id"`
+	ZitadelID                string         `json:"zitadel_id"`
+	Username                 string         `json:"username"`
+	DisplayName              sql.NullString `json:"display_name"`
+	Bio                      sql.NullString `json:"bio"`
+	AvatarUrl                sql.NullString `json:"avatar_url"`
+	IsPrivate                bool           `json:"is_private"`
+	IsActive                 bool           `json:"is_active"`
+	DeletedAt                sql.NullTime   `json:"deleted_at"`
+	CreatedAt                time.Time      `json:"created_at"`
+	AvatarKey                sql.NullString `json:"avatar_key"`
+	PendingAvatarKey         sql.NullString `json:"pending_avatar_key"`
+	PendingAvatarExpiresAt   sql.NullTime   `json:"pending_avatar_expires_at"`
+	PreviousAvatarKey        sql.NullString `json:"previous_avatar_key"`
+	PreviousPendingAvatarKey sql.NullString `json:"previous_pending_avatar_key"`
+}
+
 // All fields are optional; only non-NULL params are written.
-func (q *Queries) UpdateUserProfile(ctx context.Context, arg UpdateUserProfileParams) (User, error) {
+func (q *Queries) UpdateUserProfile(ctx context.Context, arg UpdateUserProfileParams) (UpdateUserProfileRow, error) {
 	row := q.db.QueryRowContext(ctx, updateUserProfile,
 		arg.ID,
 		arg.DisplayName,
@@ -302,7 +499,7 @@ func (q *Queries) UpdateUserProfile(ctx context.Context, arg UpdateUserProfilePa
 		arg.AvatarUrl,
 		arg.IsPrivate,
 	)
-	var i User
+	var i UpdateUserProfileRow
 	err := row.Scan(
 		&i.ID,
 		&i.ZitadelID,
@@ -314,6 +511,11 @@ func (q *Queries) UpdateUserProfile(ctx context.Context, arg UpdateUserProfilePa
 		&i.IsActive,
 		&i.DeletedAt,
 		&i.CreatedAt,
+		&i.AvatarKey,
+		&i.PendingAvatarKey,
+		&i.PendingAvatarExpiresAt,
+		&i.PreviousAvatarKey,
+		&i.PreviousPendingAvatarKey,
 	)
 	return i, err
 }

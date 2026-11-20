@@ -25,8 +25,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/google/uuid"
+	"github.com/hibiken/asynq"
 	"github.com/labstack/echo/v4"
 
 	"github.com/pratamaWahyuadi/mokibox/api-gateway/middleware"
@@ -40,7 +43,7 @@ import (
 type userStore interface {
 	visibilityStore
 	GetUserProfileWithStats(ctx context.Context, arg db.GetUserProfileWithStatsParams) (db.GetUserProfileWithStatsRow, error)
-	UpdateUserProfile(ctx context.Context, arg db.UpdateUserProfileParams) (db.User, error)
+	UpdateUserProfile(ctx context.Context, arg db.UpdateUserProfileParams) (db.UpdateUserProfileRow, error)
 	ListVideosByUser(ctx context.Context, arg db.ListVideosByUserParams) ([]db.Video, error)
 	FollowUser(ctx context.Context, arg db.FollowUserParams) error
 	GetFollow(ctx context.Context, arg db.GetFollowParams) (db.Follow, error)
@@ -57,17 +60,31 @@ type userStore interface {
 // routes.go wiring is unchanged.
 type UserHandler struct {
 	Queries userStore
+	R2      r2ObjectStore
+	Queue   taskEnqueuer
+	Cfg     *shared.APIConfig
 }
 
-// NewUserHandler builds a UserHandler from the sqlc
-// querier. The testability refactor dropped the unused
-// R2/Queue/Cfg struct fields (no method ever touched them —
-// thumbnails are owned by the feed/detail handlers and the
-// follow notification goes through InsertNotification on
-// the same store); the constructor signature follows, so
-// routes.go passes only what is real.
-func NewUserHandler(q *db.Queries) *UserHandler {
-	return &UserHandler{Queries: q}
+// NewUserHandler builds a UserHandler from production dependencies.
+func NewUserHandler(q *db.Queries, r2 *shared.R2Client, queue *asynq.Client, cfg *shared.APIConfig) (*UserHandler, error) {
+	if q == nil {
+		return nil, fmt.Errorf("NewUserHandler: queries is nil")
+	}
+	if r2 == nil {
+		return nil, fmt.Errorf("NewUserHandler: r2 is nil")
+	}
+	if queue == nil {
+		return nil, fmt.Errorf("NewUserHandler: queue is nil")
+	}
+	if cfg == nil {
+		return nil, fmt.Errorf("NewUserHandler: config is nil")
+	}
+	return &UserHandler{
+		Queries: q,
+		R2:      r2,
+		Queue:   asynqEnqueuer{client: queue},
+		Cfg:     cfg,
+	}, nil
 }
 
 // newUserHandlerForTest lets the test suite build the
@@ -100,11 +117,7 @@ type userProfileWithStats struct {
 	FollowingCount int  `json:"following_count"`
 }
 
-// userFromDB maps a sqlc User row (with its
-// sql.NullString fields) into a userProfileResponse.
-// The *string JSON fields are nil when the underlying
-// value is SQL NULL - which is the spec'd wire shape.
-func userFromDB(u db.User) userProfileResponse {
+func userProfileFromDB(ctx context.Context, r2 r2ObjectStore, cfg *shared.APIConfig, u db.User) (userProfileResponse, error) {
 	out := userProfileResponse{
 		ID:        u.ID,
 		Username:  u.Username,
@@ -120,11 +133,12 @@ func userFromDB(u db.User) userProfileResponse {
 		v := u.Bio.String
 		out.Bio = &v
 	}
-	if u.AvatarUrl.Valid {
-		v := u.AvatarUrl.String
-		out.AvatarURL = &v
+	avatarURL, err := resolveAvatarURL(ctx, r2, cfg, u.AvatarUrl, u.AvatarKey)
+	if err != nil {
+		return userProfileResponse{}, err
 	}
-	return out
+	out.AvatarURL = avatarURL
+	return out, nil
 }
 
 // GetMe returns the profile of the authenticated user.
@@ -135,7 +149,12 @@ func (h *UserHandler) GetMe(c echo.Context) error {
 	if !ok || user == nil {
 		return shared.RespondError(c, shared.Wrap(shared.ErrUnauthorized, "no authenticated user"))
 	}
-	return shared.RespondOK(c, userFromDB(*user))
+	resp, err := userProfileFromDB(c.Request().Context(), h.R2, h.Cfg, *user)
+	if err != nil {
+		slog.Error("presign current user avatar failed", "err", err, "user_id", user.ID)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load avatar URL"))
+	}
+	return shared.RespondOK(c, resp)
 }
 
 // updateMeRequest is the body of PUT /api/users/me.
@@ -179,6 +198,10 @@ func (h *UserHandler) UpdateMe(c echo.Context) error {
 		return shared.RespondError(c, err)
 	}
 
+	if req.AvatarURL != nil && isPresignedAvatarURLForUser(*req.AvatarURL, user.ID, h.Cfg) {
+		req.AvatarURL = nil
+	}
+
 	updated, err := h.Queries.UpdateUserProfile(c.Request().Context(), db.UpdateUserProfileParams{
 		ID:          user.ID,
 		DisplayName: nullStringPtr(req.DisplayName),
@@ -190,7 +213,68 @@ func (h *UserHandler) UpdateMe(c echo.Context) error {
 		slog.Error("update user profile failed", "err", err, "user_id", user.ID)
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "update profile"))
 	}
-	return shared.RespondOK(c, userFromDB(updated))
+	if req.AvatarURL != nil {
+		if updated.PreviousAvatarKey.Valid && updated.PreviousAvatarKey.String != "" {
+			h.enqueueProfileAvatarCleanup(user.ID, updated.PreviousAvatarKey.String)
+		}
+		if updated.PreviousPendingAvatarKey.Valid && updated.PreviousPendingAvatarKey.String != "" {
+			h.enqueueProfileAvatarCleanup(user.ID, updated.PreviousPendingAvatarKey.String)
+		}
+	}
+	updatedUser := db.User{
+		ID:                     updated.ID,
+		ZitadelID:              updated.ZitadelID,
+		Username:               updated.Username,
+		DisplayName:            updated.DisplayName,
+		Bio:                    updated.Bio,
+		AvatarUrl:              updated.AvatarUrl,
+		IsPrivate:              updated.IsPrivate,
+		IsActive:               updated.IsActive,
+		DeletedAt:              updated.DeletedAt,
+		CreatedAt:              updated.CreatedAt,
+		AvatarKey:              updated.AvatarKey,
+		PendingAvatarKey:       updated.PendingAvatarKey,
+		PendingAvatarExpiresAt: updated.PendingAvatarExpiresAt,
+	}
+	resp, err := userProfileFromDB(c.Request().Context(), h.R2, h.Cfg, updatedUser)
+	if err != nil {
+		slog.Error("presign updated user avatar failed", "err", err, "user_id", user.ID)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load avatar URL"))
+	}
+	return shared.RespondOK(c, resp)
+}
+
+func isPresignedAvatarURLForUser(rawURL string, userID uuid.UUID, cfg *shared.APIConfig) bool {
+	if cfg == nil || cfg.R2Endpoint == "" || cfg.R2Bucket == "" {
+		return false
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.User != nil || parsed.Fragment != "" {
+		return false
+	}
+	endpoint, err := url.Parse(cfg.R2Endpoint)
+	if err != nil || !strings.EqualFold(parsed.Scheme, "https") ||
+		!strings.EqualFold(parsed.Host, endpoint.Host) {
+		return false
+	}
+	prefix := strings.TrimRight(endpoint.Path, "/") + "/" + cfg.R2Bucket + "/avatars/" + userID.String() + "/"
+	if !strings.HasPrefix(parsed.Path, prefix) {
+		return false
+	}
+	query := parsed.Query()
+	return query.Get("X-Amz-Algorithm") == "AWS4-HMAC-SHA256" &&
+		query.Get("X-Amz-Credential") != "" &&
+		query.Get("X-Amz-Signature") != ""
+}
+
+func (h *UserHandler) enqueueProfileAvatarCleanup(userID uuid.UUID, key string) {
+	if h.Queue == nil {
+		slog.Error("cannot enqueue replaced avatar cleanup: queue is nil", "user_id", userID, "avatar_key", key)
+		return
+	}
+	if _, err := h.Queue.EnqueueCleanupObjects(shared.CleanupObjectsPayload{Keys: []string{key}}); err != nil {
+		slog.Warn("enqueue replaced avatar cleanup failed", "err", err, "user_id", userID, "avatar_key", key)
+	}
 }
 
 // nullStringPtr turns a *string body field into a
@@ -248,22 +332,28 @@ func (h *UserHandler) GetUserProfile(c echo.Context) error {
 		return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "user not found"))
 	}
 
+	profile, err := userProfileFromDB(c.Request().Context(), h.R2, h.Cfg, db.User{
+		ID:          row.ID,
+		ZitadelID:   row.ZitadelID,
+		Username:    row.Username,
+		DisplayName: row.DisplayName,
+		Bio:         row.Bio,
+		AvatarUrl:   row.AvatarUrl,
+		AvatarKey:   row.AvatarKey,
+		IsPrivate:   row.IsPrivate,
+		IsActive:    row.IsActive,
+		DeletedAt:   row.DeletedAt,
+		CreatedAt:   row.CreatedAt,
+	})
+	if err != nil {
+		slog.Error("presign profile avatar failed", "err", err, "user_id", targetID)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load avatar URL"))
+	}
 	resp := userProfileWithStats{
-		userProfileResponse: userFromDB(db.User{
-			ID:          row.ID,
-			ZitadelID:   row.ZitadelID,
-			Username:    row.Username,
-			DisplayName: row.DisplayName,
-			Bio:         row.Bio,
-			AvatarUrl:   row.AvatarUrl,
-			IsPrivate:   row.IsPrivate,
-			IsActive:    row.IsActive,
-			DeletedAt:   row.DeletedAt,
-			CreatedAt:   row.CreatedAt,
-		}),
-		FollowerCount:  int(row.FollowerCount),
-		FollowingCount: int(row.FollowingCount),
-		IsFollowing:    row.IsFollowing,
+		userProfileResponse: profile,
+		FollowerCount:       int(row.FollowerCount),
+		FollowingCount:      int(row.FollowingCount),
+		IsFollowing:         row.IsFollowing,
 	}
 	return shared.RespondOK(c, resp)
 }

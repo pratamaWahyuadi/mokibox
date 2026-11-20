@@ -25,19 +25,108 @@ RETURNING *;
 -- name: GetUserByID :one
 SELECT *
 FROM users
-WHERE id = $1
+WHERE users.id = $1
 LIMIT 1;
 
 -- name: UpdateUserProfile :one
 -- All fields are optional; only non-NULL params are written.
+WITH previous AS (
+    SELECT users.avatar_key, users.pending_avatar_key
+    FROM users
+    WHERE users.id = $1
+    FOR UPDATE
+),
+updated AS (
+    UPDATE users
+    SET
+        display_name = COALESCE(sqlc.narg('display_name'), display_name),
+        bio          = COALESCE(sqlc.narg('bio'),          bio),
+        avatar_url   = COALESCE(sqlc.narg('avatar_url'),   avatar_url),
+        avatar_key   = CASE WHEN sqlc.narg('avatar_url') IS NOT NULL THEN NULL ELSE avatar_key END,
+        pending_avatar_key = CASE WHEN sqlc.narg('avatar_url') IS NOT NULL THEN NULL ELSE pending_avatar_key END,
+        pending_avatar_expires_at = CASE WHEN sqlc.narg('avatar_url') IS NOT NULL THEN NULL ELSE pending_avatar_expires_at END,
+        is_private   = COALESCE(sqlc.narg('is_private'),   is_private)
+    WHERE users.id = $1
+    RETURNING users.*
+)
+SELECT updated.id,
+       updated.zitadel_id,
+       updated.username,
+       updated.display_name,
+       updated.bio,
+       updated.avatar_url,
+       updated.is_private,
+       updated.is_active,
+       updated.deleted_at,
+       updated.created_at,
+       updated.avatar_key,
+       updated.pending_avatar_key,
+       updated.pending_avatar_expires_at,
+       previous.avatar_key AS previous_avatar_key,
+       previous.pending_avatar_key AS previous_pending_avatar_key
+FROM updated
+CROSS JOIN previous;
+
+-- name: SetPendingAvatarUpload :one
+-- Replaces any earlier, unconfirmed avatar upload for the user.
+WITH previous AS (
+    SELECT pending_avatar_key
+    FROM users
+    WHERE users.id = $1 AND is_active = TRUE
+    FOR UPDATE
+),
+updated AS (
+    UPDATE users
+    SET pending_avatar_key = $2,
+        pending_avatar_expires_at = $3
+    WHERE users.id = $1 AND is_active = TRUE
+    RETURNING pending_avatar_key, pending_avatar_expires_at
+)
+SELECT updated.pending_avatar_key,
+       updated.pending_avatar_expires_at,
+       previous.pending_avatar_key AS previous_pending_avatar_key
+FROM updated
+CROSS JOIN previous;
+
+-- name: ConfirmAvatarUpload :one
+-- Promotes only the currently pending, unexpired key. The old key is
+-- returned so the caller can enqueue storage cleanup after the update.
+WITH previous AS (
+    SELECT users.avatar_key
+    FROM users
+    WHERE users.id = $1
+      AND users.is_active = TRUE
+      AND users.pending_avatar_key = $2
+      AND users.pending_avatar_expires_at > NOW()
+    FOR UPDATE
+),
+updated AS (
+    UPDATE users
+    SET avatar_url = NULL,
+        avatar_key = $2,
+        pending_avatar_key = NULL,
+        pending_avatar_expires_at = NULL
+    WHERE users.id = $1
+      AND EXISTS (SELECT 1 FROM previous)
+    RETURNING id, avatar_key
+)
+SELECT updated.id,
+       updated.avatar_key,
+       previous.avatar_key AS previous_avatar_key
+FROM updated
+CROSS JOIN previous;
+
+-- name: ClearPendingAvatarUpload :execrows
 UPDATE users
-SET
-    display_name = COALESCE(sqlc.narg('display_name'), display_name),
-    bio          = COALESCE(sqlc.narg('bio'),          bio),
-    avatar_url   = COALESCE(sqlc.narg('avatar_url'),   avatar_url),
-    is_private   = COALESCE(sqlc.narg('is_private'),   is_private)
+SET pending_avatar_key = NULL,
+    pending_avatar_expires_at = NULL
+WHERE id = $1 AND pending_avatar_key = $2;
+
+-- name: GetUserAvatarKeys :one
+SELECT avatar_key, pending_avatar_key
+FROM users
 WHERE id = $1
-RETURNING *;
+FOR UPDATE;
 
 -- name: DeactivateUser :one
 -- Triggered by webhook event user.deactivated.
@@ -57,7 +146,10 @@ SET is_active     = FALSE,
     username      = 'deleted_' || id::text,
     display_name  = NULL,
     bio           = NULL,
-    avatar_url    = NULL
+    avatar_url    = NULL,
+    avatar_key    = NULL,
+    pending_avatar_key = NULL,
+    pending_avatar_expires_at = NULL
 WHERE id = $1
 RETURNING *;
 

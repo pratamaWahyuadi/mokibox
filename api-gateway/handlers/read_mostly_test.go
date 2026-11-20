@@ -32,21 +32,21 @@ import (
 // ---------------------------------------------------------------------------
 
 type stubUserStore struct {
-	getVideoByID       func(ctx context.Context, id uuid.UUID) (db.Video, error)
-	getUserByID        func(ctx context.Context, id uuid.UUID) (db.User, error)
-	isFollowing        func(ctx context.Context, arg db.IsFollowingParams) (bool, error)
+	getVideoByID        func(ctx context.Context, id uuid.UUID) (db.Video, error)
+	getUserByID         func(ctx context.Context, id uuid.UUID) (db.User, error)
+	isFollowing         func(ctx context.Context, arg db.IsFollowingParams) (bool, error)
 	getProfileWithStats func(ctx context.Context, arg db.GetUserProfileWithStatsParams) (db.GetUserProfileWithStatsRow, error)
-	updateProfile      func(ctx context.Context, arg db.UpdateUserProfileParams) (db.User, error)
-	listVideosByUser   func(ctx context.Context, arg db.ListVideosByUserParams) ([]db.Video, error)
-	followUser         func(ctx context.Context, arg db.FollowUserParams) error
-	getFollow          func(ctx context.Context, arg db.GetFollowParams) (db.Follow, error)
-	deleteFollow       func(ctx context.Context, arg db.DeleteFollowParams) error
-	listFollowers      func(ctx context.Context, arg db.ListFollowersParams) ([]db.ListFollowersRow, error)
-	listFollowing      func(ctx context.Context, arg db.ListFollowingParams) ([]db.ListFollowingRow, error)
-	insertNotification func(ctx context.Context, arg db.InsertNotificationParams) (db.Notification, error)
+	updateProfile       func(ctx context.Context, arg db.UpdateUserProfileParams) (db.UpdateUserProfileRow, error)
+	listVideosByUser    func(ctx context.Context, arg db.ListVideosByUserParams) ([]db.Video, error)
+	followUser          func(ctx context.Context, arg db.FollowUserParams) error
+	getFollow           func(ctx context.Context, arg db.GetFollowParams) (db.Follow, error)
+	deleteFollow        func(ctx context.Context, arg db.DeleteFollowParams) error
+	listFollowers       func(ctx context.Context, arg db.ListFollowersParams) ([]db.ListFollowersRow, error)
+	listFollowing       func(ctx context.Context, arg db.ListFollowingParams) ([]db.ListFollowingRow, error)
+	insertNotification  func(ctx context.Context, arg db.InsertNotificationParams) (db.Notification, error)
 	// videoStore surface (satisfied alongside userStore so the
 	// video-detail tests can reuse this stub).
-	getVideoDetail     func(ctx context.Context, arg db.GetVideoDetailParams) (db.GetVideoDetailRow, error)
+	getVideoDetail func(ctx context.Context, arg db.GetVideoDetailParams) (db.GetVideoDetailRow, error)
 
 	notifCalls []db.InsertNotificationParams
 }
@@ -99,9 +99,9 @@ func (s *stubUserStore) GetUserProfileWithStats(ctx context.Context, arg db.GetU
 	}
 	return s.getProfileWithStats(ctx, arg)
 }
-func (s *stubUserStore) UpdateUserProfile(ctx context.Context, arg db.UpdateUserProfileParams) (db.User, error) {
+func (s *stubUserStore) UpdateUserProfile(ctx context.Context, arg db.UpdateUserProfileParams) (db.UpdateUserProfileRow, error) {
 	if s.updateProfile == nil {
-		return db.User{}, errors.New("stubUserStore: updateProfile not scripted")
+		return db.UpdateUserProfileRow{}, errors.New("stubUserStore: updateProfile not scripted")
 	}
 	return s.updateProfile(ctx, arg)
 }
@@ -151,8 +151,8 @@ func (s *stubUserStore) InsertNotification(ctx context.Context, arg db.InsertNot
 
 // stubNotificationStore scripts the inbox.
 type stubNotificationStore struct {
-	list  func(ctx context.Context, arg db.ListNotificationsParams) ([]db.Notification, error)
-	mark  func(ctx context.Context, userID uuid.UUID) (int64, error)
+	list func(ctx context.Context, arg db.ListNotificationsParams) ([]db.Notification, error)
+	mark func(ctx context.Context, userID uuid.UUID) (int64, error)
 }
 
 func (s *stubNotificationStore) ListNotifications(ctx context.Context, arg db.ListNotificationsParams) ([]db.Notification, error) {
@@ -207,7 +207,7 @@ func harnessAuthEcho(user db.User, method, path string, h echo.HandlerFunc) *ech
 	e.Validator = testValidator{v: validator.New()}
 	e.Use(middleware.Authenticate(middleware.AuthenticateConfig{
 		Verifier: testVerifier{sub: "test-sub"},
-		Queries: testUserStore{user: user},
+		Queries:  testUserStore{user: user},
 	}))
 	e.Add(method, path, h)
 	return e
@@ -261,14 +261,14 @@ func TestGetUserProfile_InactiveTarget404(t *testing.T) {
 
 func TestUpdateMe_PartialFieldsApplied(t *testing.T) {
 	store := &stubUserStore{
-		updateProfile: func(ctx context.Context, arg db.UpdateUserProfileParams) (db.User, error) {
+		updateProfile: func(ctx context.Context, arg db.UpdateUserProfileParams) (db.UpdateUserProfileRow, error) {
 			if !arg.DisplayName.Valid || arg.DisplayName.String != "New Name" {
 				t.Errorf("display_name = %+v, want New Name", arg.DisplayName)
 			}
 			if arg.Bio.Valid {
 				t.Errorf("bio must stay unchanged when omitted, got %+v", arg.Bio)
 			}
-			return db.User{ID: arg.ID, Username: "viewer", IsActive: true, DisplayName: arg.DisplayName}, nil
+			return db.UpdateUserProfileRow{ID: arg.ID, Username: "viewer", IsActive: true, DisplayName: arg.DisplayName}, nil
 		},
 	}
 	uh := newUserHandlerForTest(store)
@@ -284,6 +284,98 @@ func TestUpdateMe_PartialFieldsApplied(t *testing.T) {
 	decodeData(t, rec, &got)
 	if got.DisplayName == nil || *got.DisplayName != "New Name" {
 		t.Errorf("display_name = %v", got.DisplayName)
+	}
+}
+
+func TestUpdateMe_ExternalAvatarCleansActiveAndPendingObjects(t *testing.T) {
+	activeKey := "avatars/" + testViewerID.String() + "/active.png"
+	pendingKey := "avatars/" + testViewerID.String() + "/pending.png"
+	store := &stubUserStore{
+		updateProfile: func(ctx context.Context, arg db.UpdateUserProfileParams) (db.UpdateUserProfileRow, error) {
+			return db.UpdateUserProfileRow{
+				ID:        arg.ID,
+				Username:  "viewer",
+				IsActive:  true,
+				AvatarUrl: sql.NullString{String: "https://example.com/avatar.png", Valid: true},
+				PreviousAvatarKey: sql.NullString{
+					String: activeKey, Valid: true,
+				},
+				PreviousPendingAvatarKey: sql.NullString{
+					String: pendingKey, Valid: true,
+				},
+			}, nil
+		},
+	}
+	queue := &stubEnqueuer{}
+	uh := newUserHandlerForTest(store)
+	uh.Queue = queue
+	e := harnessAuthEcho(viewerUser(), http.MethodPut, "/api/users/me", uh.UpdateMe)
+
+	rec := doJSON(e, http.MethodPut, "/api/users/me", `{"avatar_url":"https://example.com/avatar.png"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if len(queue.cleanupObjectsKeys) != 2 {
+		t.Fatalf("cleanup tasks = %v, want active and pending avatar", queue.cleanupObjectsKeys)
+	}
+	if queue.cleanupObjectsKeys[0][0] != activeKey || queue.cleanupObjectsKeys[1][0] != pendingKey {
+		t.Errorf("cleanup keys = %v, want %q then %q", queue.cleanupObjectsKeys, activeKey, pendingKey)
+	}
+}
+
+func TestUpdateMe_EchoedPresignedAvatarURLKeepsR2Avatar(t *testing.T) {
+	activeKey := "avatars/" + testViewerID.String() + "/active.png"
+	echoedURL := "https://acct.r2.example/mokibox/" + activeKey +
+		"?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=smoke&X-Amz-Signature=signature"
+	const refreshedURL = "https://acct.r2.example/mokibox/avatars/refreshed.png?X-Amz-Signature=fresh"
+	store := &stubUserStore{
+		updateProfile: func(_ context.Context, arg db.UpdateUserProfileParams) (db.UpdateUserProfileRow, error) {
+			if arg.AvatarUrl.Valid {
+				t.Errorf("echoed presigned avatar URL must not be persisted: %+v", arg.AvatarUrl)
+			}
+			return db.UpdateUserProfileRow{
+				ID:        arg.ID,
+				Username:  "viewer",
+				IsActive:  true,
+				AvatarKey: sql.NullString{String: activeKey, Valid: true},
+			}, nil
+		},
+	}
+	r2 := &stubR2{
+		presignGet: func(_ context.Context, key string, _ time.Duration) (string, error) {
+			if key != activeKey {
+				t.Errorf("PresignGet key = %q, want %q", key, activeKey)
+			}
+			return refreshedURL, nil
+		},
+	}
+	queue := &stubEnqueuer{}
+	uh := newUserHandlerForTest(store)
+	uh.R2 = r2
+	uh.Queue = queue
+	uh.Cfg = &shared.APIConfig{
+		R2Endpoint: "https://acct.r2.example",
+		R2Bucket:   "mokibox",
+	}
+	e := harnessAuthEcho(viewerUser(), http.MethodPut, "/api/users/me", uh.UpdateMe)
+
+	body, err := json.Marshal(map[string]string{"avatar_url": echoedURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := doJSON(e, http.MethodPut, "/api/users/me", string(body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		AvatarURL *string `json:"avatar_url"`
+	}
+	decodeData(t, rec, &got)
+	if got.AvatarURL == nil || *got.AvatarURL != refreshedURL {
+		t.Errorf("avatar_url = %v, want refreshed URL %q", got.AvatarURL, refreshedURL)
+	}
+	if len(queue.cleanupObjectsKeys) != 0 {
+		t.Errorf("echoed URL must not clean up active avatar: %v", queue.cleanupObjectsKeys)
 	}
 }
 
@@ -873,9 +965,9 @@ func TestWebhook_UserRemovedMissingLocalUserAcked(t *testing.T) {
 
 // Compile-time checks.
 var (
-	_ userStore          = (*stubUserStore)(nil)
-	_ notificationStore  = (*stubNotificationStore)(nil)
-	_ feedStore          = (*stubFeedStore)(nil)
-	_ webhookStore       = (*stubWebhookStore)(nil)
-	_ visibilityStore    = (*stubUserStore)(nil)
+	_ userStore         = (*stubUserStore)(nil)
+	_ notificationStore = (*stubNotificationStore)(nil)
+	_ feedStore         = (*stubFeedStore)(nil)
+	_ webhookStore      = (*stubWebhookStore)(nil)
+	_ visibilityStore   = (*stubUserStore)(nil)
 )

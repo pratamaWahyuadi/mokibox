@@ -44,16 +44,19 @@ type Notification struct {
 }
 
 type User struct {
-	ID          uuid.UUID      `json:"id"`
-	ZitadelID   string         `json:"zitadel_id"`
-	Username    string         `json:"username"`
-	DisplayName sql.NullString `json:"display_name"`
-	Bio         sql.NullString `json:"bio"`
-	AvatarUrl   sql.NullString `json:"avatar_url"`
-	IsPrivate   bool           `json:"is_private"`
-	IsActive    bool           `json:"is_active"`
-	DeletedAt   sql.NullTime   `json:"deleted_at"`
-	CreatedAt   time.Time      `json:"created_at"`
+	ID                     uuid.UUID      `json:"id"`
+	ZitadelID              string         `json:"zitadel_id"`
+	Username               string         `json:"username"`
+	DisplayName            sql.NullString `json:"display_name"`
+	Bio                    sql.NullString `json:"bio"`
+	AvatarUrl              sql.NullString `json:"avatar_url"`
+	IsPrivate              bool           `json:"is_private"`
+	IsActive               bool           `json:"is_active"`
+	DeletedAt              sql.NullTime   `json:"deleted_at"`
+	CreatedAt              time.Time      `json:"created_at"`
+	AvatarKey              sql.NullString `json:"avatar_key"`
+	PendingAvatarKey       sql.NullString `json:"pending_avatar_key"`
+	PendingAvatarExpiresAt sql.NullTime   `json:"pending_avatar_expires_at"`
 }
 
 type Video struct {

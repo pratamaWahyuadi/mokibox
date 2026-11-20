@@ -260,8 +260,13 @@ func (h *UserHandler) ListFollowers(c echo.Context) error {
 
 	items := make([]followListItem, 0, len(rows))
 	for _, r := range rows {
+		summary, err := h.followerListUserSummary(c.Request().Context(), r)
+		if err != nil {
+			slog.Error("presign follower avatar failed", "err", err, "user_id", r.ID)
+			return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load follower avatar URLs"))
+		}
 		items = append(items, followListItem{
-			User:      followerListUserSummary(r),
+			User:      summary,
 			CreatedAt: formatVideoTime(r.CreatedAt),
 		})
 	}
@@ -318,8 +323,13 @@ func (h *UserHandler) ListFollowing(c echo.Context) error {
 
 	items := make([]followListItem, 0, len(rows))
 	for _, r := range rows {
+		summary, err := h.followingListUserSummary(c.Request().Context(), r)
+		if err != nil {
+			slog.Error("presign following avatar failed", "err", err, "user_id", r.ID)
+			return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load following avatar URLs"))
+		}
 		items = append(items, followListItem{
-			User:      followerListUserSummaryFromFollowing(r),
+			User:      summary,
 			CreatedAt: formatVideoTime(r.CreatedAt),
 		})
 	}
@@ -378,39 +388,21 @@ func (h *UserHandler) assertCanSeeFollowList(c echo.Context, viewerID, targetID 
 // followerListUserSummary builds a UserSummary from a
 // ListFollowersRow (which is the user that follows the
 // target).
-func followerListUserSummary(r db.ListFollowersRow) *UserSummary {
-	out := UserSummary{
-		ID:        r.ID,
-		Username:  r.Username,
-		IsPrivate: r.IsPrivate,
+func (h *UserHandler) followerListUserSummary(ctx context.Context, r db.ListFollowersRow) (*UserSummary, error) {
+	out, err := userSummaryFromRow(ctx, h.R2, h.Cfg, r.DisplayName, r.AvatarUrl, r.AvatarKey, r.ID, r.Username, r.IsPrivate)
+	if err != nil {
+		return nil, err
 	}
-	if r.DisplayName.Valid {
-		v := r.DisplayName.String
-		out.DisplayName = &v
-	}
-	if r.AvatarUrl.Valid {
-		v := r.AvatarUrl.String
-		out.AvatarURL = &v
-	}
-	return &out
+	return &out, nil
 }
 
 // followerListUserSummaryFromFollowing is the
 // ListFollowing counterpart: the row already carries
 // the same field set, so the same mapper works.
-func followerListUserSummaryFromFollowing(r db.ListFollowingRow) *UserSummary {
-	out := UserSummary{
-		ID:        r.ID,
-		Username:  r.Username,
-		IsPrivate: r.IsPrivate,
+func (h *UserHandler) followingListUserSummary(ctx context.Context, r db.ListFollowingRow) (*UserSummary, error) {
+	out, err := userSummaryFromRow(ctx, h.R2, h.Cfg, r.DisplayName, r.AvatarUrl, r.AvatarKey, r.ID, r.Username, r.IsPrivate)
+	if err != nil {
+		return nil, err
 	}
-	if r.DisplayName.Valid {
-		v := r.DisplayName.String
-		out.DisplayName = &v
-	}
-	if r.AvatarUrl.Valid {
-		v := r.AvatarUrl.String
-		out.AvatarURL = &v
-	}
-	return &out
+	return &out, nil
 }

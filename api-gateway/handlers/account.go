@@ -58,6 +58,7 @@ import (
 // transaction. Satisfied by *db.Queries via WithTx.
 type accountTxStore interface {
 	ListVideoKeysByUser(ctx context.Context, userID uuid.UUID) ([]db.ListVideoKeysByUserRow, error)
+	GetUserAvatarKeys(ctx context.Context, id uuid.UUID) (db.GetUserAvatarKeysRow, error)
 	DecrementLikesForUser(ctx context.Context, userID uuid.UUID) error
 	DecrementCommentsForUser(ctx context.Context, userID uuid.UUID) error
 	DeleteVideosByUser(ctx context.Context, userID uuid.UUID) error
@@ -165,8 +166,8 @@ func DeleteUserData(ctx context.Context, q *db.Queries, dbHandle *sql.DB, queue 
 
 // deleteUserData is the testable core of the delete
 // cascade. Flow (per LLD section 11):
-//  1. Tx body (via the runner): ListVideoKeysByUser
-//     (collect r2_key + thumbnail keys first) ->
+//  1. Tx body (via the runner): collect video and avatar
+//     keys first ->
 //     DecrementLikesForUser / DecrementCommentsForUser
 //     (counter corrections on other users' videos) ->
 //     DeleteVideosByUser (cascades likes + comments on
@@ -230,15 +231,26 @@ func deleteUserData(ctx context.Context, runner txRunner[accountTxStore], queue 
 func collectUserR2Keys(ctx context.Context, runner txRunner[accountTxStore], userID uuid.UUID) ([]string, error) {
 	var r2Keys []string
 	err := runner.Run(ctx, func(qtx accountTxStore) error {
-		// Step 1: collect R2 keys BEFORE the rows
-		// disappear. ListVideoKeysByUser reads the
-		// videos table; once DeleteVideosByUser runs,
-		// the keys are gone.
+		// Step 1: collect R2 keys BEFORE the rows disappear.
 		rows, err := qtx.ListVideoKeysByUser(ctx, userID)
 		if err != nil {
 			return shared.Wrap(shared.ErrInternal, fmt.Sprintf("list video keys: %v", err))
 		}
-		r2Keys = make([]string, 0, 3*len(rows))
+		avatarKeys, err := qtx.GetUserAvatarKeys(ctx, userID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				r2Keys = nil
+				return errNoLocalUser
+			}
+			return shared.Wrap(shared.ErrInternal, fmt.Sprintf("list avatar keys: %v", err))
+		}
+		r2Keys = make([]string, 0, 3*len(rows)+2)
+		if avatarKeys.AvatarKey.Valid && avatarKeys.AvatarKey.String != "" {
+			r2Keys = append(r2Keys, avatarKeys.AvatarKey.String)
+		}
+		if avatarKeys.PendingAvatarKey.Valid && avatarKeys.PendingAvatarKey.String != "" {
+			r2Keys = append(r2Keys, avatarKeys.PendingAvatarKey.String)
+		}
 		for _, r := range rows {
 			r2Keys = append(r2Keys, r.R2Key)
 			if r.ThumbnailKey.Valid && r.ThumbnailKey.String != "" {
