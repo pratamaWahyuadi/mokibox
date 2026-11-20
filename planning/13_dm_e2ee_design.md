@@ -9,10 +9,12 @@ DM pull request or issue.
 
 ## Product and planning context
 
-The current PRD lists direct messages as P3 ("evaluate first; do not schedule").
-This document supports that evaluation. Promoting DM to a committed product
-phase requires an explicit product decision and corresponding planning/issue
-updates.
+The current PRD does not assign a priority to direct messages. The separate
+`planning/ROADMAP_TIKTOK_PARITY.md` lists DM under P3 ("eval dulu, jangan
+dijadwalkan"), but that roadmap is marked Draft and is awaiting user approval.
+Treat this as an unapproved evaluation note, not a committed product priority.
+Promoting DM to a committed product phase requires an explicit product
+decision and corresponding planning/issue updates.
 
 The working product goals discussed so far are:
 
@@ -38,6 +40,8 @@ These are planning inputs, not a finalized protocol or client contract.
   model; a server must not silently replace a trusted identity key.
 - The selected construction must provide appropriate forward-secrecy and
   post-compromise properties for asynchronous multi-device messaging.
+- Push notifications must not expose plaintext message content; any message
+  preview shown by the client must be decrypted locally on the device.
 - No custom cryptographic primitives or unreviewed protocol variants.
 
 ## Threat model
@@ -109,6 +113,8 @@ device identity key is trustworthy.
   linked devices as required by the protocol.
 - Handles offline queues, duplicate delivery, replay protection, and session
   recovery according to the selected library.
+- If an OS notification displays a message preview, the client decrypts the
+  content locally; push providers must never receive plaintext or previews.
 
 ### Backend
 
@@ -120,6 +126,9 @@ device identity key is trustworthy.
 - Enforces conversation membership, request state, and device authorization.
 - Delivers messages and ephemeral events over an approved transport; records
   only the minimum metadata required for delivery and abuse controls.
+- If FCM/APNs is used for offline delivery, sends no plaintext or message
+  preview in the push payload. Prefer a generic wake-up signal; any encrypted
+  envelope used for a client-side preview remains opaque to the provider.
 - Purges server-held ciphertext and device directory entries on account
   deletion, subject to documented retention and backup behavior.
 
@@ -176,6 +185,11 @@ Before production scope is approved, document:
 
 - Which identifiers, IP/session details, timestamps, envelope sizes, receipt
   states, and presence events the server can observe and retain.
+- Whether offline delivery uses FCM/APNs, what the push payload contains, and
+  what additional metadata push providers can observe (such as device tokens,
+  app identifiers, routing data, and delivery timing). Push payloads must not
+  include plaintext or previews; message decryption and display happen on the
+  client.
 - Retention and deletion rules for ciphertext, public keys, prekeys, delivery
   state, logs, metrics, and backups.
 - Message-request limits, recipient blocking/reporting, prekey-exhaustion
@@ -189,13 +203,16 @@ Before production scope is approved, document:
 ## Open decisions before implementation
 
 - Confirm the client repository, framework, supported platforms, and owner.
-- Approve the product scope and whether DM moves beyond PRD P3 evaluation.
+- Approve the product scope and whether DM should be prioritized; the P3 entry
+  in the Draft parity roadmap is not approved.
 - Select and review a protocol/library and its license.
 - Approve device enrollment, identity verification, and key-change UX.
 - Define the ciphertext envelope, message ordering/synchronization cursor,
   retention, and idempotency contract.
 - Decide transport and fanout architecture for delivery, receipts, and
   ephemeral presence.
+- Decide the offline-delivery and push-notification design, including payload
+  contents and which metadata platform push providers can observe.
 - Define abuse limits and the account-deletion contract for other participants'
   history.
 - Agree on security-review ownership and release gates.
