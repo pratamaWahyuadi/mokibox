@@ -3,10 +3,9 @@
 **Status:** Design and threat-model proposal only. No protocol, library, API,
 or production scope is approved by this document.
 
-**Purpose:** Design and threat-model an E2EE chat for MokiBox with a product
-target of feature coverage comparable to TikTok/Instagram DM. This document
-starts from the current `main` baseline; it does not continue or depend on any
-earlier DM pull request or issue.
+**Purpose:** Evaluate a private 1:1 text chat for MokiBox. This document starts
+from the current `main` baseline; it does not continue or depend on any earlier
+DM pull request or issue.
 
 ## Product and planning context
 
@@ -17,52 +16,38 @@ Treat this as an unapproved evaluation note, not a committed product priority.
 Promoting DM to a committed product phase requires an explicit product
 decision and corresponding planning/issue updates.
 
-The product direction is to keep E2EE as a requirement while targeting a
-TikTok/Instagram-like set of user-facing chat capabilities. This is a product
-target, not a claim that every reference-app behavior is compatible with E2EE
-or will ship at once. The design must make capability gaps and trade-offs
-explicit rather than silently dropping parity features.
+The working product goals discussed so far are:
 
-- 1:1 text messages and first-contact message requests.
-- Share MokiBox videos, media, and voice notes; support reactions, replies,
-  unsend, and group chat as parity capabilities to design and sequence.
+- 1:1 text messages; no media in the initial scope.
+- Sharing a MokiBox video in a DM is an important capability to evaluate. The
+  proposed E2EE shape is to include a video reference/ID inside the encrypted
+  message, not to expose the reference in server-readable message metadata.
 - Multiple devices per account.
 - No server-side recovery of private encryption keys.
+- Message requests for first contact.
 - Delivery/read receipts and online/typing indicators, subject to a documented
   metadata and privacy review.
-- Preserve useful search and new-device history experiences where possible,
-  while documenting E2EE limitations and recovery trade-offs.
-- Blocking and user-initiated reporting, with clear limits on moderation
-  without plaintext access.
 - Best-effort account-deletion propagation; deletion cannot erase offline,
   backed-up, exported, or copied plaintext.
 
-These are product targets for evaluation, not a release commitment, finalized
-protocol, or client contract.
+These are planning inputs, not a finalized protocol or client contract.
 
 ## Feature coverage and boundaries
 
-This is a status of the design work, not implemented product functionality.
-Parity features remain targets to design and prioritize; the table does not
-promise they are all included in the first release.
+This is a status of the design work, not implemented product functionality:
 
 | Capability | Current design status | Boundary or open point |
 |---|---|---|
-| 1:1 text and message requests | Parity target; design incomplete | Define request limits and acceptance behavior; no implementation exists. |
-| Read receipts, typing, and online status | Parity target; design incomplete | Requires realtime delivery and discloses activity metadata. |
+| 1:1 text | Proposed for evaluation | No DM implementation exists in this proposal. |
+| First-contact message requests | Proposed for evaluation | Policy and a limit on messages before acceptance remain undecided. |
+| Read receipts, typing, and online status | Proposed for evaluation | Requires a realtime delivery design and discloses activity metadata. |
 | Push notifications | Privacy requirement documented | No plaintext or preview in FCM/APNs payloads; the client decrypts locally. |
-| Block and report | Parity target; design incomplete | Define blocking effects and a user-controlled report flow; reporting may disclose selected plaintext to moderators. |
-| Share a MokiBox video in DM | Parity target; design incomplete | Keep the video ID/reference inside encrypted message content. Define recipient authorization, deleted/private video behavior, previews, and metadata when the recipient opens it. |
-| Media and voice notes | Parity target; design incomplete | Define client-side encryption, ciphertext storage/delivery, size/type limits, preview behavior, and abuse reporting. |
-| Reactions, replies, and unsend | Parity target; design incomplete | Define encrypted event semantics, edits/deletion propagation, offline behavior, and what recipients may already have copied. |
-| Group chat | Parity target; design incomplete | Requires a multi-member key-management/protocol evaluation and membership-change behavior. |
-| Message search | Parity target with an E2EE constraint | The server cannot search opaque message content. Evaluate local search and explicitly decide whether that satisfies product expectations; do not imply server-side search works. |
-| History on a new device | Parity target with a recovery constraint | Evaluate authenticated device-to-device transfer without server-side private-key recovery. If no approved device or transfer is available, local history may be lost. |
-
-If a reference-app behavior fundamentally requires server access to plaintext,
-record the difference as an explicit E2EE trade-off and product decision. Do
-not silently weaken encryption or call an unavailable server-side behavior
-"feature parity".
+| Block and report | Needed, not designed | Blocking behavior and a user-controlled report flow need decisions; reporting may disclose selected plaintext to moderators. |
+| Share a MokiBox video in DM | Important proposed capability, missing from the prior design | Put the video ID/reference inside encrypted message content. Define recipient authorization, deleted/private video behavior, previews, and the metadata exposed when the recipient opens it. |
+| Media, voice notes, reactions, replies, and unsend | Outside initial scope | Do not imply support in the first version. |
+| Group chat | Outside initial scope | Requires a separate protocol and product-scope review. |
+| Server-side message search | Not available over opaque E2EE content | Client-side search over locally decrypted history is a separate, undecided capability. |
+| History on a new device | Limited without key recovery | Without an approved transfer/recovery design, local history may be lost when a device is lost. |
 
 ## Security goals
 
@@ -83,7 +68,7 @@ not silently weaken encryption or call an unavailable server-side behavior
 
 ### Assets
 
-- Message plaintext, media/voice attachments, and local history.
+- Message plaintext, attachments (out of initial scope), and local history.
 - Device identity private keys, prekeys, session/ratchet state, and backups.
 - Public identity keys, signed prekeys, and one-time prekeys.
 - Device membership, enrollment approvals, revocations, and identity changes.
@@ -132,8 +117,8 @@ The protocol review must define, before implementation:
 6. User-visible identity verification (for example, an out-of-band
    fingerprint or QR flow) and the security limitations of an unverified
    first contact.
-7. Local history migration, authenticated device-to-device transfer, device
-   loss, and explicit no-server-private-key-recovery behavior.
+7. Local history migration, device loss, and the explicit no-server-recovery
+   behavior.
 
 Do not treat an authenticated account or HTTPS connection as proof that a
 device identity key is trustworthy.
@@ -176,36 +161,23 @@ cryptography cannot be implemented or validated here yet.
 
 ## Protocol and library decision gate
 
-No protocol or library is selected. This preliminary shortlist is based on
-official project documentation checked on 2026-11-20. A cryptographic library
-is only one component: it does not by itself define MokiBox's device directory,
-identity verification, delivery service, storage, abuse policy, media
-encryption, recovery, or complete client behavior.
-
-| Candidate | Officially documented scope and license | Relevance and integration risks to validate |
-|---|---|---|
-| [Signal `libsignal`](https://github.com/signalapp/libsignal) | Signal Protocol implementation; repo exposes Java, Swift, and TypeScript APIs over Rust. AGPL-3.0. | Strong candidate to evaluate for asynchronous 1:1 and device features, but Signal states use outside its own clients is unsupported. No official Dart/Flutter binding is documented; Flutter platform bridges and API stability need proof-of-concept work. AGPL compatibility needs legal review before adoption. |
-| [Matrix `vodozemac`](https://github.com/matrix-org/vodozemac) | Rust implementation of Olm and Megolm; Apache-2.0. The project README reports one Least Authority audit with no significant findings. | Relevant for pairwise and group messaging patterns used by Matrix, but it is a cryptographic component, not a complete MokiBox messaging stack. No official Dart/Flutter binding is documented; Matrix-specific device/key-management semantics and native bridges require evaluation. |
-| [OpenMLS](https://github.com/openmls/openmls) | Rust implementation of MLS (RFC 9420); MIT. The README lists Android/iOS targets as built on CI but not tested there. | Relevant to the required group-chat target. It is an MLS building block, not a complete 1:1/multi-device product design. Mobile runtime support, Flutter integration, asynchronous delivery, device semantics, and the project's audit scope need verification. |
-
-These are candidates for due diligence, not recommendations or approvals.
-License compatibility is not legal advice. None is documented here as having
-an official Dart/Flutter binding.
+No protocol or library is selected. Evaluate established asynchronous
+multi-device messaging designs and their client bindings. Candidate families
+may include the Signal protocol suite (for example, PQXDH/X3DH, Double Ratchet,
+and multi-device session management) and MLS where its group model is
+appropriate. These are investigation leads, not recommendations or approvals.
 
 For each candidate, review:
 
 - Protocol coverage for 1:1 asynchronous messaging and multiple devices.
-- Current maintenance, security policy, and the precise scope and date of any
-  independent audit; an audit of a library does not audit MokiBox integration.
+- Current maintenance, security policy, and independently reviewed audit
+  scope.
 - Client-platform support, secure-storage integration, interoperability, and
   test-vector coverage.
 - License compatibility, including copyleft obligations and distribution
   model.
 - Build provenance, dependency update process, vulnerability response, and
   migration/rollback behavior.
-- A proof of concept in the actual Flutter repository, including Android and
-  iOS build, key persistence, device lifecycle, multi-device fanout, media
-  encryption, and group membership changes.
 
 Passing tests, popularity, a verified package publisher, or use by another
 product is not by itself evidence of a security audit. Security review is
@@ -264,17 +236,11 @@ Before production scope is approved, document:
 - Approve device enrollment, identity verification, and key-change UX.
 - Define the ciphertext envelope, message ordering/synchronization cursor,
   retention, and idempotency contract.
-- Define the parity target and delivery sequence for media, voice notes,
-  reactions, replies, unsend, and group chat; specify which behaviors are
-  E2EE-compatible and which require explicit product trade-offs.
-- Decide whether local-only message search meets user expectations given that
-  the server cannot search opaque ciphertext.
-- Decide how new-device history transfer can work without server-side private
-  key recovery, and state what happens if no trusted device is available.
 - Decide transport and fanout architecture for delivery, receipts, and
   ephemeral presence.
-- Specify encrypted video-reference authorization, deleted/private-video
-  behavior, and client rendering.
+- Decide whether encrypted video references are part of the initial DM
+  capability and specify authorization, deleted/private-video behavior, and
+  client rendering.
 - Decide the offline-delivery and push-notification design, including payload
   contents and which metadata platform push providers can observe.
 - Define abuse limits and the account-deletion contract for other participants'
