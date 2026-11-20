@@ -501,12 +501,13 @@ HANDOFF.md                               MODIFIED — this section
   message requests, delivery/read receipts, online/typing, and best-effort
   deletion of server ciphertext plus client purge requests. Offline copies and
   backups cannot be guaranteed erased.
-- No Flutter/mobile client repository was found in the active workspace. E2EE
-  implementation is blocked until the client repository/owner is identified
-  and a maintained, audited protocol/library is selected through a threat
-  model and security review.
-- Realtime transport (SSE vs WebSocket) remains undecided. HTTP polling in the
-  current prototype is not sufficient for online/typing behavior.
+- No Flutter/mobile client repository was found in the active workspace; the
+  user's friend will provide or prepare it. E2EE implementation is blocked
+  until the repository is available and a maintained, audited protocol/library
+  is selected through a threat model and security review.
+- WebSocket is selected for bidirectional delivery and online/typing events;
+  HTTP remains for history and pagination. The server-visible metadata must be
+  documented.
 - Before implementation resumes, rebase after PR #72 and reconcile migration
   008/009, `sqlc.yaml`, routes, and account-deletion changes.
 

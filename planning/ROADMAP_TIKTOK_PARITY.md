@@ -109,9 +109,9 @@ streaming, AI moderation, watermark, email digest, data export, admin analytics.
 Live go-to + gift, multi-region, monetisasi, A/B testing framework.
 Atas prioritas produk terbaru, DM dipindahkan ke PR #74 sebagai target
 multi-device E2EE 1:1, dengan message requests, delivery/read receipt, dan
-online/typing. PR masih draft: kode yang ada plaintext dan belum memenuhi
-target. Implementasi menunggu threat model/protokol serta repo aplikasi client;
-transport realtime juga belum dipilih.
+online/typing via WebSocket. HTTP digunakan untuk history/pagination. PR masih
+draft: kode yang ada plaintext dan belum memenuhi target. Implementasi menunggu
+threat model/protokol serta repo aplikasi client.
 
 ---
 

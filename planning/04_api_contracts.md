@@ -1373,8 +1373,9 @@ Persyaratan produk yang sudah diputuskan:
 - Chat 1:1 berbasis teks; media tidak termasuk.
 - Mendukung beberapa device per akun, tanpa pemulihan private key oleh server.
 - Message request tetap ada; penerima harus menerima request sebelum membalas.
-- Mendukung delivery/read receipt dan status online/typing. Transport realtime
-  dan metadata yang terlihat server masih perlu diputuskan.
+- Mendukung delivery/read receipt dan status online/typing. WebSocket dipilih
+  untuk event dua arah; HTTP tetap dipakai untuk history/pagination. Metadata
+  yang terlihat server harus didokumentasikan.
 - Penghapusan akun menghapus ciphertext server dan meminta penghapusan lokal
   best-effort saat client tersambung. Salinan pada device offline, backup, atau
   hasil ekspor tidak dapat dijamin terhapus.
