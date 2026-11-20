@@ -20,7 +20,8 @@ changes and migration ordering before implementation resumes.
 - Account deletion removes server-held ciphertext and requests best-effort
   deletion from clients when they reconnect. It cannot erase offline,
   backed-up, exported, or copied messages.
-- A friend will provide or prepare the Flutter/mobile client repository.
+- The user will prepare the client and implementation; their friend will
+  review the work and decide whether to merge.
 
 ## Security goals and threat model
 
