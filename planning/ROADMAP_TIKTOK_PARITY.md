@@ -107,10 +107,11 @@ streaming, AI moderation, watermark, email digest, data export, admin analytics.
 ## 6. P3 — backlog (evaluasi dulu, jangan dijadwalkan)
 
 Live go-to + gift, multi-region, monetisasi, A/B testing framework.
-Atas prioritas produk terbaru, DM sedang diimplementasikan terpisah dari
-search: MVP teks 1:1, message requests, inbox/history/read receipt, HTTP
-polling. Implementasi DM ditinjau terpisah dan belum dianggap selesai sebelum
-PR-nya diterima.
+Atas prioritas produk terbaru, DM dipindahkan ke PR #74 sebagai target
+multi-device E2EE 1:1, dengan message requests, delivery/read receipt, dan
+online/typing. PR masih draft: kode yang ada plaintext dan belum memenuhi
+target. Implementasi menunggu threat model/protokol serta repo aplikasi client;
+transport realtime juga belum dipilih.
 
 ---
 

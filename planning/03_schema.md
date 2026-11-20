@@ -390,23 +390,26 @@ Notifikasi in-app untuk event follow, like, dan comment.
 
 ---
 
-## DDL Migration — `009_direct_messages.sql`
+## Direct Messages — schema draft (E2EE belum diimplementasikan)
 
-DM MVP memakai `dm_conversations` untuk pasangan user dan state message request,
-serta `dm_messages` untuk pesan teks. Pesan request hanya masuk inbox utama
-setelah diterima. Foreign key cascade menghapus pesan bersama conversation.
+Migration `009_direct_messages.sql` pada PR #74 adalah prototipe plaintext dan
+**tidak boleh dipakai untuk rollout produksi**. Tabel `dm_messages.content`
+menyimpan plaintext, jadi schema tersebut tidak memenuhi persyaratan E2EE dan
+harus ditinjau ulang sebelum merge.
 
-- Conversation unik untuk pasangan user dengan ID disimpan dalam urutan UUID
-  canonical (`participant_low_id < participant_high_id`).
-- `request_status`: `pending`, `accepted`, atau `declined`. Request dibuat saat
-  penerima belum follow pengirim; hanya penerima yang boleh accept/decline.
-- Pesan teks 1–2000 karakter. Media, grup, typing indicator, dan push
-  notification belum termasuk MVP.
-- `read_at` menyimpan read receipt. Pesan request tidak ditandai terbaca
-  sebelum penerima menerima request.
-- Index conversation dan message mendukung inbox serta cursor pagination.
-- `DeleteDMConversationsForUser` menghapus semua conversation dan pesan dalam
-  transaksi penghapusan akun.
+Schema final harus ditentukan setelah protokol dan client dipilih. Minimal:
+
+- Pesan disimpan sebagai envelope ciphertext berversi; tidak ada kolom plaintext
+  pesan atau private key di database.
+- Identity key, signed prekey, one-time prekey, dan session dikelola per device;
+  server hanya menyimpan material publik yang diperlukan untuk bootstrap.
+- Metadata delivery/read dan presence/typing harus dipisahkan dari payload dan
+  meminimalkan informasi yang dapat dilihat server.
+- Penghapusan akun menghapus ciphertext server dan mengirim permintaan purge
+  best-effort ke device lawan bicara yang kembali online; salinan offline atau
+  backup tidak dapat dijamin terhapus.
+- Conversation tetap unik per pasangan user, dengan request status yang
+  membatasi pengiriman pesan pertama dan balasan sebelum request diterima.
 
 ---
 

@@ -74,7 +74,7 @@ db-migrate: ## Apply migrations/001_init.sql (forward-only, no rollback).
 		psql -U $(POSTGRES_USER) -d $(DB_NAME) -v ON_ERROR_STOP=1
 
 .PHONY: db-migrate-dm
-db-migrate-dm: ## Apply migrations/009_direct_messages.sql before deploying direct-message routes.
+db-migrate-dm: ## Apply plaintext DM prototype migration 009 locally; not E2EE-ready.
 	@if [ ! -f $(MIGRATIONS)/009_direct_messages.sql ]; then \
 		echo "ERROR: $(MIGRATIONS)/009_direct_messages.sql not found."; \
 		exit 1; \

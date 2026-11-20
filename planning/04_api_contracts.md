@@ -1355,62 +1355,28 @@ Error:
 
 ---
 
-## 12. Direct Messages (MVP)
+## 12. Direct Messages (E2EE — draft)
 
-MVP ini menyediakan chat teks 1:1, inbox, message requests, riwayat
-berhalaman, dan read receipt. Client mengambil pesan baru dengan HTTP polling;
-WebSocket, lampiran, grup, typing status, push notification, dan enkripsi
-end-to-end belum termasuk. Pesan disimpan dalam plaintext di server. “End to
-end” pada fitur ini berarti alur produk/backend lengkap, bukan E2EE.
+Chat v1 mensyaratkan enkripsi end-to-end kriptografis yang sesungguhnya:
+plaintext dan private key hanya tersedia di device pengguna. Server hanya
+boleh menyimpan atau meneruskan ciphertext dan metadata minimum. Definisi ini
+tidak boleh diubah menjadi sekadar “alur produk lengkap”.
 
-Saat user mengirim pesan pertama, conversation menjadi `accepted` bila
-penerima sudah follow pengirim; selain itu conversation berstatus `pending`
-dan muncul di folder request penerima (`folder=requests`). Pengirim melihatnya
-di `folder=sent`. Penerima hanya dapat membalas setelah menerima request.
-Menolak request menyembunyikannya dari penerima dan mencegah pengirim mengirim
-lagi sampai penerima yang memulai kembali conversation.
+**Status:** endpoint dan migration DM yang ada pada PR #74 adalah prototipe
+plaintext, bukan implementasi kontrak ini. Jangan deploy atau merge sebagai
+fitur chat produksi. Rute pada tabel API di atas bersifat sementara dan payload
+final belum ditentukan; kontrak akan ditulis ulang setelah threat model,
+protokol, library terawat, dan integrasi client disepakati.
 
-### `POST /api/messages`
+Persyaratan produk yang sudah diputuskan:
 
-Request:
-
-```json
-{
-  "recipient_id": "9f7d3c86-....",
-  "content": "Halo!"
-}
-```
-
-`content` wajib berisi 1–2000 karakter setelah trim whitespace. Response
-`201 Created` berisi `conversation_id`, `request_status`, dan pesan yang
-dibuat.
-
-### `GET /api/messages/conversations`
-
-Query: `folder=inbox|requests|sent` (default `inbox`), `limit`, `cursor`.
-Inbox berisi conversation yang diterima; requests berisi request masuk;
-sent berisi request pending yang dikirim user. Response memakai envelope list
-dan cursor standar. Setiap item memuat user lain, status request, pesan
-terakhir, waktu, pengirim terakhir, dan unread count.
-
-### `GET /api/messages/conversations/:id`
-
-Mengambil pesan terbaru lebih dulu; gunakan `cursor` untuk membaca halaman
-lebih lama. Untuk polling pesan baru, kirim `after` dengan cursor pesan
-terakhir yang sudah diterima; `cursor` dan `after` tidak boleh dipakai
-bersamaan. `limit` maksimum 50. Hanya anggota conversation yang dapat
-membaca; akses tidak sah atau conversation yang tidak ada sama-sama `404`.
-Pesan dalam request pending dapat dilihat penerima untuk menentukan apakah
-akan menerima atau menolak.
-
-### `PUT /api/messages/conversations/:id/read`
-
-Menandai pesan dari anggota lain sebagai dibaca dan mengembalikan
-`{"data":{"updated_count":N}}`. Read receipt baru dicatat setelah request
-diterima.
-
-### `POST /api/messages/conversations/:id/accept` dan `/decline`
-
-Hanya penerima request yang dapat melakukan aksi ini. Keduanya tidak
-membutuhkan request body dan mengembalikan conversation ID serta status baru.
-Request yang tidak ada atau bukan milik user menghasilkan `404`.
+- Chat 1:1 berbasis teks; media tidak termasuk.
+- Mendukung beberapa device per akun, tanpa pemulihan private key oleh server.
+- Message request tetap ada; penerima harus menerima request sebelum membalas.
+- Mendukung delivery/read receipt dan status online/typing. Transport realtime
+  dan metadata yang terlihat server masih perlu diputuskan.
+- Penghapusan akun menghapus ciphertext server dan meminta penghapusan lokal
+  best-effort saat client tersambung. Salinan pada device offline, backup, atau
+  hasil ekspor tidak dapat dijamin terhapus.
+- Desain protokol dan threat model harus ditinjau sebelum implementasi
+  produksi. Jangan membuat primitive kriptografi sendiri.

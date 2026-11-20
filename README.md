@@ -28,9 +28,9 @@ make db-bootstrap
 # 3) (Fase 1) apply migrations/001_init.sql
 make db-migrate
 
-# Untuk deploy endpoint Direct Messages, apply migration 009
-# setelah schema dasar dan sebelum api-gateway versi DM dijalankan:
-make db-migrate-dm
+# Migration 009 saat ini hanya prototipe DM plaintext di PR #74.
+# Jangan apply atau deploy DM sebelum kontrak E2EE dan migration penggantinya
+# disepakati dan lolos review.
 
 # 4) hidupkan semua service
 make up
