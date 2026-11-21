@@ -171,6 +171,9 @@ func main() {
 	}
 
 	queries := db.New(sqlDB)
+	if cfg.DMEnabled {
+		go runDMInboxJanitor(ctx, queries)
+	}
 
 	// 2. R2 client. NewR2Client returns a concrete
 	//    *R2Client; the aws-sdk-go-v2 transport is
@@ -329,9 +332,9 @@ func buildVerifierWithRetry(ctx context.Context, issuer, apiClientID string) (mi
 	var lastErr error
 	for attempt, delay := range verifierRetryDelays {
 		// Sleep BEFORE each attempt so the schedule
-// applies even when ctx has been cancelled. We
-// check ctx cancellation explicitly after the
-// sleep so the loop bails out cleanly.
+		// applies even when ctx has been cancelled. We
+		// check ctx cancellation explicitly after the
+		// sleep so the loop bails out cleanly.
 		select {
 		case <-ctx.Done():
 			return nil, fmt.Errorf("retry cancelled before attempt %d: %w", attempt+1, ctx.Err())
@@ -339,10 +342,10 @@ func buildVerifierWithRetry(ctx context.Context, issuer, apiClientID string) (mi
 		}
 
 		// Per-attempt deadline: cap each attempt
-// at the remaining budget so we never overshoot
-// verifierRetryBudget. A 5s minimum gives even
-// the last attempt a chance to complete the OIDC
-// discovery round-trip.
+		// at the remaining budget so we never overshoot
+		// verifierRetryBudget. A 5s minimum gives even
+		// the last attempt a chance to complete the OIDC
+		// discovery round-trip.
 		remaining := time.Until(deadline)
 		if remaining < 5*time.Second {
 			return nil, fmt.Errorf("verifier retry budget exhausted (elapsed %s, attempts %d): %w",

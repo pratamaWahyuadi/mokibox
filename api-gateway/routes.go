@@ -14,7 +14,7 @@
 // follow endpoints. The current full route set is:
 //   - GET  /healthz                          (no auth)
 //   - POST /api/webhooks/zitadel             (no JWT auth;
-//       signature verified inside the handler)
+//     signature verified inside the handler)
 //   - GET  /api/users/me                     (auth)
 //   - PUT  /api/users/me                     (auth)
 //   - POST /api/users/me/avatar/upload-intent (auth)
@@ -42,6 +42,12 @@
 //   - GET  /api/notifications                (auth)
 //   - PUT  /api/notifications/read-all       (auth)
 //   - DELETE /api/users/me                   (auth)
+//   - POST /api/dm/device                    (auth, feature flag)
+//   - POST /api/dm/device/keys               (auth, feature flag)
+//   - GET  /api/dm/users/:id/key-bundle      (auth, feature flag)
+//   - POST /api/dm/messages                  (auth, feature flag)
+//   - GET  /api/dm/inbox                     (auth, feature flag)
+//   - POST /api/dm/inbox/:id/ack             (auth, feature flag)
 //
 // Phase 9 finalises the global HTTP error handler, the
 // body validator, and the production main.go that
@@ -95,7 +101,7 @@ type RouterDeps struct {
 }
 
 // NewRouter returns a fully wired *echo.Echo with the
-// phase-3 routes registered. It does not start the
+// configured API routes registered. It does not start the
 // server; main.go is responsible for e.Start.
 //
 // The function does not own the dependencies it
@@ -107,22 +113,22 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	e := echo.New()
 
 	// Central HTTPErrorHandler safety net for Echo
-// framework errors (404, 405, body-bind failure)
-// and any error that reaches Echo without going
-// through shared.RespondError. See error_handler.go
-// for the full contract. Phase 3-8 handlers continue
-// to use shared.RespondError; this only catches what
-// slips past that path.
+	// framework errors (404, 405, body-bind failure)
+	// and any error that reaches Echo without going
+	// through shared.RespondError. See error_handler.go
+	// for the full contract. Phase 3-8 handlers continue
+	// to use shared.RespondError; this only catches what
+	// slips past that path.
 	e.HTTPErrorHandler = HTTPErrorHandler
 
 	// Request body validator. Per LLD section 12
-// (Fase 9), wire go-playground/validator/v10 as the
-// Echo validator. Handlers that take a JSON body
-// call c.Validate(&req) after c.Bind(&req); failures
-// are translated by RequestValidator into the
-// canonical shared.APIError{CodeValidationError,
-// Details:[]FieldError} envelope. See
-// request_validator.go for the translation rules.
+	// (Fase 9), wire go-playground/validator/v10 as the
+	// Echo validator. Handlers that take a JSON body
+	// call c.Validate(&req) after c.Bind(&req); failures
+	// are translated by RequestValidator into the
+	// canonical shared.APIError{CodeValidationError,
+	// Details:[]FieldError} envelope. See
+	// request_validator.go for the translation rules.
 	e.Validator = NewRequestValidator()
 
 	// Health probe (no auth, no auth middleware). Kept
@@ -329,6 +335,17 @@ func NewRouter(d RouterDeps) *echo.Echo {
 		panic(fmt.Sprintf("api-gateway: NewAccountHandler: %v", err))
 	}
 	api.DELETE("/users/me", ah.DeleteMe)
+
+	if d.Cfg != nil && d.Cfg.DMEnabled {
+		if d.Cfg.DMInboxTTL <= 0 {
+			panic("api-gateway: DM_INBOX_TTL must be positive when DM_E2EE_ENABLED=true")
+		}
+		dmHandler, err := handlers.NewDMHandler(d.Queries, d.DB, d.Cfg.DMInboxTTL)
+		if err != nil {
+			panic(fmt.Sprintf("api-gateway: NewDMHandler: %v", err))
+		}
+		dmHandler.RegisterRoutes(api)
+	}
 
 	return e
 }

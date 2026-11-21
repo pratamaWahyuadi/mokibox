@@ -66,6 +66,8 @@ type accountTxStore interface {
 	DeleteFollowsByFollowee(ctx context.Context, followeeID uuid.UUID) error
 	DeleteLikesByUser(ctx context.Context, userID uuid.UUID) error
 	DeleteCommentsByUser(ctx context.Context, userID uuid.UUID) error
+	DeleteDMInboxByUser(ctx context.Context, senderUserID uuid.UUID) error
+	DeleteDMDevicesByUser(ctx context.Context, userID uuid.UUID) error
 	DeleteNotificationsForUser(ctx context.Context, userID uuid.UUID) error
 	DeleteNotificationsByActor(ctx context.Context, actorID uuid.UUID) error
 	TombstoneUser(ctx context.Context, id uuid.UUID) (db.User, error)
@@ -173,8 +175,9 @@ func DeleteUserData(ctx context.Context, q *db.Queries, dbHandle *sql.DB, queue 
 //     DeleteVideosByUser (cascades likes + comments on
 //     this user's own videos) -> delete follow edges
 //     both directions -> delete the user's own like +
-//     comment rows -> delete notifications where the
-//     user is recipient or actor -> TombstoneUser.
+//     comment rows -> delete DM inbox and device
+//     records -> delete notifications where the user
+//     is recipient or actor -> TombstoneUser.
 //  2. Commit (runner).
 //  3. AFTER commit: enqueue cleanup:objects with the
 //     raw + thumbnail keys (hls_prefix is left to the
@@ -306,7 +309,17 @@ func collectUserR2Keys(ctx context.Context, runner txRunner[accountTxStore], use
 			return shared.Wrap(shared.ErrInternal, fmt.Sprintf("delete comments: %v", err))
 		}
 
-		// Step 7: notifications where the user is
+		// Step 7: delete queued ciphertext before
+		// revoking the device; deleting the device also
+		// cascades its public keys and one-time keys.
+		if err := qtx.DeleteDMInboxByUser(ctx, userID); err != nil {
+			return shared.Wrap(shared.ErrInternal, fmt.Sprintf("delete DM inbox: %v", err))
+		}
+		if err := qtx.DeleteDMDevicesByUser(ctx, userID); err != nil {
+			return shared.Wrap(shared.ErrInternal, fmt.Sprintf("delete DM devices: %v", err))
+		}
+
+		// Step 8: notifications where the user is
 		// the recipient and where the user is the
 		// actor. Both sides must go.
 		if err := qtx.DeleteNotificationsForUser(ctx, userID); err != nil {
@@ -316,7 +329,7 @@ func collectUserR2Keys(ctx context.Context, runner txRunner[accountTxStore], use
 			return shared.Wrap(shared.ErrInternal, fmt.Sprintf("delete notifications (actor): %v", err))
 		}
 
-		// Step 8: tombstone. Username placeholder is
+		// Step 9: tombstone. Username placeholder is
 		// deterministic so the UNIQUE constraint on
 		// username keeps holding.
 		if _, err := qtx.TombstoneUser(ctx, userID); err != nil {

@@ -33,9 +33,9 @@ type APIConfig struct {
 	RedisPassword string
 
 	// Zitadel (OIDC resource server)
-	ZitadelIssuerURL    string
-	ZitadelClientID     string // Web/OIDC client (used by login UI)
-	ZitadelAPIClientID  string // API client (audience for access tokens)
+	ZitadelIssuerURL   string
+	ZitadelClientID    string // Web/OIDC client (used by login UI)
+	ZitadelAPIClientID string // API client (audience for access tokens)
 	// ZitadelTargetSigningKey is the signingKey returned
 	// by Zitadel when an Actions V2 Target was created.
 	// The api-gateway webhook uses it to verify the
@@ -59,6 +59,11 @@ type APIConfig struct {
 
 	// Upload intent (presigned PUT expiry)
 	PresignUploadExpiry time.Duration
+
+	// Direct-message relay. The flag defaults off; the
+	// inbox TTL is mandatory when the relay is enabled.
+	DMEnabled  bool
+	DMInboxTTL time.Duration
 }
 
 // WorkerConfig is the configuration consumed by transcoder-worker.
@@ -99,20 +104,37 @@ type WorkerConfig struct {
 // required is absent; never panics.
 func LoadAPI() (*APIConfig, error) {
 	c := &APIConfig{
-		APIBaseURL:          os.Getenv("API_BASE_URL"),
-		DatabaseURL:         os.Getenv("DATABASE_URL"),
-		RedisAddr:           os.Getenv("REDIS_ADDR"),
-		RedisPassword:       os.Getenv("REDIS_PASSWORD"),
-		ZitadelIssuerURL:    os.Getenv("ZITADEL_ISSUER_URL"),
-		ZitadelClientID:     os.Getenv("ZITADEL_CLIENT_ID"),
-		ZitadelAPIClientID:  os.Getenv("ZITADEL_API_CLIENT_ID"),
+		APIBaseURL:              os.Getenv("API_BASE_URL"),
+		DatabaseURL:             os.Getenv("DATABASE_URL"),
+		RedisAddr:               os.Getenv("REDIS_ADDR"),
+		RedisPassword:           os.Getenv("REDIS_PASSWORD"),
+		ZitadelIssuerURL:        os.Getenv("ZITADEL_ISSUER_URL"),
+		ZitadelClientID:         os.Getenv("ZITADEL_CLIENT_ID"),
+		ZitadelAPIClientID:      os.Getenv("ZITADEL_API_CLIENT_ID"),
 		ZitadelTargetSigningKey: os.Getenv("ZITADEL_TARGET_SIGNING_KEY"),
-		R2AccountID:         os.Getenv("R2_ACCOUNT_ID"),
-		R2AccessKeyID:       os.Getenv("R2_ACCESS_KEY_ID"),
-		R2SecretAccessKey:   os.Getenv("R2_SECRET_ACCESS_KEY"),
-		R2Bucket:            os.Getenv("R2_BUCKET"),
-		R2Endpoint:          os.Getenv("R2_ENDPOINT"),
-		MediaTokenSecret:    os.Getenv("MEDIA_TOKEN_SECRET"),
+		R2AccountID:             os.Getenv("R2_ACCOUNT_ID"),
+		R2AccessKeyID:           os.Getenv("R2_ACCESS_KEY_ID"),
+		R2SecretAccessKey:       os.Getenv("R2_SECRET_ACCESS_KEY"),
+		R2Bucket:                os.Getenv("R2_BUCKET"),
+		R2Endpoint:              os.Getenv("R2_ENDPOINT"),
+		MediaTokenSecret:        os.Getenv("MEDIA_TOKEN_SECRET"),
+	}
+
+	dmEnabled, err := envBool("DM_E2EE_ENABLED", false)
+	if err != nil {
+		return nil, err
+	}
+	c.DMEnabled = dmEnabled
+	if ttl := os.Getenv("DM_INBOX_TTL"); ttl != "" {
+		c.DMInboxTTL, err = time.ParseDuration(ttl)
+		if err != nil {
+			return nil, fmt.Errorf("invalid duration for DM_INBOX_TTL=%q: %w", ttl, err)
+		}
+		if c.DMInboxTTL <= 0 {
+			return nil, fmt.Errorf("invalid duration for DM_INBOX_TTL=%q: must be > 0", ttl)
+		}
+	} else if dmEnabled {
+		return nil, fmt.Errorf("missing required env var: DM_INBOX_TTL")
 	}
 
 	ttl, err := envDuration("MEDIA_TOKEN_TTL", 15*time.Minute)
@@ -149,18 +171,30 @@ func LoadAPI() (*APIConfig, error) {
 	return c, nil
 }
 
+func envBool(name string, def bool) (bool, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return def, nil
+	}
+	value, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("invalid boolean for %s=%q: %w", name, v, err)
+	}
+	return value, nil
+}
+
 // LoadWorker reads the environment variables required by
 // transcoder-worker.
 func LoadWorker() (*WorkerConfig, error) {
 	c := &WorkerConfig{
-		WorkerDatabaseURL:  os.Getenv("WORKER_DATABASE_URL"),
-		RedisAddr:          os.Getenv("REDIS_ADDR"),
-		RedisPassword:      os.Getenv("REDIS_PASSWORD"),
-		R2AccountID:        os.Getenv("R2_ACCOUNT_ID"),
-		R2AccessKeyID:      os.Getenv("R2_ACCESS_KEY_ID"),
-		R2SecretAccessKey:  os.Getenv("R2_SECRET_ACCESS_KEY"),
-		R2Bucket:           os.Getenv("R2_BUCKET"),
-		R2Endpoint:         os.Getenv("R2_ENDPOINT"),
+		WorkerDatabaseURL: os.Getenv("WORKER_DATABASE_URL"),
+		RedisAddr:         os.Getenv("REDIS_ADDR"),
+		RedisPassword:     os.Getenv("REDIS_PASSWORD"),
+		R2AccountID:       os.Getenv("R2_ACCOUNT_ID"),
+		R2AccessKeyID:     os.Getenv("R2_ACCESS_KEY_ID"),
+		R2SecretAccessKey: os.Getenv("R2_SECRET_ACCESS_KEY"),
+		R2Bucket:          os.Getenv("R2_BUCKET"),
+		R2Endpoint:        os.Getenv("R2_ENDPOINT"),
 	}
 
 	timeout, err := envDuration("TRANSCODE_TIMEOUT", 5*time.Minute)
