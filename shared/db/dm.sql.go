@@ -41,19 +41,19 @@ WHERE (key_row.device_id, key_row.key_id) = (
     LIMIT 1
     FOR UPDATE SKIP LOCKED
 )
-RETURNING device_id, key_id, public_key
+RETURNING device_id, key_id, key_material
 `
 
 type ClaimDMOneTimeKeyRow struct {
-	DeviceID  uuid.UUID `json:"device_id"`
-	KeyID     string    `json:"key_id"`
-	PublicKey []byte    `json:"public_key"`
+	DeviceID    uuid.UUID `json:"device_id"`
+	KeyID       string    `json:"key_id"`
+	KeyMaterial []byte    `json:"key_material"`
 }
 
 func (q *Queries) ClaimDMOneTimeKey(ctx context.Context, deviceID uuid.UUID) (ClaimDMOneTimeKeyRow, error) {
 	row := q.db.QueryRowContext(ctx, claimDMOneTimeKey, deviceID)
 	var i ClaimDMOneTimeKeyRow
-	err := row.Scan(&i.DeviceID, &i.KeyID, &i.PublicKey)
+	err := row.Scan(&i.DeviceID, &i.KeyID, &i.KeyMaterial)
 	return i, err
 }
 
@@ -72,38 +72,42 @@ func (q *Queries) CountDMOneTimeKeys(ctx context.Context, deviceID uuid.UUID) (i
 
 const createDMDevice = `-- name: CreateDMDevice :one
 INSERT INTO dm_devices
-    (id, user_id, signing_key, identity_key, fallback_key_id, fallback_key)
-VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, user_id, signing_key, identity_key, fallback_key_id, fallback_key,
-          next_sequence, registered_at
+    (id, user_id, protocol, protocol_version, key_bundle, fallback_key_id,
+     fallback_key_material)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING id, user_id, protocol, protocol_version, key_bundle, fallback_key_id,
+          fallback_key_material, next_sequence, registered_at
 `
 
 type CreateDMDeviceParams struct {
-	ID            uuid.UUID      `json:"id"`
-	UserID        uuid.UUID      `json:"user_id"`
-	SigningKey    []byte         `json:"signing_key"`
-	IdentityKey   []byte         `json:"identity_key"`
-	FallbackKeyID sql.NullString `json:"fallback_key_id"`
-	FallbackKey   []byte         `json:"fallback_key"`
+	ID                  uuid.UUID      `json:"id"`
+	UserID              uuid.UUID      `json:"user_id"`
+	Protocol            string         `json:"protocol"`
+	ProtocolVersion     int32          `json:"protocol_version"`
+	KeyBundle           []byte         `json:"key_bundle"`
+	FallbackKeyID       sql.NullString `json:"fallback_key_id"`
+	FallbackKeyMaterial []byte         `json:"fallback_key_material"`
 }
 
 func (q *Queries) CreateDMDevice(ctx context.Context, arg CreateDMDeviceParams) (DmDevice, error) {
 	row := q.db.QueryRowContext(ctx, createDMDevice,
 		arg.ID,
 		arg.UserID,
-		arg.SigningKey,
-		arg.IdentityKey,
+		arg.Protocol,
+		arg.ProtocolVersion,
+		arg.KeyBundle,
 		arg.FallbackKeyID,
-		arg.FallbackKey,
+		arg.FallbackKeyMaterial,
 	)
 	var i DmDevice
 	err := row.Scan(
 		&i.ID,
 		&i.UserID,
-		&i.SigningKey,
-		&i.IdentityKey,
+		&i.Protocol,
+		&i.ProtocolVersion,
+		&i.KeyBundle,
 		&i.FallbackKeyID,
-		&i.FallbackKey,
+		&i.FallbackKeyMaterial,
 		&i.NextSequence,
 		&i.RegisteredAt,
 	)
@@ -157,8 +161,8 @@ func (q *Queries) DeleteExpiredDMInbox(ctx context.Context) (int64, error) {
 
 const getDMDeviceByUser = `-- name: GetDMDeviceByUser :one
 
-SELECT id, user_id, signing_key, identity_key, fallback_key_id, fallback_key,
-       next_sequence, registered_at
+SELECT id, user_id, protocol, protocol_version, key_bundle, fallback_key_id,
+       fallback_key_material, next_sequence, registered_at
 FROM dm_devices
 WHERE user_id = $1
 `
@@ -172,10 +176,11 @@ func (q *Queries) GetDMDeviceByUser(ctx context.Context, userID uuid.UUID) (DmDe
 	err := row.Scan(
 		&i.ID,
 		&i.UserID,
-		&i.SigningKey,
-		&i.IdentityKey,
+		&i.Protocol,
+		&i.ProtocolVersion,
+		&i.KeyBundle,
 		&i.FallbackKeyID,
-		&i.FallbackKey,
+		&i.FallbackKeyMaterial,
 		&i.NextSequence,
 		&i.RegisteredAt,
 	)
@@ -183,8 +188,8 @@ func (q *Queries) GetDMDeviceByUser(ctx context.Context, userID uuid.UUID) (DmDe
 }
 
 const getDMDeviceForUpdate = `-- name: GetDMDeviceForUpdate :one
-SELECT id, user_id, signing_key, identity_key, fallback_key_id, fallback_key,
-       next_sequence, registered_at
+SELECT id, user_id, protocol, protocol_version, key_bundle, fallback_key_id,
+       fallback_key_material, next_sequence, registered_at
 FROM dm_devices
 WHERE user_id = $1
 FOR UPDATE
@@ -196,10 +201,11 @@ func (q *Queries) GetDMDeviceForUpdate(ctx context.Context, userID uuid.UUID) (D
 	err := row.Scan(
 		&i.ID,
 		&i.UserID,
-		&i.SigningKey,
-		&i.IdentityKey,
+		&i.Protocol,
+		&i.ProtocolVersion,
+		&i.KeyBundle,
 		&i.FallbackKeyID,
-		&i.FallbackKey,
+		&i.FallbackKeyMaterial,
 		&i.NextSequence,
 		&i.RegisteredAt,
 	)
@@ -207,7 +213,7 @@ func (q *Queries) GetDMDeviceForUpdate(ctx context.Context, userID uuid.UUID) (D
 }
 
 const getDMInboxMessageByClientID = `-- name: GetDMInboxMessageByClientID :one
-SELECT id, recipient_device_id, recipient_user_id, sequence_no, version,
+SELECT id, recipient_device_id, recipient_user_id, sequence_no, protocol, version,
        ciphertext, client_message_id, created_at, expires_at
 FROM dm_inbox
 WHERE sender_device_id = $1 AND client_message_id = $2
@@ -223,7 +229,8 @@ type GetDMInboxMessageByClientIDRow struct {
 	RecipientDeviceID uuid.UUID `json:"recipient_device_id"`
 	RecipientUserID   uuid.UUID `json:"recipient_user_id"`
 	SequenceNo        int64     `json:"sequence_no"`
-	Version           int16     `json:"version"`
+	Protocol          string    `json:"protocol"`
+	Version           int32     `json:"version"`
 	Ciphertext        []byte    `json:"ciphertext"`
 	ClientMessageID   uuid.UUID `json:"client_message_id"`
 	CreatedAt         time.Time `json:"created_at"`
@@ -238,6 +245,7 @@ func (q *Queries) GetDMInboxMessageByClientID(ctx context.Context, arg GetDMInbo
 		&i.RecipientDeviceID,
 		&i.RecipientUserID,
 		&i.SequenceNo,
+		&i.Protocol,
 		&i.Version,
 		&i.Ciphertext,
 		&i.ClientMessageID,
@@ -248,8 +256,8 @@ func (q *Queries) GetDMInboxMessageByClientID(ctx context.Context, arg GetDMInbo
 }
 
 const getEligibleDMDeviceForBundle = `-- name: GetEligibleDMDeviceForBundle :one
-SELECT d.id, d.user_id, d.signing_key, d.identity_key,
-       d.fallback_key_id, d.fallback_key, d.next_sequence, d.registered_at
+SELECT d.id, d.user_id, d.protocol, d.protocol_version, d.key_bundle,
+       d.fallback_key_id, d.fallback_key_material, d.next_sequence, d.registered_at
 FROM dm_devices d
 JOIN users recipient ON recipient.id = d.user_id AND recipient.is_active
 JOIN follows f_recipient_to_sender
@@ -273,10 +281,11 @@ func (q *Queries) GetEligibleDMDeviceForBundle(ctx context.Context, arg GetEligi
 	err := row.Scan(
 		&i.ID,
 		&i.UserID,
-		&i.SigningKey,
-		&i.IdentityKey,
+		&i.Protocol,
+		&i.ProtocolVersion,
+		&i.KeyBundle,
 		&i.FallbackKeyID,
-		&i.FallbackKey,
+		&i.FallbackKeyMaterial,
 		&i.NextSequence,
 		&i.RegisteredAt,
 	)
@@ -284,7 +293,8 @@ func (q *Queries) GetEligibleDMDeviceForBundle(ctx context.Context, arg GetEligi
 }
 
 const getEligibleDMRecipientDeviceForSend = `-- name: GetEligibleDMRecipientDeviceForSend :one
-SELECT recipient_device.id
+SELECT recipient_device.id, recipient_device.protocol,
+       recipient_device.protocol_version
 FROM dm_devices sender_device
 JOIN dm_devices recipient_device ON recipient_device.user_id = $2
 JOIN users sender ON sender.id = sender_device.user_id AND sender.is_active
@@ -305,11 +315,17 @@ type GetEligibleDMRecipientDeviceForSendParams struct {
 	UserID uuid.UUID `json:"user_id"`
 }
 
-func (q *Queries) GetEligibleDMRecipientDeviceForSend(ctx context.Context, arg GetEligibleDMRecipientDeviceForSendParams) (uuid.UUID, error) {
+type GetEligibleDMRecipientDeviceForSendRow struct {
+	ID              uuid.UUID `json:"id"`
+	Protocol        string    `json:"protocol"`
+	ProtocolVersion int32     `json:"protocol_version"`
+}
+
+func (q *Queries) GetEligibleDMRecipientDeviceForSend(ctx context.Context, arg GetEligibleDMRecipientDeviceForSendParams) (GetEligibleDMRecipientDeviceForSendRow, error) {
 	row := q.db.QueryRowContext(ctx, getEligibleDMRecipientDeviceForSend, arg.ID, arg.UserID)
-	var id uuid.UUID
-	err := row.Scan(&id)
-	return id, err
+	var i GetEligibleDMRecipientDeviceForSendRow
+	err := row.Scan(&i.ID, &i.Protocol, &i.ProtocolVersion)
+	return i, err
 }
 
 const incrementDMDeviceSequence = `-- name: IncrementDMDeviceSequence :one
@@ -329,9 +345,9 @@ func (q *Queries) IncrementDMDeviceSequence(ctx context.Context, id uuid.UUID) (
 const insertDMInboxMessage = `-- name: InsertDMInboxMessage :one
 INSERT INTO dm_inbox
     (recipient_device_id, recipient_user_id, sequence_no, sender_user_id,
-     sender_device_id, version, ciphertext, client_message_id, expires_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-        NOW() + ($9::double precision * INTERVAL '1 second'))
+     sender_device_id, protocol, version, ciphertext, client_message_id, expires_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+        NOW() + ($10::double precision * INTERVAL '1 second'))
 ON CONFLICT (sender_device_id, client_message_id) DO NOTHING
 RETURNING id, sequence_no, client_message_id, created_at, expires_at
 `
@@ -342,7 +358,8 @@ type InsertDMInboxMessageParams struct {
 	SequenceNo        int64     `json:"sequence_no"`
 	SenderUserID      uuid.UUID `json:"sender_user_id"`
 	SenderDeviceID    uuid.UUID `json:"sender_device_id"`
-	Version           int16     `json:"version"`
+	Protocol          string    `json:"protocol"`
+	Version           int32     `json:"version"`
 	Ciphertext        []byte    `json:"ciphertext"`
 	ClientMessageID   uuid.UUID `json:"client_message_id"`
 	ExpiresInSeconds  float64   `json:"expires_in_seconds"`
@@ -363,6 +380,7 @@ func (q *Queries) InsertDMInboxMessage(ctx context.Context, arg InsertDMInboxMes
 		arg.SequenceNo,
 		arg.SenderUserID,
 		arg.SenderDeviceID,
+		arg.Protocol,
 		arg.Version,
 		arg.Ciphertext,
 		arg.ClientMessageID,
@@ -380,19 +398,19 @@ func (q *Queries) InsertDMInboxMessage(ctx context.Context, arg InsertDMInboxMes
 }
 
 const insertDMOneTimeKey = `-- name: InsertDMOneTimeKey :execrows
-INSERT INTO dm_one_time_keys (device_id, key_id, public_key)
+INSERT INTO dm_one_time_keys (device_id, key_id, key_material)
 VALUES ($1, $2, $3)
 ON CONFLICT (device_id, key_id) DO NOTHING
 `
 
 type InsertDMOneTimeKeyParams struct {
-	DeviceID  uuid.UUID `json:"device_id"`
-	KeyID     string    `json:"key_id"`
-	PublicKey []byte    `json:"public_key"`
+	DeviceID    uuid.UUID `json:"device_id"`
+	KeyID       string    `json:"key_id"`
+	KeyMaterial []byte    `json:"key_material"`
 }
 
 func (q *Queries) InsertDMOneTimeKey(ctx context.Context, arg InsertDMOneTimeKeyParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, insertDMOneTimeKey, arg.DeviceID, arg.KeyID, arg.PublicKey)
+	result, err := q.db.ExecContext(ctx, insertDMOneTimeKey, arg.DeviceID, arg.KeyID, arg.KeyMaterial)
 	if err != nil {
 		return 0, err
 	}
@@ -400,7 +418,7 @@ func (q *Queries) InsertDMOneTimeKey(ctx context.Context, arg InsertDMOneTimeKey
 }
 
 const listDMInboxAfter = `-- name: ListDMInboxAfter :many
-SELECT id, sequence_no, sender_user_id, sender_device_id, version,
+SELECT id, sequence_no, sender_user_id, sender_device_id, protocol, version,
        ciphertext, client_message_id, created_at, expires_at
 FROM dm_inbox
 WHERE recipient_device_id = $1
@@ -421,7 +439,8 @@ type ListDMInboxAfterRow struct {
 	SequenceNo      int64     `json:"sequence_no"`
 	SenderUserID    uuid.UUID `json:"sender_user_id"`
 	SenderDeviceID  uuid.UUID `json:"sender_device_id"`
-	Version         int16     `json:"version"`
+	Protocol        string    `json:"protocol"`
+	Version         int32     `json:"version"`
 	Ciphertext      []byte    `json:"ciphertext"`
 	ClientMessageID uuid.UUID `json:"client_message_id"`
 	CreatedAt       time.Time `json:"created_at"`
@@ -442,6 +461,7 @@ func (q *Queries) ListDMInboxAfter(ctx context.Context, arg ListDMInboxAfterPara
 			&i.SequenceNo,
 			&i.SenderUserID,
 			&i.SenderDeviceID,
+			&i.Protocol,
 			&i.Version,
 			&i.Ciphertext,
 			&i.ClientMessageID,

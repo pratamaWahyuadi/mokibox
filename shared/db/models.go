@@ -22,14 +22,15 @@ type Comment struct {
 }
 
 type DmDevice struct {
-	ID            uuid.UUID      `json:"id"`
-	UserID        uuid.UUID      `json:"user_id"`
-	SigningKey    []byte         `json:"signing_key"`
-	IdentityKey   []byte         `json:"identity_key"`
-	FallbackKeyID sql.NullString `json:"fallback_key_id"`
-	FallbackKey   []byte         `json:"fallback_key"`
-	NextSequence  int64          `json:"next_sequence"`
-	RegisteredAt  time.Time      `json:"registered_at"`
+	ID                  uuid.UUID      `json:"id"`
+	UserID              uuid.UUID      `json:"user_id"`
+	Protocol            string         `json:"protocol"`
+	ProtocolVersion     int32          `json:"protocol_version"`
+	KeyBundle           []byte         `json:"key_bundle"`
+	FallbackKeyID       sql.NullString `json:"fallback_key_id"`
+	FallbackKeyMaterial []byte         `json:"fallback_key_material"`
+	NextSequence        int64          `json:"next_sequence"`
+	RegisteredAt        time.Time      `json:"registered_at"`
 }
 
 type DmInbox struct {
@@ -39,7 +40,8 @@ type DmInbox struct {
 	SequenceNo        int64     `json:"sequence_no"`
 	SenderUserID      uuid.UUID `json:"sender_user_id"`
 	SenderDeviceID    uuid.UUID `json:"sender_device_id"`
-	Version           int16     `json:"version"`
+	Protocol          string    `json:"protocol"`
+	Version           int32     `json:"version"`
 	Ciphertext        []byte    `json:"ciphertext"`
 	ClientMessageID   uuid.UUID `json:"client_message_id"`
 	CreatedAt         time.Time `json:"created_at"`
@@ -47,10 +49,10 @@ type DmInbox struct {
 }
 
 type DmOneTimeKey struct {
-	DeviceID  uuid.UUID `json:"device_id"`
-	KeyID     string    `json:"key_id"`
-	PublicKey []byte    `json:"public_key"`
-	CreatedAt time.Time `json:"created_at"`
+	DeviceID    uuid.UUID `json:"device_id"`
+	KeyID       string    `json:"key_id"`
+	KeyMaterial []byte    `json:"key_material"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 type Follow struct {

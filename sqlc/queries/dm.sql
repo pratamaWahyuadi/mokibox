@@ -3,31 +3,32 @@
 -- =====================================================
 
 -- name: GetDMDeviceByUser :one
-SELECT id, user_id, signing_key, identity_key, fallback_key_id, fallback_key,
-       next_sequence, registered_at
+SELECT id, user_id, protocol, protocol_version, key_bundle, fallback_key_id,
+       fallback_key_material, next_sequence, registered_at
 FROM dm_devices
 WHERE user_id = $1;
 
 -- name: GetDMDeviceForUpdate :one
-SELECT id, user_id, signing_key, identity_key, fallback_key_id, fallback_key,
-       next_sequence, registered_at
+SELECT id, user_id, protocol, protocol_version, key_bundle, fallback_key_id,
+       fallback_key_material, next_sequence, registered_at
 FROM dm_devices
 WHERE user_id = $1
 FOR UPDATE;
 
 -- name: CreateDMDevice :one
 INSERT INTO dm_devices
-    (id, user_id, signing_key, identity_key, fallback_key_id, fallback_key)
-VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, user_id, signing_key, identity_key, fallback_key_id, fallback_key,
-          next_sequence, registered_at;
+    (id, user_id, protocol, protocol_version, key_bundle, fallback_key_id,
+     fallback_key_material)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING id, user_id, protocol, protocol_version, key_bundle, fallback_key_id,
+          fallback_key_material, next_sequence, registered_at;
 
 -- name: RevokeDMDeviceForUser :exec
 DELETE FROM dm_devices
 WHERE user_id = $1;
 
 -- name: InsertDMOneTimeKey :execrows
-INSERT INTO dm_one_time_keys (device_id, key_id, public_key)
+INSERT INTO dm_one_time_keys (device_id, key_id, key_material)
 VALUES ($1, $2, $3)
 ON CONFLICT (device_id, key_id) DO NOTHING;
 
@@ -37,8 +38,8 @@ FROM dm_one_time_keys
 WHERE device_id = $1;
 
 -- name: GetEligibleDMDeviceForBundle :one
-SELECT d.id, d.user_id, d.signing_key, d.identity_key,
-       d.fallback_key_id, d.fallback_key, d.next_sequence, d.registered_at
+SELECT d.id, d.user_id, d.protocol, d.protocol_version, d.key_bundle,
+       d.fallback_key_id, d.fallback_key_material, d.next_sequence, d.registered_at
 FROM dm_devices d
 JOIN users recipient ON recipient.id = d.user_id AND recipient.is_active
 JOIN follows f_recipient_to_sender
@@ -60,10 +61,11 @@ WHERE (key_row.device_id, key_row.key_id) = (
     LIMIT 1
     FOR UPDATE SKIP LOCKED
 )
-RETURNING device_id, key_id, public_key;
+RETURNING device_id, key_id, key_material;
 
 -- name: GetEligibleDMRecipientDeviceForSend :one
-SELECT recipient_device.id
+SELECT recipient_device.id, recipient_device.protocol,
+       recipient_device.protocol_version
 FROM dm_devices sender_device
 JOIN dm_devices recipient_device ON recipient_device.user_id = $2
 JOIN users sender ON sender.id = sender_device.user_id AND sender.is_active
@@ -85,7 +87,7 @@ WHERE id = $1
 RETURNING next_sequence;
 
 -- name: GetDMInboxMessageByClientID :one
-SELECT id, recipient_device_id, recipient_user_id, sequence_no, version,
+SELECT id, recipient_device_id, recipient_user_id, sequence_no, protocol, version,
        ciphertext, client_message_id, created_at, expires_at
 FROM dm_inbox
 WHERE sender_device_id = $1 AND client_message_id = $2;
@@ -93,14 +95,14 @@ WHERE sender_device_id = $1 AND client_message_id = $2;
 -- name: InsertDMInboxMessage :one
 INSERT INTO dm_inbox
     (recipient_device_id, recipient_user_id, sequence_no, sender_user_id,
-     sender_device_id, version, ciphertext, client_message_id, expires_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+     sender_device_id, protocol, version, ciphertext, client_message_id, expires_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
         NOW() + (sqlc.arg(expires_in_seconds)::double precision * INTERVAL '1 second'))
 ON CONFLICT (sender_device_id, client_message_id) DO NOTHING
 RETURNING id, sequence_no, client_message_id, created_at, expires_at;
 
 -- name: ListDMInboxAfter :many
-SELECT id, sequence_no, sender_user_id, sender_device_id, version,
+SELECT id, sequence_no, sender_user_id, sender_device_id, protocol, version,
        ciphertext, client_message_id, created_at, expires_at
 FROM dm_inbox
 WHERE recipient_device_id = $1
