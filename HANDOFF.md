@@ -3,6 +3,60 @@
 State captured 2026-09-09, post domain-migration lokal (DOMAIN-MIGRATION-LOCAL-PROMPT.md).
 Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
 
+## DM E2EE backend relay — PR #77
+
+- PR #77 combines the design proposal with a backend-only opaque ciphertext
+  relay. It does not implement encryption/decryption and must not be described
+  as E2EE-ready. Issues #75 (backend) and #76 (design) close only when PR #77
+  merges; the client and release checklist is recorded in PR #77's body.
+- Proposed v1: 1:1 text ciphertext, one active device per user, mutual-follow
+  eligibility, HTTP polling, per-device sequence, explicit acknowledgement,
+  request/device ID matching, and feature flag off by default. Requests, read
+  receipts, WebSocket, media, and multi-device are deferred. The current
+  backend has no block mechanism; enforce one if introduced before merge.
+- Migration `009_dm_e2ee_relay.sql` follows existing `008_user_avatar_upload.sql`;
+  roadmap numbers 003-007 remain reserved. Apply it with `make db-migrate-dm`
+  before deploying the gateway. Do not edit earlier migrations.
+- `DM_INBOX_TTL` is required when `DM_E2EE_ENABLED=true`. `.env.example` gives
+  the selected v1 value `168h` (7 days). The feature flag defaults to false.
+  A device is capped at 1,000 pending, unexpired messages. Key-bundle
+  fetches are limited to 30/minute, burst 10; sends to 60/minute, burst 20,
+  separately from the global per-user limiter. All limiters are per-process and
+  suitable only for a single gateway instance. Expiry cleanup runs in the
+  background janitor, not in inbox polling.
+- API contract and client wire format are in `planning/04_api_contracts.md`;
+  schema is in `planning/03_schema.md`. Device-bound requests reject stale
+  device IDs. Device registration still trusts the JWT alone, so a stolen
+  session can replace a device; step-up auth is not implemented. Fetching a
+  bundle consumes a one-time key even if its response is lost.
+- Reviewer steps and suggested D1-D10 dispositions are in
+  `planning/14_dm_e2ee_reviewer_guide.md`; all suggestions remain unapproved.
+- The smoke test uses random bytes and exercises concurrent key claims and
+  sends against PostgreSQL via HTTP. On 2026-11-21, migrations 001, 002, 008,
+  and 009 were applied to disposable PostgreSQL 16 and the smoke passed twice
+  consecutively. This proves relay behavior only, not cryptography.
+- Acknowledgement deletes ciphertext but leaves a digest-only idempotency
+  record with routing/response metadata until the original TTL is cleaned.
+  Account deletion purges these records; after TTL cleanup, a client message
+  ID may be reused.
+- Key bundles, fallback/one-time key material, and ciphertext are opaque bytes.
+  Device registrations carry a protocol token/version; inbox envelopes carry
+  the same pair. The server validates generic encoding/size/count limits and
+  protocol/version consistency, never protocol-specific formats. Go's
+  standard-library SHA-256 is used only for digest-based send idempotency; no
+  protocol cryptography or external cryptographic dependency is added.
+- Remaining post-merge/release checklist is recorded in PR #77: identify the
+  Flutter repository and owner, approve protocol/library and license, implement
+  client crypto/UI, complete an independent security review, then decide on
+  production rollout. The selected v1 TTL is `168h` (7 days); block/report are
+  deferred from v1.
+- Planning conflict to report: `planning/ROADMAP_TIKTOK_PARITY.md` leaves DM
+  under P3 (Draft), while this work proceeds as the owner's explicit request;
+  do not change roadmap priority here. The schema document's introductory
+  `pgxpool` reference is stale relative to `CONVENTIONS.md` and the current
+  `database/sql` adapter; flag it rather than silently changing the global
+  architecture statement.
+
 ## Profile avatar upload — PR #72
 
 - Backend menyediakan `POST /api/users/me/avatar/upload-intent` dan

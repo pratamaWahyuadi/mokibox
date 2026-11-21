@@ -166,6 +166,257 @@ Contoh per status:
 
 ---
 
+## Direct-message backend relay: client wire contract
+
+This is the backend wire contract for the proposed v1 relay, not approval of a
+cryptographic protocol or client library. PR #77 stores and forwards opaque
+bytes only; it does not implement E2EE. Every route is authenticated and is
+registered only when `DM_E2EE_ENABLED=true`. The flag defaults off. When
+enabled, `DM_INBOX_TTL` is required; `.env.example` currently documents
+`168h` (7 days), the selected v1 ciphertext-retention value.
+
+All payloads use the standard `{ "data": ... }` success envelope and standard
+error envelope. JSON `[]byte` fields use standard padded Base64. A device
+registers a protocol token and positive integer version; that pair identifies
+its opaque key bundle and one-time/fallback key material. Protocol identifiers
+are not allow-listed. Key bundles are 1-65,536 bytes; individual one-time and
+fallback key material is 1-4,096 bytes. Maximum one-time-key upload is 100
+keys per request and 1,000 stored keys per device. Ciphertext is 1-65,536
+bytes. These are encoding and resource limits only: the backend does not parse
+protocol-specific structures, validate cryptographic keys, or decrypt.
+
+Eligibility requires a follow row in both directions. A missing recipient and
+an ineligible recipient produce the same `404 NOT_FOUND` response. The
+current backend has no block mechanism; if one exists before merge, it must be
+included in eligibility checks. The existing per-user limiter is 60 requests
+per minute with burst 60. DM key-bundle fetches have a separate 30/minute,
+burst-10 limiter; sends have a separate 60/minute, burst-20 limiter. All
+limiters are per-process and suitable only for one gateway instance; multiple
+gateways do not share counters.
+
+Each recipient device may have at most 1,000 unacknowledged, unexpired inbox
+messages. A full inbox rejects a new send with `429 DM_INBOX_FULL`. At the
+maximum 64 KiB payload size, the payload-only upper bound is about 62.5 MiB
+per device, excluding database overhead.
+
+### `POST /api/dm/device`
+
+Register or replace the authenticated user's active device. Replacement
+revokes the prior device, its opaque key material, and its queued recipient
+inbox. Private keys are never sent. Registration/replacement currently relies
+on the authenticated JWT alone: a stolen valid session can replace the device.
+Client-side key-change warnings are required; step-up authentication is not
+implemented in this backend.
+
+Request:
+
+```json
+{
+  "protocol": "<protocol-token>",
+  "version": 1,
+  "key_bundle": "<base64 opaque public key bundle>",
+  "fallback_key_id": "fallback-1",
+  "fallback_key_material": "<base64 opaque key bytes>",
+  "one_time_keys": [
+    {"key_id": "otk-1", "key_material": "<base64 opaque key bytes>"}
+  ]
+}
+```
+
+`fallback_key_id` and `fallback_key_material` must be supplied together. The
+`one_time_keys` array may be empty; duplicate IDs within the batch are invalid.
+All key material is opaque and uses the device's registered protocol/version.
+Success is `201 Created`:
+
+```json
+{"data":{"device_id":"<uuid>","protocol":"<protocol-token>","version":1,"registered_at":"<RFC3339 UTC>"}}
+```
+
+### `POST /api/dm/device/keys`
+
+Add opaque one-time key material to the current active device:
+
+```json
+{
+  "device_id": "<active device uuid>",
+  "one_time_keys": [
+    {"key_id": "otk-2", "key_material": "<base64 opaque key bytes>"}
+  ]
+}
+```
+
+Success is `200 OK` with `{"data":{"device_id":"<uuid>","uploaded":1}}`.
+`device_id` must match the authenticated user's active device. A valid but
+revoked/replaced ID returns `409 DM_DEVICE_STALE`. Keys inherit the
+protocol/version of the registered device. Invalid encoding, sizes, duplicate
+IDs, and exceeded count limits return `400 VALIDATION_ERROR`.
+
+### `GET /api/dm/users/:id/key-bundle?device_id=<uuid>`
+
+The authenticated sender must supply its active `device_id`. A missing or
+malformed ID returns `400 VALIDATION_ERROR`; an ID that is no longer active
+returns `409 DM_DEVICE_STALE`. Fetching a bundle claims and removes one
+recipient one-time key atomically. A fetch consumes that key even if the
+response is lost, so clients must persist the resulting session and avoid
+unnecessary retries. When no one-time keys remain, the optional fallback key
+is returned instead. If neither exists, the response is `409 DM_KEYS_EXHAUSTED`.
+
+Success:
+
+```json
+{
+  "data": {
+    "user_id": "<uuid>",
+    "device_id": "<uuid>",
+    "protocol": "<protocol-token>",
+    "version": 1,
+    "key_bundle": "<base64 opaque bytes>",
+    "one_time_key": {"key_id":"otk-1","key_material":"<base64 opaque bytes>"}
+  }
+}
+```
+
+`one_time_key` and `fallback_key` are mutually exclusive and omitted when
+absent. Missing and ineligible recipients both return `404 NOT_FOUND`. Parallel
+fetches claim distinct one-time keys; fallback material may be returned after
+the one-time-key pool is exhausted.
+
+### `POST /api/dm/messages`
+
+Send an opaque envelope tagged with its protocol and version. The sender user
+is derived from authentication. Both device IDs are required and checked
+against the active sender and eligible recipient device; stale IDs return
+`409 DM_DEVICE_STALE`. The protocol/version must match both registered devices;
+the backend does not allow-list a protocol or inspect its payload.
+
+Request:
+
+```json
+{
+  "sender_device_id": "<active sender device uuid>",
+  "recipient_user_id": "<uuid>",
+  "recipient_device_id": "<active recipient device uuid from the key bundle>",
+  "protocol": "<protocol-token>",
+  "version": 1,
+  "client_message_id": "<uuid>",
+  "ciphertext": "<base64 opaque bytes>"
+}
+```
+
+The client message ID is unique per sender device. Repeating an identical
+request returns the original message ID and sequence, including after the
+inbox ciphertext has been acknowledged and deleted. The server retains a
+SHA-256 ciphertext digest and routing/response metadata until the original
+message expires; it does not retain ciphertext in this idempotency record.
+After the janitor deletes the expired record, the ID may be treated as a new
+send. Reusing the ID with a different recipient, recipient device, protocol,
+version, or ciphertext returns `409 DM_CONFLICT`.
+The 1,000 pending-inbox cap does not cap retained idempotency records; their
+count is bounded by the send rate and the selected 168h TTL.
+An envelope whose protocol/version does not match the registered devices
+returns `409 DM_PROTOCOL_MISMATCH`.
+If the recipient's active device changed after its bundle was fetched, the
+send returns `409 DM_DEVICE_STALE` rather than queueing ciphertext for a key
+the active client no longer has.
+Success is `201 Created`:
+
+```json
+{
+  "data": {
+    "message_id": "<uuid>",
+    "sequence": 1,
+    "client_message_id": "<uuid>",
+    "created_at": "<RFC3339 UTC>",
+    "expires_at": "<RFC3339 UTC>"
+  }
+}
+```
+
+Unknown and ineligible recipients both return `404 NOT_FOUND`. Invalid
+protocol-token encoding, non-positive versions, and invalid sizes return
+`400 VALIDATION_ERROR`.
+
+### `GET /api/dm/inbox?device_id=<uuid>&after=<sequence>&limit=<n>`
+
+Poll the authenticated active device's inbox in ascending, per-device
+sequence order. `device_id` and `after` are required; missing/malformed values
+return `400 VALIDATION_ERROR`, while a valid but stale device ID returns
+`409 DM_DEVICE_STALE`. `after` is a non-negative integer; `limit` is optional
+(default 50, maximum 100). Sequence numbers may have gaps when earlier entries
+were acknowledged or expired. Expired ciphertext is never returned; a
+background janitor deletes expired rows. Polling does not acknowledge or delete
+messages.
+
+Success:
+
+```json
+{
+  "data": {
+    "messages": [
+      {
+        "message_id": "<uuid>",
+        "sequence": 1,
+        "sender_user_id": "<uuid>",
+        "sender_device_id": "<uuid>",
+        "protocol": "<protocol-token>",
+        "version": 1,
+        "ciphertext": "<base64 opaque bytes>",
+        "client_message_id": "<uuid>",
+        "created_at": "<RFC3339 UTC>",
+        "expires_at": "<RFC3339 UTC>"
+      }
+    ],
+    "next_after": 1
+  }
+}
+```
+
+After successfully handling and acknowledging every message in a response, the
+client may persist `next_after` as its cursor. Gaps are normal; the client
+should use the returned sequence values and `next_after`, not assume a
+contiguous range. If handling any message fails, keep the prior cursor and
+retry; acknowledged messages will no longer be returned, while unacknowledged
+messages remain available until expiry.
+
+### `POST /api/dm/inbox/:id/ack`
+
+Request body:
+
+```json
+{"device_id":"<active device uuid>"}
+```
+
+The supplied device must match the authenticated user's active device;
+otherwise return `409 DM_DEVICE_STALE`. Delete the identified message only if
+it belongs to that device. Success is always `204 No Content`, including
+repeated acknowledgements and unknown message IDs. The acknowledgement means
+delivered/handled by the client, not read by a person.
+
+### Device-related and capacity errors
+
+| HTTP | Code | Meaning |
+|---|---|---|
+| 409 | `DM_DEVICE_STALE` | Supplied device ID is not the authenticated user's active device, or the recipient device changed after bundle fetch |
+| 429 | `DM_INBOX_FULL` | Recipient has reached 1,000 pending, unexpired messages |
+
+### Client and deployment contract
+
+- Clients must not send plaintext or private keys. The backend treats
+  `ciphertext` as opaque bytes and cannot determine whether a caller mislabeled
+  plaintext as ciphertext.
+- The client owns encryption/decryption, private-key storage, session state,
+  and identity verification. None is implemented by this PR.
+- The client must persist a newly established session after fetching a
+  key-bundle response; that request permanently claims its one-time key.
+- The client should persist each `client_message_id` and its send result. The
+  server retains only a digest and routing/response metadata for idempotent
+  retries after acknowledgement, until the original message TTL is cleaned.
+- Deployed migration `009_dm_e2ee_relay.sql` before deploying a gateway build
+  with these routes. Keep the feature flag false until the Flutter client and
+  independent security review are complete.
+- The relay smoke test uses random opaque bytes and verifies HTTP/storage
+  behavior only; it is not a cryptography test.
+
 ## 1. Daftar Endpoint
 
 | Method | Path | Deskripsi | Auth |
@@ -197,6 +448,12 @@ Contoh per status:
 | POST | `/api/videos/:id/view` | Track view | JWT |
 | GET | `/api/notifications` | List notifikasi | JWT |
 | PUT | `/api/notifications/read-all` | Tandai semua notifikasi dibaca | JWT |
+| POST | `/api/dm/device` | Register/replace device (feature flag) | JWT |
+| POST | `/api/dm/device/keys` | Upload opaque one-time key material (feature flag) | JWT |
+| GET | `/api/dm/users/:id/key-bundle` | Claim eligible recipient bundle (feature flag) | JWT |
+| POST | `/api/dm/messages` | Send opaque ciphertext (feature flag) | JWT |
+| GET | `/api/dm/inbox` | Poll per-device ciphertext inbox (feature flag) | JWT |
+| POST | `/api/dm/inbox/:id/ack` | Acknowledge and delete inbox entry (feature flag) | JWT |
 | POST | `/api/webhooks/zitadel` | Actions V2 target — notifikasi lifecycle user | HMAC signature (`ZITADEL-Signature`) |
 
 ---

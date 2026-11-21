@@ -415,3 +415,96 @@ Notifikasi in-app untuk event follow, like, dan comment.
 - Pembersihan video `DELETED` dilakukan oleh worker cleanup: cari `videos` dengan `status = 'DELETED'` dan `deleted_at < now() - interval '24 hours'`, hapus file R2, lalu hapus baris.
 - Semua akses file HLS/thumbnail harus melalui presigned URL atau signed playlist. Skema hanya menyimpan object key, bukan URL statis.
 - Nama tabel dan kolom di atas **dipakai verbatim** oleh `sqlc/queries.sql` dan handler. Tidak ada ORM/GORM.
+
+## Migration 009 — Direct-message ciphertext relay
+
+`migrations/009_dm_e2ee_relay.sql` adds the backend-only relay schema. Migration
+003-007 remain reserved by the parity roadmap; migration 008 is the existing
+avatar migration and must not be changed.
+
+### `dm_devices`
+
+One active device per user (`UNIQUE (user_id)`). Stores a protocol identifier
+and positive version that apply to the opaque key bundle, fallback key, and
+one-time keys; no Olm-specific key layout is stored. Replacing a device deletes
+the previous row; `dm_one_time_keys` and ciphertext addressed to its inbox
+cascade away. The counter is incremented inside the same transaction that
+inserts a queued message; it is not a global sequence and is not based on
+`created_at`.
+
+The backend validates only protocol-token encoding, positive version, key
+material encoding/size, and counts. Protocol identifiers are not allow-listed
+and key material is not parsed or cryptographically validated.
+
+### `dm_one_time_keys`
+
+| Column | Type | Constraint | Purpose |
+|---|---|---|---|
+| `device_id` | UUID | PK part, FK to `dm_devices` with cascade | Owner device |
+| `key_id` | TEXT | PK part, length 1-64 | Client-generated public-key identifier |
+| `key_material` | BYTEA | 1-4,096 bytes | Opaque key bytes using the parent device protocol/version |
+| `created_at` | TIMESTAMPTZ | NOT NULL, default `NOW()` | Stable claim ordering |
+
+Bundle fetch claims the oldest key atomically with `DELETE ... RETURNING` and
+`FOR UPDATE SKIP LOCKED`; if none remains, the device's optional opaque
+fallback key is returned. The backend validates byte lengths and limits, not
+key correctness or protocol-specific structure.
+
+### `dm_inbox`
+
+| Column | Type | Constraint | Purpose |
+|---|---|---|---|
+| `id` | UUID | PK | Message/ack identifier |
+| `recipient_device_id` | UUID | FK to `dm_devices` with cascade | Device-addressed queue |
+| `recipient_user_id` | UUID | FK to `users` with cascade | Routing metadata |
+| `sequence_no` | BIGINT | unique with recipient device, > 0 | Per-device polling cursor |
+| `sender_user_id` | UUID | FK to `users` with cascade | Routing metadata |
+| `sender_device_id` | UUID | no FK; retained for idempotency | Sender device identifier |
+| `protocol` | TEXT | 1-64 character protocol token | Opaque envelope protocol identifier |
+| `version` | INTEGER | positive | Protocol/envelope version |
+| `ciphertext` | BYTEA | 1-65,536 bytes | Opaque payload; never decrypted or logged |
+| `client_message_id` | UUID | unique with sender device | Idempotent send key |
+| `created_at` | TIMESTAMPTZ | NOT NULL, default `NOW()` | Server receive time |
+| `expires_at` | TIMESTAMPTZ | NOT NULL and after creation | Required retention cutoff |
+
+### `dm_send_idempotency`
+
+The sender-device/client-message pair is retained independently from the inbox
+row until the original message expires. This lets a retry return the original
+message ID and sequence even after acknowledgement deleted its ciphertext.
+The row contains routing/response metadata and a 32-byte SHA-256 digest of the
+ciphertext, never the ciphertext itself. The gateway compares the digest and
+other request metadata; it does not use it as protocol cryptography.
+
+The janitor deletes expired idempotency rows in batches of 1,000. Account
+deletion purges records where the account was either sender or recipient. When
+expiry cleanup removes a tombstone, the same client message ID can be treated
+as a new send.
+
+Indexes support expiry cleanup and account-deletion lookup by sender/recipient.
+
+`dm_devices.key_bundle` contains 1-65,536 opaque bytes; fallback and one-time
+key material contain 1-4,096 opaque bytes. One-time keys inherit the protocol
+and version of their parent device. These bounds are storage limits, not
+cryptographic-format assumptions.
+
+Indexes support `(recipient_device_id, sequence_no)` polling and expiry
+cleanup. Poll excludes expired records; the gateway janitor deletes expired
+inbox and idempotency rows in batches of 1,000 rather than making every poll
+perform cleanup.
+Acknowledgement deletes only a row owned by the active recipient device.
+
+The send transaction increments `dm_devices.next_sequence` before counting
+pending, unexpired inbox rows. That update locks the recipient device row until
+commit, serializing concurrent sends while the 1,000-message per-device cap is
+checked. A full inbox rejects the send with `429 DM_INBOX_FULL`; the transaction
+rolls back the sequence increment.
+
+Account deletion removes a user's sent/queued messages and idempotency records,
+then their device row in the existing deletion transaction; device deletion
+cascades the opaque key bundle, fallback key, and one-time key material.
+Messages already copied to another user's device cannot be recalled.
+
+The relay feature is off by default. `DM_INBOX_TTL` is mandatory when enabled;
+the selected v1 retention value is `168h` (7 days), shown in `.env.example`.
+Apply migration 009 before deploying a gateway build with the relay routes.

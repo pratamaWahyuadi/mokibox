@@ -21,6 +21,55 @@ type Comment struct {
 	CreatedAt time.Time     `json:"created_at"`
 }
 
+type DmDevice struct {
+	ID                  uuid.UUID      `json:"id"`
+	UserID              uuid.UUID      `json:"user_id"`
+	Protocol            string         `json:"protocol"`
+	ProtocolVersion     int32          `json:"protocol_version"`
+	KeyBundle           []byte         `json:"key_bundle"`
+	FallbackKeyID       sql.NullString `json:"fallback_key_id"`
+	FallbackKeyMaterial []byte         `json:"fallback_key_material"`
+	NextSequence        int64          `json:"next_sequence"`
+	RegisteredAt        time.Time      `json:"registered_at"`
+}
+
+type DmInbox struct {
+	ID                uuid.UUID `json:"id"`
+	RecipientDeviceID uuid.UUID `json:"recipient_device_id"`
+	RecipientUserID   uuid.UUID `json:"recipient_user_id"`
+	SequenceNo        int64     `json:"sequence_no"`
+	SenderUserID      uuid.UUID `json:"sender_user_id"`
+	SenderDeviceID    uuid.UUID `json:"sender_device_id"`
+	Protocol          string    `json:"protocol"`
+	Version           int32     `json:"version"`
+	Ciphertext        []byte    `json:"ciphertext"`
+	ClientMessageID   uuid.UUID `json:"client_message_id"`
+	CreatedAt         time.Time `json:"created_at"`
+	ExpiresAt         time.Time `json:"expires_at"`
+}
+
+type DmOneTimeKey struct {
+	DeviceID    uuid.UUID `json:"device_id"`
+	KeyID       string    `json:"key_id"`
+	KeyMaterial []byte    `json:"key_material"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+type DmSendIdempotency struct {
+	SenderDeviceID    uuid.UUID `json:"sender_device_id"`
+	SenderUserID      uuid.UUID `json:"sender_user_id"`
+	ClientMessageID   uuid.UUID `json:"client_message_id"`
+	RecipientUserID   uuid.UUID `json:"recipient_user_id"`
+	RecipientDeviceID uuid.UUID `json:"recipient_device_id"`
+	Protocol          string    `json:"protocol"`
+	Version           int32     `json:"version"`
+	CiphertextDigest  []byte    `json:"ciphertext_digest"`
+	MessageID         uuid.UUID `json:"message_id"`
+	SequenceNo        int64     `json:"sequence_no"`
+	CreatedAt         time.Time `json:"created_at"`
+	ExpiresAt         time.Time `json:"expires_at"`
+}
+
 type Follow struct {
 	FollowerID uuid.UUID `json:"follower_id"`
 	FolloweeID uuid.UUID `json:"followee_id"`

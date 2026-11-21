@@ -122,6 +122,8 @@ services:
       MEDIA_TOKEN_SECRET:  ${MEDIA_TOKEN_SECRET}
       MEDIA_TOKEN_TTL:     ${MEDIA_TOKEN_TTL}
       PRESIGN_UPLOAD_EXPIRY: ${PRESIGN_UPLOAD_EXPIRY}
+      DM_E2EE_ENABLED:     ${DM_E2EE_ENABLED:-false}
+      DM_INBOX_TTL:        ${DM_INBOX_TTL:-}
     depends_on:
       postgres:
         condition: service_healthy
