@@ -7,11 +7,14 @@ Flutter client and independent security review are complete.
 
 ## Three review commands
 
-Use a disposable database already migrated through 008, never production:
+Use a disposable database already migrated through 008, never production.
+Use `DM_MIGRATION_DATABASE_URL` as role `postgres` for migration 009 and
+`DM_REVIEW_DATABASE_URL` as role `tiktok_api` for the HTTP smoke; both URLs
+must target the same disposable database.
 
 1. Apply forward-only migration 009:
    ```sh
-   psql "$DM_REVIEW_DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/009_dm_e2ee_relay.sql
+   psql "$DM_MIGRATION_DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/009_dm_e2ee_relay.sql
    ```
 2. Run code generation, static checks, uncached tests, and builds:
    ```sh
