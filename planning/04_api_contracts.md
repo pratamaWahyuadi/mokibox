@@ -166,6 +166,187 @@ Contoh per status:
 
 ---
 
+## Direct-message backend relay: client wire contract
+
+This is the backend wire contract for the proposed v1 relay, not approval of a
+cryptographic protocol or client library. PR #77 stores and forwards opaque
+bytes only; it does not implement E2EE. Every route is authenticated and is
+registered only when `DM_E2EE_ENABLED=true`. The flag defaults off. When
+enabled, `DM_INBOX_TTL` is required; `.env.example` currently documents
+`168h` (7 days) as a **PROVISIONAL, unapproved** value.
+
+All payloads use the standard `{ "data": ... }` success envelope and standard
+error envelope. JSON `[]byte` fields use standard padded Base64. Public key
+fields are raw 32-byte values; this validates format only and does not approve
+the proposed protocol or library. Maximum one-time-key upload is 100 keys per
+request and 1,000 stored keys per device. Ciphertext is 1-65,536 bytes.
+
+Eligibility requires a follow row in both directions. A missing recipient and
+an ineligible recipient produce the same `404 NOT_FOUND` response. The
+current backend has no block mechanism; if one exists before merge, it must be
+included in eligibility checks. The existing per-user in-process rate limiter
+protects all authenticated routes, including sends and key-bundle fetches; it
+is suitable only for one gateway instance.
+
+### `POST /api/dm/device`
+
+Register or replace the authenticated user's active device. Replacement
+revokes the prior device, its public keys/prekeys, and its queued recipient
+inbox. Private keys are never sent.
+
+Request:
+
+```json
+{
+  "signing_key": "<base64: 32 raw bytes>",
+  "identity_key": "<base64: 32 raw bytes>",
+  "fallback_key_id": "fallback-1",
+  "fallback_key": "<base64: 32 raw bytes>",
+  "one_time_keys": [
+    {"key_id": "otk-1", "public_key": "<base64: 32 raw bytes>"}
+  ]
+}
+```
+
+`fallback_key_id` and `fallback_key` must be supplied together. The
+`one_time_keys` array may be empty; duplicate IDs within the batch are invalid.
+Success is `201 Created`:
+
+```json
+{"data":{"device_id":"<uuid>","registered_at":"<RFC3339 UTC>"}}
+```
+
+### `POST /api/dm/device/keys`
+
+Add one-time public keys to the current active device:
+
+```json
+{
+  "one_time_keys": [
+    {"key_id": "otk-2", "public_key": "<base64: 32 raw bytes>"}
+  ]
+}
+```
+
+Success is `200 OK` with `{"data":{"device_id":"<uuid>","uploaded":1}}`.
+Unknown devices return `404`; invalid sizes, duplicate IDs, and exceeded
+count limits return `400 VALIDATION_ERROR`.
+
+### `GET /api/dm/users/:id/key-bundle`
+
+Fetch the eligible recipient's active public device bundle. This claims and
+removes one one-time key atomically. When no one-time keys remain, the optional
+fallback key is returned instead. If neither exists, the response is
+`409 DM_KEYS_EXHAUSTED`.
+
+Success:
+
+```json
+{
+  "data": {
+    "user_id": "<uuid>",
+    "device_id": "<uuid>",
+    "signing_key": "<base64>",
+    "identity_key": "<base64>",
+    "one_time_key": {"key_id":"otk-1","public_key":"<base64>"}
+  }
+}
+```
+
+`one_time_key` and `fallback_key` are mutually exclusive and omitted when
+absent. Missing and ineligible recipients both return `404 NOT_FOUND`.
+
+### `POST /api/dm/messages`
+
+Send a versioned opaque envelope. Sender identity/device are derived from
+authentication, never accepted from the request body.
+
+Request:
+
+```json
+{
+  "recipient_user_id": "<uuid>",
+  "version": 1,
+  "client_message_id": "<uuid>",
+  "ciphertext": "<base64 opaque bytes>"
+}
+```
+
+The client message ID is unique per sender device. Repeating an identical
+request returns the original message ID and sequence; reusing the ID with a
+different recipient, version, or ciphertext returns `409 DM_CONFLICT`.
+Success is `201 Created`:
+
+```json
+{
+  "data": {
+    "message_id": "<uuid>",
+    "sequence": 1,
+    "client_message_id": "<uuid>",
+    "created_at": "<RFC3339 UTC>",
+    "expires_at": "<RFC3339 UTC>"
+  }
+}
+```
+
+Unknown and ineligible recipients both return `404 NOT_FOUND`. Unsupported
+versions and invalid sizes return `400 VALIDATION_ERROR`.
+
+### `GET /api/dm/inbox?after=<sequence>&limit=<n>`
+
+Poll the authenticated device's inbox in ascending, per-device sequence
+order. `after` is required and non-negative; `limit` is optional (default 50,
+maximum 100). Expired ciphertext is never returned. Polling does not
+acknowledge or delete messages.
+
+Success:
+
+```json
+{
+  "data": {
+    "messages": [
+      {
+        "message_id": "<uuid>",
+        "sequence": 1,
+        "sender_user_id": "<uuid>",
+        "sender_device_id": "<uuid>",
+        "version": 1,
+        "ciphertext": "<base64 opaque bytes>",
+        "client_message_id": "<uuid>",
+        "created_at": "<RFC3339 UTC>",
+        "expires_at": "<RFC3339 UTC>"
+      }
+    ],
+    "next_after": 1
+  }
+}
+```
+
+After successfully handling and acknowledging every message in a response, the
+client may persist `next_after` as its cursor. If handling any message fails,
+keep the prior cursor and retry; acknowledged messages will no longer be
+returned, while unacknowledged messages remain available until expiry.
+
+### `POST /api/dm/inbox/:id/ack`
+
+Delete the identified message only if it belongs to the authenticated active
+device. Success is `204 No Content`; repeated acknowledgements are idempotent.
+The acknowledgement means delivered/handled by the client, not read by a
+person.
+
+### Client and deployment contract
+
+- Clients must not send plaintext or private keys. The backend treats
+  `ciphertext` as opaque bytes and cannot determine whether a caller mislabeled
+  plaintext as ciphertext.
+- The client owns encryption/decryption, private-key storage, session state,
+  and identity verification. None is implemented by this PR.
+- Deployed migration `009_dm_e2ee_relay.sql` before deploying a gateway build
+  with these routes. Keep the feature flag false until the Flutter client and
+  independent security review are complete.
+- The relay smoke test uses random opaque bytes and verifies HTTP/storage
+  behavior only; it is not a cryptography test.
+
 ## 1. Daftar Endpoint
 
 | Method | Path | Deskripsi | Auth |
@@ -197,6 +378,12 @@ Contoh per status:
 | POST | `/api/videos/:id/view` | Track view | JWT |
 | GET | `/api/notifications` | List notifikasi | JWT |
 | PUT | `/api/notifications/read-all` | Tandai semua notifikasi dibaca | JWT |
+| POST | `/api/dm/device` | Register/replace device (feature flag) | JWT |
+| POST | `/api/dm/device/keys` | Upload one-time public keys (feature flag) | JWT |
+| GET | `/api/dm/users/:id/key-bundle` | Claim eligible recipient bundle (feature flag) | JWT |
+| POST | `/api/dm/messages` | Send opaque ciphertext (feature flag) | JWT |
+| GET | `/api/dm/inbox` | Poll per-device ciphertext inbox (feature flag) | JWT |
+| POST | `/api/dm/inbox/:id/ack` | Acknowledge and delete inbox entry (feature flag) | JWT |
 | POST | `/api/webhooks/zitadel` | Actions V2 target — notifikasi lifecycle user | HMAC signature (`ZITADEL-Signature`) |
 
 ---

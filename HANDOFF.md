@@ -3,6 +3,37 @@
 State captured 2026-09-09, post domain-migration lokal (DOMAIN-MIGRATION-LOCAL-PROMPT.md).
 Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
 
+## DM E2EE backend relay — PR #77
+
+- PR #77 combines the design proposal with a backend-only opaque ciphertext
+  relay. It does not implement encryption/decryption and must not be described
+  as E2EE-ready. Issue #75 remains open for Flutter client work, production
+  rollout, and independent security review; #76 closes only when PR #77 merges.
+- Proposed v1: 1:1 text ciphertext, one active device per user, mutual-follow
+  eligibility, HTTP polling, per-device sequence, explicit acknowledgement,
+  and feature flag off by default. Requests, read receipts, WebSocket, media,
+  and multi-device are deferred. The current backend has no block mechanism;
+  enforce one if introduced before merge.
+- Migration `009_dm_e2ee_relay.sql` follows existing `008_user_avatar_upload.sql`;
+  roadmap numbers 003-007 remain reserved. Apply it with `make db-migrate-dm`
+  before deploying the gateway. Do not edit earlier migrations.
+- `DM_INBOX_TTL` is required when `DM_E2EE_ENABLED=true`. `.env.example` gives
+  `168h` (7 days) as a PROVISIONAL, unapproved value. The feature flag defaults
+  to false. The existing per-user rate limiter is process-local and acceptable
+  only for a single gateway instance.
+- API contract and client wire format are in `planning/04_api_contracts.md`;
+  schema is in `planning/03_schema.md`. The smoke test uses random bytes and
+  proves relay behavior only, not cryptography.
+- Remaining gates: confirm Flutter repository and owner, choose protocol and
+  library/license, confirm TTL, implement client crypto/UI, complete an
+  independent security review, then decide on production rollout.
+- Planning conflict to report: `planning/ROADMAP_TIKTOK_PARITY.md` leaves DM
+  under P3 (Draft), while this work proceeds as the owner's explicit request;
+  do not change roadmap priority here. The schema document's introductory
+  `pgxpool` reference is stale relative to `CONVENTIONS.md` and the current
+  `database/sql` adapter; flag it rather than silently changing the global
+  architecture statement.
+
 ## Profile avatar upload — PR #72
 
 - Backend menyediakan `POST /api/users/me/avatar/upload-intent` dan

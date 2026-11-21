@@ -415,3 +415,61 @@ Notifikasi in-app untuk event follow, like, dan comment.
 - Pembersihan video `DELETED` dilakukan oleh worker cleanup: cari `videos` dengan `status = 'DELETED'` dan `deleted_at < now() - interval '24 hours'`, hapus file R2, lalu hapus baris.
 - Semua akses file HLS/thumbnail harus melalui presigned URL atau signed playlist. Skema hanya menyimpan object key, bukan URL statis.
 - Nama tabel dan kolom di atas **dipakai verbatim** oleh `sqlc/queries.sql` dan handler. Tidak ada ORM/GORM.
+
+## Migration 009 — Direct-message ciphertext relay
+
+`migrations/009_dm_e2ee_relay.sql` adds the backend-only relay schema. Migration
+003-007 remain reserved by the parity roadmap; migration 008 is the existing
+avatar migration and must not be changed.
+
+### `dm_devices`
+
+One active device per user (`UNIQUE (user_id)`). Stores only public identity
+and signing keys, an optional public fallback key, registration time, and the
+per-device inbox sequence counter. Replacing a device deletes the previous
+row; `dm_one_time_keys` and ciphertext addressed to its inbox cascade away.
+The counter is incremented inside the same transaction that inserts a queued
+message; it is not a global sequence and is not based on `created_at`.
+
+### `dm_one_time_keys`
+
+| Column | Type | Constraint | Purpose |
+|---|---|---|---|
+| `device_id` | UUID | PK part, FK to `dm_devices` with cascade | Owner device |
+| `key_id` | TEXT | PK part, length 1-64 | Client-generated public-key identifier |
+| `public_key` | BYTEA | exactly 32 bytes | Opaque public key material |
+| `created_at` | TIMESTAMPTZ | NOT NULL, default `NOW()` | Stable claim ordering |
+
+Bundle fetch claims the oldest key atomically with `DELETE ... RETURNING` and
+`FOR UPDATE SKIP LOCKED`; if none remains, the device's optional fallback key
+is returned. The backend validates lengths and limits, not key correctness.
+
+### `dm_inbox`
+
+| Column | Type | Constraint | Purpose |
+|---|---|---|---|
+| `id` | UUID | PK | Message/ack identifier |
+| `recipient_device_id` | UUID | FK to `dm_devices` with cascade | Device-addressed queue |
+| `recipient_user_id` | UUID | FK to `users` with cascade | Routing metadata |
+| `sequence_no` | BIGINT | unique with recipient device, > 0 | Per-device polling cursor |
+| `sender_user_id` | UUID | FK to `users` with cascade | Routing metadata |
+| `sender_device_id` | UUID | no FK; retained for idempotency | Sender device identifier |
+| `version` | SMALLINT | currently `1` | Envelope format version |
+| `ciphertext` | BYTEA | 1-65,536 bytes | Opaque payload; never decrypted or logged |
+| `client_message_id` | UUID | unique with sender device | Idempotent send key |
+| `created_at` | TIMESTAMPTZ | NOT NULL, default `NOW()` | Server receive time |
+| `expires_at` | TIMESTAMPTZ | NOT NULL and after creation | Required retention cutoff |
+
+Indexes support `(recipient_device_id, sequence_no)` polling and expiry
+cleanup. Poll excludes expired records. The gateway janitor deletes expired
+rows in batches of 1,000. Acknowledgement deletes only a row owned by the
+active recipient device.
+
+Account deletion removes a user's sent and queued messages and then their
+device row in the existing deletion transaction; device deletion cascades
+public keys and prekeys. Messages already copied to another user's device
+cannot be recalled.
+
+The relay feature is off by default. `DM_INBOX_TTL` is mandatory when enabled;
+`168h` is only a provisional example in `.env.example` and is not approved.
+Apply migration 009 before deploying a gateway build with the relay routes.

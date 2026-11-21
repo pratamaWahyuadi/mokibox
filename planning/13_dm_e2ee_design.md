@@ -1,8 +1,9 @@
 # MokiBox Direct Messages — E2EE Design Proposal
 
-**Status:** Design proposal with proposed v1 decisions. Nothing in the
-"Proposed v1 decisions" section is approved until the reviewer records approval
-in the decision table. No implementation is authorized by this document.
+**Status:** Design proposal with proposed v1 decisions. No proposed decision is
+approved unless the reviewer records approval in the table. PR #77 pairs this
+proposal with a backend-only opaque ciphertext relay. That backend does not
+implement E2EE, approve client cryptography, or permit production enablement.
 
 **Purpose:** Define a threat model and a reviewable proposal for a minimal,
 end-to-end encrypted 1:1 text chat for MokiBox. This document starts from the
@@ -17,46 +18,48 @@ Treat this as an unapproved evaluation note, not a committed product priority.
 Promoting DM to a committed product phase requires an explicit product
 decision and corresponding planning/issue updates.
 
-The proposed v1 goals, pending reviewer approval, are:
+The proposed product goal, pending reviewer approval, is E2EE 1:1 text chat.
+PR #77 implements only its backend relay; the client and security gates remain
+in issue #75. The proposed backend v1 scope is:
 
-- 1:1 text messages with client-side E2EE.
-- One active device per account, with no server-side private-key recovery.
-- Simple first-contact message requests and encrypted read receipts.
-- HTTP polling for inbox delivery.
-- A production feature flag that remains off until the security review passes.
-- Best-effort account-deletion propagation; deletion cannot erase offline,
-  backed-up, exported, or copied plaintext.
+- 1:1 opaque ciphertext relay with one active device per account.
+- Mutual follows are required for key-bundle fetches and message sends.
+- HTTP polling, per-device ordering, acknowledgement, and ciphertext expiry.
+- A feature flag that defaults off; production enablement remains gated on the
+  Flutter client and independent security review.
+- Account deletion purges server-held device keys and queued ciphertext, but
+  cannot erase offline, backed-up, exported, or copied plaintext.
 
-WebSocket, typing/online status, push notifications, video sharing, media,
-voice notes, reactions, replies, unsend, groups, client-side search, and
-history transfer to new devices are proposed as deferred. Block/report scope
-is not decided in the proposal and needs reviewer confirmation.
+Message requests, pre-accept caps, read receipts, WebSocket, typing/online
+status, push notifications, video sharing, media, voice notes, reactions,
+replies, unsend, groups, client-side search, history transfer, and
+multi-device are deferred. No block mechanism exists in the current backend;
+the endpoint must honor one if it is introduced before merge. Block/report is
+otherwise out of v1.
 
 ## Feature coverage and boundaries
 
 This is a status of the design work, not implemented product functionality:
 
-| Capability | Current design status | Boundary or open point |
+| Capability | Proposed status | Boundary |
 |---|---|---|
-| 1:1 text | Proposed for v1 | Client performs encryption/decryption; no implementation exists in this proposal. |
-| First-contact message requests | Proposed for v1 | Recipient must accept before replying; proposed pre-accept cap is 1 message, pending approval. |
-| Read receipts | Proposed for v1 | Sent as encrypted control messages; server sees envelopes, not read state. |
-| HTTP polling | Proposed for v1 | Per-device inbox and sequence cursor; no WebSocket in v1. |
-| One active device per account | Proposed for v1 | New-device login revokes the prior registration; no history transfer or server recovery. |
-| Fingerprint verification | Proposed for v1 | Manual comparison and identity-key-change warning; trust-on-first-use is vulnerable to server substitution until comparison. |
-| Feature flag | Proposed for v1 | Off in production; dev/staging may enable after merge; production waits for security review. |
-| Typing/online, WebSocket, push, video share, media, voice notes, reactions, replies, unsend, groups | Proposed deferred scope | Follow-up designs; not implemented or promised by this proposal. |
-| Block and report | Not decided | Reviewer must confirm whether these are deferred or required in v1; report content must be user-selected. |
-| Server-side message search | Not available over opaque E2EE content | Server cannot search ciphertext; local search is deferred. |
-| History on a new device | Not in proposed v1 | No history transfer or server-side key recovery; losing the active device may lose history. |
+| 1:1 text E2EE | Product goal; backend relay only in PR #77 | Real E2EE requires client-side key generation, encryption, and decryption plus independent review. |
+| Eligibility | Proposed for v1 | Both users must mutually follow; nonexistent and ineligible recipients return the same not-found response. |
+| Device model | Proposed for v1 | One active device per account; replacement revokes the previous device and its queued inbox. |
+| HTTP polling | Proposed for v1 | Per-device sequence cursor, explicit acknowledgement, and required ciphertext TTL. |
+| Feature flag | Proposed for v1 | Off by default; production remains off until client implementation and security review. |
+| Fingerprint verification | Proposed client requirement | Manual comparison and identity-key-change warning; TOFU is vulnerable to server substitution until comparison. |
+| Requests, receipts, WebSocket, presence, push, media, voice, reactions, replies, unsend, groups, search, history transfer, multi-device | Deferred | Not included in this backend PR. |
+| Block/report | Out of v1 | No block mechanism is implemented in the current backend; honor one if added before merge. |
 
 ## Security goals
 
-- Message plaintext and private protocol keys exist only on user devices.
-- The service stores and routes opaque, versioned ciphertext envelopes and
-  only the metadata needed to operate the service.
-- A database or API operator cannot decrypt message content or recover device
-  private keys.
+- In the complete product, message plaintext and private protocol keys exist
+  only on user devices. PR #77 alone does not establish that guarantee.
+- The backend stores and routes versioned opaque bytes and only the metadata
+  needed to operate the service; it never decrypts or logs payloads or keys.
+- The Flutter client must keep private protocol keys on user devices; a
+  database or API operator must not be able to recover them.
 - Messages are authenticated between devices under an explicit identity-trust
   model; a server must not silently replace a trusted identity key.
 - The proposed v1 protocol must provide forward secrecy and clearly document
@@ -74,7 +77,7 @@ This is a status of the design work, not implemented product functionality:
 - Public identity keys, signed prekeys, and one-time prekeys.
 - Device membership, enrollment approvals, revocations, and identity changes.
 - Message-request state and anti-abuse limits.
-- Delivery/read receipts, online/typing events, and routing metadata.
+- Routing metadata, delivery timing, and envelope size.
 - Authentication tokens and active WebSocket sessions.
 
 ### Adversaries and trust boundaries
@@ -143,9 +146,9 @@ device identity key is trustworthy.
   atomically and enforces quotas/rate limits.
 - Relays opaque ciphertext envelopes without plaintext fallback, content
   indexing, or payload logging.
-- Enforces conversation membership, request state, and device authorization.
-- For proposed v1, provides an authenticated HTTP polling inbox and read
-  receipt relay; WebSocket and ephemeral presence are deferred.
+- Enforces mutual-follow eligibility and device authorization.
+- For proposed v1, provides an authenticated HTTP polling inbox with explicit
+  acknowledgement; requests, receipts, WebSocket, and presence are deferred.
 - If FCM/APNs is used for offline delivery, sends no plaintext or message
   preview in the push payload. Prefer a generic wake-up signal; any encrypted
   envelope used for a client-side preview remains opaque to the provider.
@@ -204,8 +207,8 @@ preselect the final service architecture.
 
 Before production scope is approved, document:
 
-- Which identifiers, IP/session details, timestamps, envelope sizes, receipt
-  states, and presence events the server can observe and retain.
+- Which identifiers, IP/session details, timestamps, envelope sizes, and
+  delivery patterns the server can observe and retain.
 - Whether offline delivery uses FCM/APNs, what the push payload contains, and
   what additional metadata push providers can observe (such as device tokens,
   app identifiers, routing data, and delivery timing). Push payloads must not
@@ -217,8 +220,8 @@ Before production scope is approved, document:
   the server.
 - Retention and deletion rules for ciphertext, public keys, prekeys, delivery
   state, logs, metrics, and backups.
-- Message-request limits, recipient blocking/reporting, prekey-exhaustion
-  protection, and WebSocket connection/message limits.
+- Per-user send and key-bundle limits, prekey-exhaustion behavior, and whether
+  any block mechanism is added before v1 ships.
 - WebSocket authentication at connection upgrade, token expiry/revocation,
   origin policy, reconnect behavior, backpressure, and delivery across more
   than one gateway instance.
@@ -233,14 +236,15 @@ end.
 
 ### D1. v1 scope
 
-- In: 1:1 text, E2EE, first-contact message requests, read receipts, HTTP
-  polling, and a feature flag that stays off in production until security
-  review.
-- Deferred: WebSocket, typing/online status, push notifications, video sharing,
-  media, voice notes, reactions, replies, unsend, groups, client-side search,
-  and history transfer to new devices.
-- Block/report is not assigned to v1 in this proposal; the reviewer must
-  confirm whether it is deferred or required before implementation starts.
+- In: backend relay for 1:1 text ciphertext, one active device per account,
+  mutual-follow eligibility, HTTP polling, acknowledgement, required inbox TTL,
+  and a feature flag that defaults off.
+- Deferred: message requests, pre-accept caps, read receipts, WebSocket,
+  typing/online status, push notifications, video sharing, media, voice notes,
+  reactions, replies, unsend, groups, client-side search, history transfer,
+  and multi-device.
+- The backend implements no block mechanism. If one exists in the codebase
+  before merge, eligibility must honor it; the current main baseline has none.
 
 ### D2. Protocol and library
 
@@ -261,10 +265,11 @@ end.
   post-compromise properties and threat-model fit against the selected
   version/specification before implementation.
 - The Go backend needs no cryptographic library: it stores public key material
-  and opaque ciphertext and may validate encoding and length only.
+  and opaque ciphertext and validates encoding, lengths, and configured
+  limits only.
 - AGPL-3.0 has copyleft obligations for the distributed client. The owner and
   reviewer must confirm the client's license and distribution model before
-  adoption. This is not legal advice.
+  adoption. This is not legal advice and no license is accepted here.
 - Alternatives considered: Signal [`libsignal`](https://github.com/signalapp/libsignal)
   (AGPL-3.0; official repo documents Java, Swift, and TypeScript APIs, says
   use outside Signal's own clients is unsupported, and has no documented
@@ -282,18 +287,16 @@ end.
 
 ### D4. Message flow
 
-1. Registration: the client generates device keys (Ed25519 signing key and
-   Curve25519 identity key), a batch of one-time keys, and an optional fallback
-   key, then uploads public parts only.
-2. First message: the sender fetches the recipient's key bundle. The server
-   claims one one-time key atomically, or returns the fallback key when none
-   remain. Bundle fetches are rate limited per sender.
-3. The sender creates an outbound Olm session, encrypts the payload (type,
-   text, client message ID, and client timestamp), and posts an envelope with
-   sender and recipient user/device IDs, message kind (pre-key or normal),
-   ciphertext, and a client message ID for idempotency.
-4. The recipient polls its inbox, decrypts, creates the inbound session, and
-   replenishes one-time keys when the server reports a low count.
+1. The client generates device keys and public one-time keys, then registers
+   the public material; private keys remain on the device.
+2. The sender fetches the recipient's bundle only when both users mutually
+   follow. The server atomically claims one one-time key, falling back to the
+   optional fallback key when the batch is exhausted.
+3. After client protocol/library approval, the sender creates a session and
+   encrypts locally. It posts a versioned ciphertext envelope with a UUID
+   client message ID; the server validates the byte format and size only.
+4. The recipient polls by per-device sequence, decrypts locally, acknowledges
+   delivered entries, and replenishes public one-time keys as needed.
 
 This is a proposed flow, not an approved wire/API contract. The client
 cryptography details must be checked against the selected library API and
@@ -313,18 +316,19 @@ reviewed before implementation.
 
 ### D6. Receipts
 
-- Read receipts are sent as encrypted control messages from recipient to
-  sender, so the server does not learn read state. The server sees only that
-  an envelope exists.
+- Read receipts are out of v1. Delivery acknowledgement only removes a queued
+  ciphertext from the recipient inbox; it does not report read state to the
+  sender.
 
-### D7. Message requests and abuse limits
+### D7. Eligibility and abuse limits
 
-- A sender without an accepted relationship creates a pending request; the
-  recipient accepts or declines. Proposed cap before acceptance: one message;
-  reviewer approval is required.
-- Per-user rate limits apply to sends and bundle fetches. The current limiter
-  is per process: acceptable only for a single gateway instance; otherwise use
-  a Redis-backed limit before scaling out.
+- Only mutually-following users can fetch a bundle or send ciphertext. There
+  are no message requests or pre-accept cap in v1.
+- The existing per-user, in-process rate limiter applies to sends and bundle
+  fetches. This is acceptable only for one gateway instance; use a
+  Redis-backed limiter before scaling out.
+- The current backend has no block mechanism. If one is introduced before
+  merge, the eligibility query must respect it.
 
 ### D8. Identity verification
 
@@ -341,41 +345,46 @@ reviewed before implementation.
 
 ### D10. Release gates
 
-- Feature flag is off in production by default; dev/staging may enable it after
-  merge.
-- Live smoke test (PostgreSQL + HTTP, two users and two devices total: one
-  device per user) passes twice consecutively.
-- A test verifies no plaintext in endpoints, database, logs, or telemetry.
+- Feature flag defaults off; the required TTL setting is `168h` (7 days)
+  provisionally and is not approved.
+- Live relay smoke test (PostgreSQL + HTTP, two users, one device each, random
+  opaque bytes as ciphertext) passes twice consecutively. It verifies relay
+  behavior, not cryptography.
+- Tests verify ciphertext and key bytes are not logged. The server has no
+  plaintext field and does not decrypt.
 - Independent security review is completed and findings are addressed before
-  the production flag is enabled.
+  the production flag is enabled, after the Flutter client implements actual
+  encryption and decryption.
 
 ### Decision table
 
 | ID | Proposal | Approver | Status |
 |---|---|---|---|
 | D1 | v1 scope | `<reviewer>` | Proposed |
-| D2 | Olm / `flutter_vodozemac`, license accepted | `<reviewer>` | Proposed |
+| D2 | Olm / `flutter_vodozemac` candidate; protocol and license decision open | `<reviewer>` | Proposed |
 | D3 | One active device in v1 | `<reviewer>` | Proposed |
 | D4 | Message flow | `<reviewer>` | Proposed |
 | D5 | Per-device sequence and store-and-forward | `<reviewer>` | Proposed |
-| D6 | Encrypted read receipts | `<reviewer>` | Proposed |
-| D7 | Request cap and rate limits | `<reviewer>` | Proposed |
+| D6 | No read receipts in v1; delivery ack only | `<reviewer>` | Proposed |
+| D7 | Mutual-follow eligibility and rate limits | `<reviewer>` | Proposed |
 | D8 | Fingerprint verification and key-change warning | `<reviewer>` | Proposed |
 | D9 | Account-deletion contract | `<reviewer>` | Proposed |
 | D10 | Release gates | `<reviewer>` | Proposed |
 
-## Open decisions before implementation
+## Open decisions before client cryptography and production rollout
 
 - Confirm the Flutter client repository, framework, supported platforms, and
   owner; do not fill these in without the repository owner's confirmation.
 - Approve, change, or reject proposed decisions D1-D10, including explicit
   acceptance or rejection of the AGPL-3.0 license.
-- Set the remaining values: message-request cap and undelivered-ciphertext TTL.
+- Confirm the provisional undelivered-ciphertext TTL before enabling outside
+  development.
 - Decide push-notification and WebSocket design for a later version.
 - Decide whether encrypted video references enter a later version.
-- Confirm block/report sequencing.
 - Agree on security-review ownership and schedule.
 
-Until the decision table records approval, this proposal does not authorize
-cryptographic implementation, a production schema, or a claim that MokiBox DM
-is end-to-end encrypted.
+Until the decision table records approval, this proposal does not approve the
+protocol or library. PR #77's backend relay and migration do not establish
+E2EE or authorize production rollout. MokiBox DM must not be described as
+end-to-end encrypted until the client implementation and independent security
+review are complete.
