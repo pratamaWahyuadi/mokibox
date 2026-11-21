@@ -506,5 +506,5 @@ cascades the opaque key bundle, fallback key, and one-time key material.
 Messages already copied to another user's device cannot be recalled.
 
 The relay feature is off by default. `DM_INBOX_TTL` is mandatory when enabled;
-`168h` is only a provisional example in `.env.example` and is not approved.
+the selected v1 retention value is `168h` (7 days), shown in `.env.example`.
 Apply migration 009 before deploying a gateway build with the relay routes.

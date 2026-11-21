@@ -173,7 +173,7 @@ cryptographic protocol or client library. PR #77 stores and forwards opaque
 bytes only; it does not implement E2EE. Every route is authenticated and is
 registered only when `DM_E2EE_ENABLED=true`. The flag defaults off. When
 enabled, `DM_INBOX_TTL` is required; `.env.example` currently documents
-`168h` (7 days) as a **PROVISIONAL, unapproved** value.
+`168h` (7 days), the selected v1 ciphertext-retention value.
 
 All payloads use the standard `{ "data": ... }` success envelope and standard
 error envelope. JSON `[]byte` fields use standard padded Base64. A device
@@ -312,8 +312,7 @@ After the janitor deletes the expired record, the ID may be treated as a new
 send. Reusing the ID with a different recipient, recipient device, protocol,
 version, or ciphertext returns `409 DM_CONFLICT`.
 The 1,000 pending-inbox cap does not cap retained idempotency records; their
-count is bounded by the send rate and TTL and should be considered when
-choosing the final TTL.
+count is bounded by the send rate and the selected 168h TTL.
 An envelope whose protocol/version does not match the registered devices
 returns `409 DM_PROTOCOL_MISMATCH`.
 If the recipient's active device changed after its bundle was fetched, the

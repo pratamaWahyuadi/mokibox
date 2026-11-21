@@ -3,7 +3,7 @@
 This guide is review assistance for PR #77, not approval of any D1-D10
 proposal. PR #77 delivers a backend relay only; it does not implement E2EE.
 Keep the production feature flag off until the client and independent security
-review tracked by #78 are complete.
+review checklist in PR #77 is complete.
 
 ## Three review commands
 
@@ -30,8 +30,8 @@ against production:
    DATABASE_URL="$DM_REVIEW_DATABASE_URL" DM_INBOX_TTL=168h go run ./scripts/smoketest/phase13_dm_e2ee
    ```
 
-The `168h` value is only a provisional smoke-test setting. The final TTL is
-still a gate in #78.
+The `168h` value is the selected v1 TTL and is used by this smoke test. Keep it
+explicit in every environment where the feature is enabled.
 
 ## Evidence and limits
 
@@ -48,7 +48,7 @@ still a gate in #78.
   expiry, stale-device rejection, queue-cap rollback, and repeatability.
 - Acknowledgements delete ciphertext immediately but preserve the digest and
   routing/response metadata until TTL cleanup. Review this additional metadata
-  retention alongside the provisional TTL. The 1,000 pending-inbox cap does not
+  retention alongside the selected TTL. The 1,000 pending-inbox cap does not
   cap tombstones; their count follows the send rate and TTL.
 - These checks prove relay behavior and database transaction behavior only.
   They do not prove encryption, key safety on client devices, or protocol
@@ -57,21 +57,21 @@ still a gate in #78.
   plaintext as ciphertext. Device replacement relies on a JWT; a stolen
   session can replace a device. Copied messages cannot be recalled.
 - The per-process rate limiter is suitable only for one gateway instance.
-  Production remains disabled pending the client, final TTL, and independent
-  security review.
+  Production remains disabled pending the client and independent security
+  review; the selected v1 TTL is 168h.
 
 ## Suggested reviewer dispositions (all remain Proposed until recorded)
 
 | Decision | Suggested disposition |
 |---|---|
 | D1 — v1 scope | Accept the narrow 1:1, mutual-follow, single-device backend scope; keep parity features deferred. |
-| D2 — protocol/library | Keep protocol and license selection open for #78. Do not approve the AGPL-3.0 candidate here. |
+| D2 — protocol/library | Keep protocol and license selection unapproved until the owner/reviewer explicitly decides; do not assume AGPL-3.0 acceptance. |
 | D3 — device model | Accept one active device, with no server recovery/history transfer; require the client key-change warning. |
 | D4 — message flow | Accept opaque key-bundle claim and ciphertext relay only after the client protocol decision and review. |
-| D5 — ordering/retention | Accept the transactional per-device sequence and acknowledgement flow; set the final TTL before enabling outside development. |
+| D5 — ordering/retention | Accept the transactional per-device sequence, acknowledgement flow, and selected 168h TTL. |
 | D6 — receipts | Accept delivery acknowledgement only; keep read receipts deferred. |
 | D7 — eligibility/abuse | Accept mutual-follow eligibility, documented per-process limits, and the 1,000-message cap; use a shared limiter before scaling beyond one gateway. |
-| D8 — identity verification | Require fingerprint comparison and identity-key-change warnings in the client issue #78. |
+| D8 — identity verification | Require fingerprint comparison and identity-key-change warnings in the client before production. |
 | D9 — deletion | Accept server-side key/queue purge while documenting that copies on other devices cannot be erased. |
 | D10 — release gates | Keep the flag off in production until real client encryption/decryption and independent security review pass. |
 

@@ -318,7 +318,7 @@ reviewed before implementation.
   polling cursor to skip messages.
 - The server is a store-and-forward queue: ciphertext is deleted after the
   recipient device acknowledges it, and undelivered ciphertext expires after
-  a TTL whose value remains to be set. A device is capped at 1,000 pending,
+  the selected v1 TTL of 168h (7 days). A device is capped at 1,000 pending,
   unexpired messages; a full inbox rejects sends. A background janitor deletes
   expired rows, while polling filters them without running cleanup. A separate
   idempotency tombstone retains the ciphertext digest and routing/response
@@ -359,8 +359,8 @@ reviewed before implementation.
 
 ### D10. Release gates
 
-- Feature flag defaults off; the required TTL setting is `168h` (7 days)
-  provisionally and is not approved.
+- Feature flag defaults off; `DM_INBOX_TTL=168h` (7 days) is the selected v1
+  retention value and is required when the feature is enabled.
 - Live relay smoke test (PostgreSQL + HTTP, two users, one active device each,
   random opaque bytes as ciphertext) passes twice consecutively. It exercises
   concurrent one-time-key claims through exhaustion and concurrent sends to
@@ -393,8 +393,8 @@ reviewed before implementation.
   owner; do not fill these in without the repository owner's confirmation.
 - Approve, change, or reject proposed decisions D1-D10, including explicit
   acceptance or rejection of the AGPL-3.0 license.
-- Confirm the provisional undelivered-ciphertext TTL before enabling outside
-  development.
+- The selected undelivered-ciphertext TTL is 168h (7 days); configure
+  `DM_INBOX_TTL=168h` wherever the relay is enabled.
 - Decide push-notification and WebSocket design for a later version.
 - Decide whether encrypted video references enter a later version.
 - Agree on security-review ownership and schedule.

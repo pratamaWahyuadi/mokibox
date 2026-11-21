@@ -8,8 +8,7 @@ Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
 - PR #77 combines the design proposal with a backend-only opaque ciphertext
   relay. It does not implement encryption/decryption and must not be described
   as E2EE-ready. Issues #75 (backend) and #76 (design) close only when PR #77
-  merges; Flutter client work, production rollout, and independent security
-  review are tracked by #78.
+  merges; the client and release checklist is recorded in PR #77's body.
 - Proposed v1: 1:1 text ciphertext, one active device per user, mutual-follow
   eligibility, HTTP polling, per-device sequence, explicit acknowledgement,
   request/device ID matching, and feature flag off by default. Requests, read
@@ -19,8 +18,8 @@ Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
   roadmap numbers 003-007 remain reserved. Apply it with `make db-migrate-dm`
   before deploying the gateway. Do not edit earlier migrations.
 - `DM_INBOX_TTL` is required when `DM_E2EE_ENABLED=true`. `.env.example` gives
-  `168h` (7 days) as a PROVISIONAL, unapproved value. The feature flag defaults
-  to false. A device is capped at 1,000 pending, unexpired messages. Key-bundle
+  the selected v1 value `168h` (7 days). The feature flag defaults to false.
+  A device is capped at 1,000 pending, unexpired messages. Key-bundle
   fetches are limited to 30/minute, burst 10; sends to 60/minute, burst 20,
   separately from the global per-user limiter. All limiters are per-process and
   suitable only for a single gateway instance. Expiry cleanup runs in the
@@ -46,9 +45,11 @@ Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
   protocol/version consistency, never protocol-specific formats. Go's
   standard-library SHA-256 is used only for digest-based send idempotency; no
   protocol cryptography or external cryptographic dependency is added.
-- Remaining gates under #78: confirm Flutter repository and owner, approve or
-  reject protocol/library and license, confirm TTL, implement client crypto/UI,
-  complete an independent security review, then decide on production rollout.
+- Remaining post-merge/release checklist is recorded in PR #77: identify the
+  Flutter repository and owner, approve protocol/library and license, implement
+  client crypto/UI, complete an independent security review, then decide on
+  production rollout. The selected v1 TTL is `168h` (7 days); block/report are
+  deferred from v1.
 - Planning conflict to report: `planning/ROADMAP_TIKTOK_PARITY.md` leaves DM
   under P3 (Draft), while this work proceeds as the owner's explicit request;
   do not change roadmap priority here. The schema document's introductory
