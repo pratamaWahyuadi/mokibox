@@ -61,32 +61,41 @@ type apiError struct {
 }
 
 type deviceRequest struct {
-	SigningKey    []byte `json:"signing_key"`
-	IdentityKey   []byte `json:"identity_key"`
-	FallbackKeyID string `json:"fallback_key_id,omitempty"`
-	FallbackKey   []byte `json:"fallback_key,omitempty"`
-	OneTimeKeys   []struct {
-		KeyID     string `json:"key_id"`
-		PublicKey []byte `json:"public_key"`
+	Protocol            string `json:"protocol"`
+	Version             int32  `json:"version"`
+	KeyBundle           []byte `json:"key_bundle"`
+	FallbackKeyID       string `json:"fallback_key_id,omitempty"`
+	FallbackKeyMaterial []byte `json:"fallback_key_material,omitempty"`
+	OneTimeKeys         []struct {
+		KeyID       string `json:"key_id"`
+		KeyMaterial []byte `json:"key_material"`
 	} `json:"one_time_keys"`
 }
 
 type deviceResponse struct {
+	Protocol string    `json:"protocol"`
+	Version  int32     `json:"version"`
 	DeviceID uuid.UUID `json:"device_id"`
 }
 
 type keyBundle struct {
+	Protocol   string `json:"protocol"`
+	Version    int32  `json:"version"`
+	KeyBundle  []byte `json:"key_bundle"`
 	OneTimeKey *struct {
-		KeyID string `json:"key_id"`
+		KeyID       string `json:"key_id"`
+		KeyMaterial []byte `json:"key_material"`
 	} `json:"one_time_key"`
 	FallbackKey *struct {
-		KeyID string `json:"key_id"`
+		KeyID       string `json:"key_id"`
+		KeyMaterial []byte `json:"key_material"`
 	} `json:"fallback_key"`
 }
 
 type sendRequest struct {
 	RecipientUserID uuid.UUID `json:"recipient_user_id"`
-	Version         int16     `json:"version"`
+	Protocol        string    `json:"protocol"`
+	Version         int32     `json:"version"`
 	ClientMessageID uuid.UUID `json:"client_message_id"`
 	Ciphertext      []byte    `json:"ciphertext"`
 }
@@ -177,50 +186,43 @@ func run() error {
 	defer server.Close()
 	client := server.Client()
 
-	signingKeyA, err := randomBytes(32)
+	keyBundleA, err := randomBytes(101)
 	if err != nil {
-		return fmt.Errorf("generate signing key A: %w", err)
-	}
-	identityKeyA, err := randomBytes(32)
-	if err != nil {
-		return fmt.Errorf("generate identity key A: %w", err)
+		return fmt.Errorf("generate key bundle A: %w", err)
 	}
 	deviceA, err := registerDevice(ctx, client, server.URL, "smoke-user-a", deviceRequest{
-		SigningKey: signingKeyA, IdentityKey: identityKeyA,
+		Protocol: "opaque-smoke-protocol", Version: 32768, KeyBundle: keyBundleA,
 	})
 	if err != nil {
 		return fmt.Errorf("register device A: %w", err)
 	}
-	signingKeyB, err := randomBytes(32)
+	keyBundleB, err := randomBytes(89)
 	if err != nil {
-		return fmt.Errorf("generate signing key B: %w", err)
+		return fmt.Errorf("generate key bundle B: %w", err)
 	}
-	identityKeyB, err := randomBytes(32)
-	if err != nil {
-		return fmt.Errorf("generate identity key B: %w", err)
-	}
-	fallbackKey, err := randomBytes(32)
+	fallbackKey, err := randomBytes(41)
 	if err != nil {
 		return fmt.Errorf("generate fallback key: %w", err)
 	}
-	oneTimeKey, err := randomBytes(32)
+	oneTimeKey, err := randomBytes(53)
 	if err != nil {
 		return fmt.Errorf("generate one-time key: %w", err)
 	}
 	deviceBRequest := deviceRequest{
-		SigningKey: signingKeyB, IdentityKey: identityKeyB,
-		FallbackKeyID: "fallback-1", FallbackKey: fallbackKey,
+		Protocol: "opaque-smoke-protocol", Version: 32768, KeyBundle: keyBundleB,
+		FallbackKeyID: "fallback-1", FallbackKeyMaterial: fallbackKey,
 	}
 	deviceBRequest.OneTimeKeys = append(deviceBRequest.OneTimeKeys, struct {
-		KeyID     string `json:"key_id"`
-		PublicKey []byte `json:"public_key"`
-	}{KeyID: "one-time-1", PublicKey: oneTimeKey})
+		KeyID       string `json:"key_id"`
+		KeyMaterial []byte `json:"key_material"`
+	}{KeyID: "one-time-1", KeyMaterial: oneTimeKey})
 	deviceB, err := registerDevice(ctx, client, server.URL, "smoke-user-b", deviceBRequest)
 	if err != nil {
 		return fmt.Errorf("register device B: %w", err)
 	}
 	_, deniedSend, err := doRequest(ctx, client, server.URL, "smoke-user-a", http.MethodPost, "/api/dm/messages", sendRequest{
-		RecipientUserID: userB, Version: 1, ClientMessageID: uuid.New(), Ciphertext: []byte("opaque"),
+		RecipientUserID: userB, Protocol: "opaque-smoke-protocol", Version: 32768,
+		ClientMessageID: uuid.New(), Ciphertext: []byte("opaque"),
 	})
 	if err != nil {
 		return err
@@ -265,7 +267,10 @@ func run() error {
 	if err := json.Unmarshal(bundleBody, &bundle); err != nil {
 		return fmt.Errorf("decode first key bundle: %w", err)
 	}
-	if bundle.Data.OneTimeKey == nil || bundle.Data.OneTimeKey.KeyID != "one-time-1" {
+	if bundle.Data.Protocol != "opaque-smoke-protocol" || bundle.Data.Version != 32768 ||
+		!bytes.Equal(bundle.Data.KeyBundle, keyBundleB) ||
+		bundle.Data.OneTimeKey == nil || bundle.Data.OneTimeKey.KeyID != "one-time-1" ||
+		!bytes.Equal(bundle.Data.OneTimeKey.KeyMaterial, oneTimeKey) {
 		return fmt.Errorf("first bundle did not claim the one-time key")
 	}
 	bundleBody, status, err = doRequest(ctx, client, server.URL, "smoke-user-a", http.MethodGet,
@@ -276,7 +281,8 @@ func run() error {
 	if err := json.Unmarshal(bundleBody, &bundle); err != nil {
 		return fmt.Errorf("decode fallback bundle: %w", err)
 	}
-	if bundle.Data.FallbackKey == nil || bundle.Data.FallbackKey.KeyID != "fallback-1" {
+	if bundle.Data.FallbackKey == nil || bundle.Data.FallbackKey.KeyID != "fallback-1" ||
+		!bytes.Equal(bundle.Data.FallbackKey.KeyMaterial, fallbackKey) {
 		return fmt.Errorf("exhausted bundle did not return its fallback key")
 	}
 
@@ -285,8 +291,9 @@ func run() error {
 		return fmt.Errorf("generate first ciphertext: %w", err)
 	}
 	firstRequest := sendRequest{
-		RecipientUserID: userB, Version: 1, ClientMessageID: uuid.New(),
-		Ciphertext: firstCiphertext,
+		RecipientUserID: userB, Protocol: "opaque-smoke-protocol", Version: 32768,
+		ClientMessageID: uuid.New(),
+		Ciphertext:      firstCiphertext,
 	}
 	first, err := sendMessage(ctx, client, server.URL, firstRequest)
 	if err != nil {
@@ -313,8 +320,9 @@ func run() error {
 		return fmt.Errorf("generate second ciphertext: %w", err)
 	}
 	second, err := sendMessage(ctx, client, server.URL, sendRequest{
-		RecipientUserID: userB, Version: 1, ClientMessageID: uuid.New(),
-		Ciphertext: secondCiphertext,
+		RecipientUserID: userB, Protocol: "opaque-smoke-protocol", Version: 32768,
+		ClientMessageID: uuid.New(),
+		Ciphertext:      secondCiphertext,
 	})
 	if err != nil {
 		return fmt.Errorf("send second message: %w", err)
@@ -336,8 +344,9 @@ func run() error {
 				return
 			}
 			result, err := sendMessage(ctx, client, server.URL, sendRequest{
-				RecipientUserID: userB, Version: 1, ClientMessageID: uuid.New(),
-				Ciphertext: ciphertext,
+				RecipientUserID: userB, Protocol: "opaque-smoke-protocol", Version: 32768,
+				ClientMessageID: uuid.New(),
+				Ciphertext:      ciphertext,
 			})
 			if err != nil {
 				concurrentErrors <- fmt.Errorf("send concurrent message: %w", err)
@@ -414,9 +423,10 @@ func run() error {
 	if _, err := sqlDB.ExecContext(ctx, `
 		INSERT INTO dm_inbox
 			(recipient_device_id, recipient_user_id, sequence_no, sender_user_id,
-			 sender_device_id, version, ciphertext, client_message_id, created_at, expires_at)
-		VALUES ($1,$2,$3,$4,$5,1,$6,$7,NOW()-INTERVAL '2 hours',NOW()-INTERVAL '1 hour')`,
-		deviceB, userB, expiredSequence, userA, deviceA, expiredCiphertext, expiredID); err != nil {
+			 sender_device_id, protocol, version, ciphertext, client_message_id, created_at, expires_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW()-INTERVAL '2 hours',NOW()-INTERVAL '1 hour')`,
+		deviceB, userB, expiredSequence, userA, deviceA, "opaque-smoke-protocol", 32768,
+		expiredCiphertext, expiredID); err != nil {
 		return fmt.Errorf("seed expired ciphertext: %w", err)
 	}
 	pollBody, status, err = doRequest(ctx, client, server.URL, "smoke-user-b", http.MethodGet, "/api/dm/inbox?after=2", nil)
