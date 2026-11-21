@@ -23,11 +23,14 @@ import (
 )
 
 const (
-	dmPublicKeySize          = 32
+	dmMaxProtocolLength      = 64
+	dmMaxKeyBundleBytes      = 64 * 1024
+	dmMaxKeyMaterialBytes    = 4 * 1024
 	dmMaxOneTimeKeysPerBatch = 100
 	dmMaxOneTimeKeysStored   = 1000
 	dmMaxCiphertextBytes     = 64 * 1024
-	dmMaxRegistrationBody    = 128 * 1024
+	dmMaxRegistrationBody    = 1 * 1024 * 1024
+	dmMaxSendBody            = 96 * 1024
 	dmDefaultPollLimit       = 50
 	dmMaxPollLimit           = 100
 )
@@ -41,7 +44,7 @@ type dmTxStore interface {
 	GetDMDeviceForUpdate(ctx context.Context, userID uuid.UUID) (db.DmDevice, error)
 	GetEligibleDMDeviceForBundle(ctx context.Context, arg db.GetEligibleDMDeviceForBundleParams) (db.DmDevice, error)
 	ClaimDMOneTimeKey(ctx context.Context, deviceID uuid.UUID) (db.ClaimDMOneTimeKeyRow, error)
-	GetEligibleDMRecipientDeviceForSend(ctx context.Context, arg db.GetEligibleDMRecipientDeviceForSendParams) (uuid.UUID, error)
+	GetEligibleDMRecipientDeviceForSend(ctx context.Context, arg db.GetEligibleDMRecipientDeviceForSendParams) (db.GetEligibleDMRecipientDeviceForSendRow, error)
 	IncrementDMDeviceSequence(ctx context.Context, id uuid.UUID) (int64, error)
 	GetDMInboxMessageByClientID(ctx context.Context, arg db.GetDMInboxMessageByClientIDParams) (db.GetDMInboxMessageByClientIDRow, error)
 	InsertDMInboxMessage(ctx context.Context, arg db.InsertDMInboxMessageParams) (db.InsertDMInboxMessageRow, error)
@@ -89,16 +92,17 @@ func (h *DMHandler) RegisterRoutes(api *echo.Group) {
 }
 
 type dmOneTimeKeyInput struct {
-	KeyID     string `json:"key_id"`
-	PublicKey []byte `json:"public_key"`
+	KeyID       string `json:"key_id"`
+	KeyMaterial []byte `json:"key_material"`
 }
 
 type dmRegisterDeviceRequest struct {
-	SigningKey    []byte              `json:"signing_key"`
-	IdentityKey   []byte              `json:"identity_key"`
-	FallbackKeyID string              `json:"fallback_key_id"`
-	FallbackKey   []byte              `json:"fallback_key"`
-	OneTimeKeys   []dmOneTimeKeyInput `json:"one_time_keys"`
+	Protocol            string              `json:"protocol"`
+	Version             int32               `json:"version"`
+	KeyBundle           []byte              `json:"key_bundle"`
+	FallbackKeyID       string              `json:"fallback_key_id"`
+	FallbackKeyMaterial []byte              `json:"fallback_key_material"`
+	OneTimeKeys         []dmOneTimeKeyInput `json:"one_time_keys"`
 }
 
 type dmUploadKeysRequest struct {
@@ -106,27 +110,31 @@ type dmUploadKeysRequest struct {
 }
 
 type dmDeviceResponse struct {
+	Protocol     string    `json:"protocol"`
+	Version      int32     `json:"version"`
 	DeviceID     uuid.UUID `json:"device_id"`
 	RegisteredAt time.Time `json:"registered_at"`
 }
 
-type dmPublicKey struct {
-	KeyID     string `json:"key_id"`
-	PublicKey []byte `json:"public_key"`
+type dmKeyMaterial struct {
+	KeyID       string `json:"key_id"`
+	KeyMaterial []byte `json:"key_material"`
 }
 
 type dmKeyBundleResponse struct {
-	UserID      uuid.UUID    `json:"user_id"`
-	DeviceID    uuid.UUID    `json:"device_id"`
-	SigningKey  []byte       `json:"signing_key"`
-	IdentityKey []byte       `json:"identity_key"`
-	OneTimeKey  *dmPublicKey `json:"one_time_key,omitempty"`
-	FallbackKey *dmPublicKey `json:"fallback_key,omitempty"`
+	UserID      uuid.UUID      `json:"user_id"`
+	DeviceID    uuid.UUID      `json:"device_id"`
+	Protocol    string         `json:"protocol"`
+	Version     int32          `json:"version"`
+	KeyBundle   []byte         `json:"key_bundle"`
+	OneTimeKey  *dmKeyMaterial `json:"one_time_key,omitempty"`
+	FallbackKey *dmKeyMaterial `json:"fallback_key,omitempty"`
 }
 
 type dmSendRequest struct {
 	RecipientUserID uuid.UUID `json:"recipient_user_id"`
-	Version         int16     `json:"version"`
+	Protocol        string    `json:"protocol"`
+	Version         int32     `json:"version"`
 	ClientMessageID uuid.UUID `json:"client_message_id"`
 	Ciphertext      []byte    `json:"ciphertext"`
 }
@@ -144,7 +152,8 @@ type dmInboxMessage struct {
 	Sequence        int64     `json:"sequence"`
 	SenderUserID    uuid.UUID `json:"sender_user_id"`
 	SenderDeviceID  uuid.UUID `json:"sender_device_id"`
-	Version         int16     `json:"version"`
+	Protocol        string    `json:"protocol"`
+	Version         int32     `json:"version"`
 	Ciphertext      []byte    `json:"ciphertext"`
 	ClientMessageID uuid.UUID `json:"client_message_id"`
 	CreatedAt       time.Time `json:"created_at"`
@@ -183,12 +192,13 @@ func (h *DMHandler) RegisterDevice(c echo.Context) error {
 			fallbackID = sql.NullString{String: req.FallbackKeyID, Valid: true}
 		}
 		created, err := qtx.CreateDMDevice(c.Request().Context(), db.CreateDMDeviceParams{
-			ID:            deviceID,
-			UserID:        user.ID,
-			SigningKey:    req.SigningKey,
-			IdentityKey:   req.IdentityKey,
-			FallbackKeyID: fallbackID,
-			FallbackKey:   req.FallbackKey,
+			ID:                  deviceID,
+			UserID:              user.ID,
+			Protocol:            req.Protocol,
+			ProtocolVersion:     req.Version,
+			KeyBundle:           req.KeyBundle,
+			FallbackKeyID:       fallbackID,
+			FallbackKeyMaterial: req.FallbackKeyMaterial,
 		})
 		if err != nil {
 			return fmt.Errorf("create device: %w", err)
@@ -205,7 +215,10 @@ func (h *DMHandler) RegisterDevice(c echo.Context) error {
 		}
 		return dmInternal(c, "register device", err)
 	}
-	return shared.RespondCreated(c, dmDeviceResponse{DeviceID: device.ID, RegisteredAt: device.RegisteredAt})
+	return shared.RespondCreated(c, dmDeviceResponse{
+		Protocol: device.Protocol, Version: device.ProtocolVersion,
+		DeviceID: device.ID, RegisteredAt: device.RegisteredAt,
+	})
 }
 
 func (h *DMHandler) UploadOneTimeKeys(c echo.Context) error {
@@ -273,24 +286,27 @@ func (h *DMHandler) GetKeyBundle(c echo.Context) error {
 			return fmt.Errorf("load eligible recipient device: %w", err)
 		}
 		bundle = dmKeyBundleResponse{
-			UserID:      device.UserID,
-			DeviceID:    device.ID,
-			SigningKey:  device.SigningKey,
-			IdentityKey: device.IdentityKey,
+			UserID:    device.UserID,
+			DeviceID:  device.ID,
+			Protocol:  device.Protocol,
+			Version:   device.ProtocolVersion,
+			KeyBundle: device.KeyBundle,
 		}
 		key, err := qtx.ClaimDMOneTimeKey(c.Request().Context(), device.ID)
 		if err == nil {
-			bundle.OneTimeKey = &dmPublicKey{KeyID: key.KeyID, PublicKey: key.PublicKey}
+			bundle.OneTimeKey = &dmKeyMaterial{KeyID: key.KeyID, KeyMaterial: key.KeyMaterial}
 			return nil
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("claim one-time key: %w", err)
 		}
-		if device.FallbackKeyID.Valid && len(device.FallbackKey) == dmPublicKeySize {
-			bundle.FallbackKey = &dmPublicKey{KeyID: device.FallbackKeyID.String, PublicKey: device.FallbackKey}
+		if device.FallbackKeyID.Valid && len(device.FallbackKeyMaterial) > 0 {
+			bundle.FallbackKey = &dmKeyMaterial{
+				KeyID: device.FallbackKeyID.String, KeyMaterial: device.FallbackKeyMaterial,
+			}
 			return nil
 		}
-		return shared.Wrap(shared.ErrDMKeysExhausted, "recipient has no available prekey")
+		return shared.Wrap(shared.ErrDMKeysExhausted, "recipient has no one-time or fallback key")
 	})
 	if err != nil {
 		if errors.Is(err, shared.ErrNotFound) || errors.Is(err, shared.ErrDMKeysExhausted) {
@@ -307,11 +323,11 @@ func (h *DMHandler) SendMessage(c echo.Context) error {
 		return shared.RespondError(c, err)
 	}
 	var req dmSendRequest
-	if err := bindDMJSON(c, &req, dmMaxCiphertextBytes+4096); err != nil {
+	if err := bindDMJSON(c, &req, dmMaxSendBody); err != nil {
 		return shared.RespondError(c, shared.Wrap(shared.ErrValidation, "invalid message envelope"))
 	}
 	if req.RecipientUserID == uuid.Nil || req.ClientMessageID == uuid.Nil ||
-		req.RecipientUserID == user.ID || req.Version != 1 ||
+		req.RecipientUserID == user.ID || !validDMProtocol(req.Protocol) || req.Version <= 0 ||
 		len(req.Ciphertext) == 0 || len(req.Ciphertext) > dmMaxCiphertextBytes {
 		return shared.RespondError(c, shared.Wrap(shared.ErrValidation, "invalid message envelope"))
 	}
@@ -331,6 +347,7 @@ func (h *DMHandler) SendMessage(c echo.Context) error {
 		})
 		if err == nil {
 			if existing.RecipientUserID != req.RecipientUserID ||
+				existing.Protocol != req.Protocol ||
 				existing.Version != req.Version ||
 				!bytes.Equal(existing.Ciphertext, req.Ciphertext) {
 				return shared.Wrap(shared.ErrDMConflict, "client message id was reused")
@@ -348,7 +365,7 @@ func (h *DMHandler) SendMessage(c echo.Context) error {
 			return fmt.Errorf("check send idempotency: %w", err)
 		}
 
-		recipientDeviceID, err := qtx.GetEligibleDMRecipientDeviceForSend(c.Request().Context(), db.GetEligibleDMRecipientDeviceForSendParams{
+		recipientDevice, err := qtx.GetEligibleDMRecipientDeviceForSend(c.Request().Context(), db.GetEligibleDMRecipientDeviceForSendParams{
 			ID:     senderDevice.ID,
 			UserID: req.RecipientUserID,
 		})
@@ -358,16 +375,21 @@ func (h *DMHandler) SendMessage(c echo.Context) error {
 		if err != nil {
 			return fmt.Errorf("check recipient eligibility: %w", err)
 		}
-		sequence, err := qtx.IncrementDMDeviceSequence(c.Request().Context(), recipientDeviceID)
+		if senderDevice.Protocol != req.Protocol || senderDevice.ProtocolVersion != req.Version ||
+			recipientDevice.Protocol != req.Protocol || recipientDevice.ProtocolVersion != req.Version {
+			return shared.Wrap(shared.ErrDMProtocolMismatch, "message protocol does not match registered devices")
+		}
+		sequence, err := qtx.IncrementDMDeviceSequence(c.Request().Context(), recipientDevice.ID)
 		if err != nil {
 			return fmt.Errorf("allocate inbox sequence: %w", err)
 		}
 		inserted, err := qtx.InsertDMInboxMessage(c.Request().Context(), db.InsertDMInboxMessageParams{
-			RecipientDeviceID: recipientDeviceID,
+			RecipientDeviceID: recipientDevice.ID,
 			RecipientUserID:   req.RecipientUserID,
 			SequenceNo:        sequence,
 			SenderUserID:      user.ID,
 			SenderDeviceID:    senderDevice.ID,
+			Protocol:          req.Protocol,
 			Version:           req.Version,
 			Ciphertext:        req.Ciphertext,
 			ClientMessageID:   req.ClientMessageID,
@@ -382,6 +404,7 @@ func (h *DMHandler) SendMessage(c echo.Context) error {
 				return fmt.Errorf("load concurrent idempotent send: %w", err)
 			}
 			if existing.RecipientUserID != req.RecipientUserID ||
+				existing.Protocol != req.Protocol ||
 				existing.Version != req.Version ||
 				!bytes.Equal(existing.Ciphertext, req.Ciphertext) {
 				return shared.Wrap(shared.ErrDMConflict, "client message id was reused")
@@ -408,7 +431,8 @@ func (h *DMHandler) SendMessage(c echo.Context) error {
 		return nil
 	})
 	if err != nil {
-		if errors.Is(err, shared.ErrNotFound) || errors.Is(err, shared.ErrDMConflict) {
+		if errors.Is(err, shared.ErrNotFound) || errors.Is(err, shared.ErrDMConflict) ||
+			errors.Is(err, shared.ErrDMProtocolMismatch) {
 			return shared.RespondError(c, err)
 		}
 		return dmInternal(c, "send message", err)
@@ -460,6 +484,7 @@ func (h *DMHandler) PollInbox(c echo.Context) error {
 			Sequence:        row.SequenceNo,
 			SenderUserID:    row.SenderUserID,
 			SenderDeviceID:  row.SenderDeviceID,
+			Protocol:        row.Protocol,
 			Version:         row.Version,
 			Ciphertext:      row.Ciphertext,
 			ClientMessageID: row.ClientMessageID,
@@ -513,14 +538,17 @@ func bindDMJSON(c echo.Context, dst any, maxBytes int64) error {
 }
 
 func validateDMRegistration(req dmRegisterDeviceRequest) error {
-	if len(req.SigningKey) != dmPublicKeySize || len(req.IdentityKey) != dmPublicKeySize {
-		return fmt.Errorf("signing_key and identity_key must each contain 32 bytes")
+	if !validDMProtocol(req.Protocol) || req.Version <= 0 {
+		return fmt.Errorf("protocol and version are required and must be valid")
 	}
-	if len(req.FallbackKey) != 0 && len(req.FallbackKey) != dmPublicKeySize {
-		return fmt.Errorf("fallback_key must contain 32 bytes")
+	if len(req.KeyBundle) == 0 || len(req.KeyBundle) > dmMaxKeyBundleBytes {
+		return fmt.Errorf("key_bundle must contain 1 to %d bytes", dmMaxKeyBundleBytes)
 	}
-	if (req.FallbackKeyID == "") != (len(req.FallbackKey) == 0) {
-		return fmt.Errorf("fallback_key_id and fallback_key must be supplied together")
+	if len(req.FallbackKeyMaterial) > dmMaxKeyMaterialBytes {
+		return fmt.Errorf("fallback_key_material exceeds the maximum size")
+	}
+	if (req.FallbackKeyID == "") != (len(req.FallbackKeyMaterial) == 0) {
+		return fmt.Errorf("fallback_key_id and fallback_key_material must be supplied together")
 	}
 	if req.FallbackKeyID != "" && !validDMKeyID(req.FallbackKeyID) {
 		return fmt.Errorf("fallback_key_id must be 1 to 64 characters without surrounding whitespace")
@@ -537,8 +565,8 @@ func validateDMKeys(keys []dmOneTimeKeyInput) error {
 		if !validDMKeyID(key.KeyID) {
 			return fmt.Errorf("one-time key id must be 1 to 64 characters without surrounding whitespace")
 		}
-		if len(key.PublicKey) != dmPublicKeySize {
-			return fmt.Errorf("one-time public keys must contain 32 bytes")
+		if len(key.KeyMaterial) == 0 || len(key.KeyMaterial) > dmMaxKeyMaterialBytes {
+			return fmt.Errorf("one-time key material must contain 1 to %d bytes", dmMaxKeyMaterialBytes)
 		}
 		if _, ok := seen[key.KeyID]; ok {
 			return fmt.Errorf("one-time key ids must be unique within a request")
@@ -546,6 +574,19 @@ func validateDMKeys(keys []dmOneTimeKeyInput) error {
 		seen[key.KeyID] = struct{}{}
 	}
 	return nil
+}
+
+func validDMProtocol(protocol string) bool {
+	if !validDMKeyID(protocol) || len(protocol) > dmMaxProtocolLength {
+		return false
+	}
+	for _, char := range protocol {
+		if !((char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') || char == '.' || char == '_' || char == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func validDMKeyID(keyID string) bool {
@@ -564,9 +605,9 @@ func validDMKeyID(keyID string) bool {
 func insertDMKeys(ctx context.Context, qtx dmTxStore, deviceID uuid.UUID, keys []dmOneTimeKeyInput) error {
 	for _, key := range keys {
 		rows, err := qtx.InsertDMOneTimeKey(ctx, db.InsertDMOneTimeKeyParams{
-			DeviceID:  deviceID,
-			KeyID:     key.KeyID,
-			PublicKey: key.PublicKey,
+			DeviceID:    deviceID,
+			KeyID:       key.KeyID,
+			KeyMaterial: key.KeyMaterial,
 		})
 		if err != nil {
 			return fmt.Errorf("insert one-time key: %w", err)
