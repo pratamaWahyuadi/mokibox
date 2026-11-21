@@ -380,7 +380,7 @@ reviewed before implementation.
 | D2 | Olm / `flutter_vodozemac` candidate; protocol and license decision open | `<reviewer>` | Proposed |
 | D3 | One active device in v1 | `<reviewer>` | Proposed |
 | D4 | Message flow | `<reviewer>` | Proposed |
-| D5 | Per-device sequence and store-and-forward | `<reviewer>` | Proposed |
+| D5 | Per-device sequence, store-and-forward, and 168h TTL | `<reviewer>` | Proposed |
 | D6 | No read receipts in v1; delivery ack only | `<reviewer>` | Proposed |
 | D7 | Mutual-follow eligibility and rate limits | `<reviewer>` | Proposed |
 | D8 | Fingerprint verification and key-change warning | `<reviewer>` | Proposed |
