@@ -467,20 +467,43 @@ key correctness or protocol-specific structure.
 | `created_at` | TIMESTAMPTZ | NOT NULL, default `NOW()` | Server receive time |
 | `expires_at` | TIMESTAMPTZ | NOT NULL and after creation | Required retention cutoff |
 
+### `dm_send_idempotency`
+
+The sender-device/client-message pair is retained independently from the inbox
+row until the original message expires. This lets a retry return the original
+message ID and sequence even after acknowledgement deleted its ciphertext.
+The row contains routing/response metadata and a 32-byte SHA-256 digest of the
+ciphertext, never the ciphertext itself. The gateway compares the digest and
+other request metadata; it does not use it as protocol cryptography.
+
+The janitor deletes expired idempotency rows in batches of 1,000. Account
+deletion purges records where the account was either sender or recipient. When
+expiry cleanup removes a tombstone, the same client message ID can be treated
+as a new send.
+
+Indexes support expiry cleanup and account-deletion lookup by sender/recipient.
+
 `dm_devices.key_bundle` contains 1-65,536 opaque bytes; fallback and one-time
 key material contain 1-4,096 opaque bytes. One-time keys inherit the protocol
 and version of their parent device. These bounds are storage limits, not
 cryptographic-format assumptions.
 
 Indexes support `(recipient_device_id, sequence_no)` polling and expiry
-cleanup. Poll excludes expired records. The gateway janitor deletes expired
-rows in batches of 1,000. Acknowledgement deletes only a row owned by the
-active recipient device.
+cleanup. Poll excludes expired records; the gateway janitor deletes expired
+inbox and idempotency rows in batches of 1,000 rather than making every poll
+perform cleanup.
+Acknowledgement deletes only a row owned by the active recipient device.
 
-Account deletion removes a user's sent and queued messages and then their
-device row in the existing deletion transaction; device deletion cascades the
-opaque key bundle, fallback key, and one-time key material. Messages already
-copied to another user's device cannot be recalled.
+The send transaction increments `dm_devices.next_sequence` before counting
+pending, unexpired inbox rows. That update locks the recipient device row until
+commit, serializing concurrent sends while the 1,000-message per-device cap is
+checked. A full inbox rejects the send with `429 DM_INBOX_FULL`; the transaction
+rolls back the sequence increment.
+
+Account deletion removes a user's sent/queued messages and idempotency records,
+then their device row in the existing deletion transaction; device deletion
+cascades the opaque key bundle, fallback key, and one-time key material.
+Messages already copied to another user's device cannot be recalled.
 
 The relay feature is off by default. `DM_INBOX_TTL` is mandatory when enabled;
 `168h` is only a provisional example in `.env.example` and is not approved.

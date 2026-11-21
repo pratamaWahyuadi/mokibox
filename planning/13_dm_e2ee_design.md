@@ -264,9 +264,10 @@ end.
   no post-quantum protection in v1. The reviewer must verify the exact
   post-compromise properties and threat-model fit against the selected
   version/specification before implementation.
-- The Go backend needs no cryptographic library: it stores public key material
-  and opaque ciphertext and validates encoding, lengths, and configured
-  limits only.
+- The Go backend has no protocol-cryptography library or dependency. It stores
+  public key material and opaque ciphertext and validates encoding, lengths,
+  and configured limits only. The standard-library SHA-256 is used solely as
+  an idempotency digest; it does not inspect protocol structures or decrypt.
 - AGPL-3.0 has copyleft obligations for the distributed client. The owner and
   reviewer must confirm the client's license and distribution model before
   adoption. This is not legal advice and no license is accepted here.
@@ -284,6 +285,9 @@ end.
 - Logging in on a new device revokes the previous device's registration. The
   new device cannot read earlier messages: no server recovery and no history
   transfer in v1.
+- Device-bound requests include the active device ID and reject stale IDs.
+  Registration/replacement currently relies on the JWT alone; a stolen valid
+  session can replace a device. Step-up authentication is not implemented.
 
 ### D4. Message flow
 
@@ -314,8 +318,13 @@ reviewed before implementation.
   polling cursor to skip messages.
 - The server is a store-and-forward queue: ciphertext is deleted after the
   recipient device acknowledges it, and undelivered ciphertext expires after
-  a TTL whose value remains to be set. Conversation history lives only on
-  devices.
+  a TTL whose value remains to be set. A device is capped at 1,000 pending,
+  unexpired messages; a full inbox rejects sends. A background janitor deletes
+  expired rows, while polling filters them without running cleanup. A separate
+  idempotency tombstone retains the ciphertext digest and routing/response
+  metadata (not ciphertext) until the original TTL, so an acknowledged message
+  is not requeued by a retry. Tombstone count depends on send rate and TTL, not
+  the pending-inbox cap. Conversation history lives only on devices.
 
 ### D6. Receipts
 
@@ -327,9 +336,10 @@ reviewed before implementation.
 
 - Only mutually-following users can fetch a bundle or send ciphertext. There
   are no message requests or pre-accept cap in v1.
-- The existing per-user, in-process rate limiter applies to sends and bundle
-  fetches. This is acceptable only for one gateway instance; use a
-  Redis-backed limiter before scaling out.
+- In addition to the global 60/minute, burst-60 user limiter, key-bundle fetches
+  use 30/minute, burst 10, and sends use 60/minute, burst 20. These are
+  per-process buckets and are acceptable only for one gateway instance; use a
+  shared limiter before scaling out.
 - The current backend has no block mechanism. If one is introduced before
   merge, the eligibility query must respect it.
 
@@ -343,16 +353,19 @@ reviewed before implementation.
 ### D9. Account deletion
 
 - Deleting an account removes its device registration, opaque key material, and
-  queued ciphertext in the account-deletion transaction. Copies on other users'
-  devices cannot be erased; this remains a documented limit.
+  queued ciphertext and idempotency tombstones in the account-deletion
+  transaction. Copies on other users' devices cannot be erased; this remains a
+  documented limit.
 
 ### D10. Release gates
 
 - Feature flag defaults off; the required TTL setting is `168h` (7 days)
   provisionally and is not approved.
-- Live relay smoke test (PostgreSQL + HTTP, two users, one device each, random
-  opaque bytes as ciphertext) passes twice consecutively. It verifies relay
-  behavior, not cryptography.
+- Live relay smoke test (PostgreSQL + HTTP, two users, one active device each,
+  random opaque bytes as ciphertext) passes twice consecutively. It exercises
+  concurrent one-time-key claims through exhaustion and concurrent sends to
+  verify unique ordered sequence numbers. It verifies relay behavior, not
+  cryptography.
 - Tests verify ciphertext and key bytes are not logged. The server has no
   plaintext field and does not decrypt.
 - Independent security review is completed and findings are addressed before
