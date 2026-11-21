@@ -30,7 +30,7 @@ type dmTestStore struct {
 	bundleErr       error
 	claimedKey      db.ClaimDMOneTimeKeyRow
 	claimErr        error
-	recipientID     uuid.UUID
+	recipientDevice db.GetEligibleDMRecipientDeviceForSendRow
 	recipientErr    error
 	existing        db.GetDMInboxMessageByClientIDRow
 	existingErr     error
@@ -40,6 +40,7 @@ type dmTestStore struct {
 	inboxRows       []db.ListDMInboxAfterRow
 	ackRows         int64
 	deleteExpired   int64
+	expirySwept     bool
 	registered      db.DmDevice
 	count           int64
 	insertedKeys    int
@@ -49,8 +50,10 @@ type dmTestStore struct {
 func (s *dmTestStore) RevokeDMDeviceForUser(context.Context, uuid.UUID) error { return nil }
 func (s *dmTestStore) CreateDMDevice(_ context.Context, arg db.CreateDMDeviceParams) (db.DmDevice, error) {
 	s.registered = db.DmDevice{
-		ID: arg.ID, UserID: arg.UserID, SigningKey: arg.SigningKey,
-		IdentityKey: arg.IdentityKey, RegisteredAt: time.Unix(1, 0).UTC(),
+		ID: arg.ID, UserID: arg.UserID, Protocol: arg.Protocol,
+		ProtocolVersion: arg.ProtocolVersion, KeyBundle: arg.KeyBundle,
+		FallbackKeyID: arg.FallbackKeyID, FallbackKeyMaterial: arg.FallbackKeyMaterial,
+		RegisteredAt: time.Unix(1, 0).UTC(),
 	}
 	return s.registered, nil
 }
@@ -76,8 +79,8 @@ func (s *dmTestStore) GetEligibleDMDeviceForBundle(context.Context, db.GetEligib
 func (s *dmTestStore) ClaimDMOneTimeKey(context.Context, uuid.UUID) (db.ClaimDMOneTimeKeyRow, error) {
 	return s.claimedKey, s.claimErr
 }
-func (s *dmTestStore) GetEligibleDMRecipientDeviceForSend(context.Context, db.GetEligibleDMRecipientDeviceForSendParams) (uuid.UUID, error) {
-	return s.recipientID, s.recipientErr
+func (s *dmTestStore) GetEligibleDMRecipientDeviceForSend(context.Context, db.GetEligibleDMRecipientDeviceForSendParams) (db.GetEligibleDMRecipientDeviceForSendRow, error) {
+	return s.recipientDevice, s.recipientErr
 }
 func (s *dmTestStore) IncrementDMDeviceSequence(context.Context, uuid.UUID) (int64, error) {
 	return s.nextSequence, nil
@@ -104,6 +107,7 @@ func (s *dmTestStore) AckDMInboxMessage(_ context.Context, arg db.AckDMInboxMess
 	return s.ackRows, nil
 }
 func (s *dmTestStore) DeleteExpiredDMInbox(context.Context) (int64, error) {
+	s.expirySwept = true
 	return s.deleteExpired, nil
 }
 
@@ -156,11 +160,19 @@ func TestDMRegistrationRejectsKeyAndCountLimits(t *testing.T) {
 		name string
 		req  dmRegisterDeviceRequest
 	}{
-		{name: "short identity key", req: dmRegisterDeviceRequest{SigningKey: make([]byte, 32), IdentityKey: make([]byte, 31)}},
-		{name: "too many keys", req: dmRegisterDeviceRequest{SigningKey: make([]byte, 32), IdentityKey: make([]byte, 32), OneTimeKeys: make([]dmOneTimeKeyInput, dmMaxOneTimeKeysPerBatch+1)}},
-		{name: "duplicate key ids", req: dmRegisterDeviceRequest{SigningKey: make([]byte, 32), IdentityKey: make([]byte, 32), OneTimeKeys: []dmOneTimeKeyInput{
-			{KeyID: "same", PublicKey: make([]byte, 32)}, {KeyID: "same", PublicKey: make([]byte, 32)},
-		}}},
+		{name: "empty key bundle", req: dmRegisterDeviceRequest{Protocol: "custom-protocol", Version: 9}},
+		{name: "invalid protocol identifier", req: dmRegisterDeviceRequest{Protocol: "custom protocol", Version: 9, KeyBundle: []byte("opaque")}},
+		{name: "too many keys", req: dmRegisterDeviceRequest{
+			Protocol: "custom-protocol", Version: 9, KeyBundle: []byte("opaque"),
+			OneTimeKeys: make([]dmOneTimeKeyInput, dmMaxOneTimeKeysPerBatch+1),
+		}},
+		{name: "duplicate key ids", req: dmRegisterDeviceRequest{
+			Protocol: "custom-protocol", Version: 9, KeyBundle: []byte("opaque"),
+			OneTimeKeys: []dmOneTimeKeyInput{
+				{KeyID: "same", KeyMaterial: []byte("first opaque key")},
+				{KeyID: "same", KeyMaterial: []byte("second opaque key")},
+			},
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -178,19 +190,19 @@ func TestDMRegistrationRejectsKeyAndCountLimits(t *testing.T) {
 }
 
 func TestDMRegisterDeviceStoresKeysWithoutEchoingKeyMaterial(t *testing.T) {
-	signingKey := bytes.Repeat([]byte{0xa1}, 32)
-	identityKey := bytes.Repeat([]byte{0xb2}, 32)
-	oneTimeKey := bytes.Repeat([]byte{0xc3}, 32)
+	keyBundle := bytes.Repeat([]byte{0xa1}, 57)
+	oneTimeKey := bytes.Repeat([]byte{0xc3}, 43)
 	store := &dmTestStore{}
 	e := newDMTestServer(store, viewerUser())
 	rec := dmRequest(e, http.MethodPost, "/api/dm/device", dmRegisterDeviceRequest{
-		SigningKey: signingKey, IdentityKey: identityKey,
-		OneTimeKeys: []dmOneTimeKeyInput{{KeyID: "key-1", PublicKey: oneTimeKey}},
+		Protocol: "not-an-allowlisted-protocol", Version: 32768,
+		KeyBundle:   keyBundle,
+		OneTimeKeys: []dmOneTimeKeyInput{{KeyID: "key-1", KeyMaterial: oneTimeKey}},
 	}, true)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}
-	for _, key := range [][]byte{signingKey, identityKey, oneTimeKey} {
+	for _, key := range [][]byte{keyBundle, oneTimeKey} {
 		if strings.Contains(rec.Body.String(), base64Encode(key)) {
 			t.Fatal("registration response exposed key material")
 		}
@@ -205,10 +217,10 @@ func TestDMKeyBundleFallsBackWhenOneTimeKeysAreExhausted(t *testing.T) {
 	deviceID := uuid.New()
 	store := &dmTestStore{
 		bundleDevice: db.DmDevice{
-			ID: deviceID, UserID: targetID, SigningKey: make([]byte, 32),
-			IdentityKey:   make([]byte, 32),
-			FallbackKeyID: sql.NullString{String: "fallback-1", Valid: true},
-			FallbackKey:   make([]byte, 32),
+			ID: deviceID, UserID: targetID, Protocol: "custom-protocol",
+			ProtocolVersion: 32768, KeyBundle: []byte("opaque key bundle"),
+			FallbackKeyID:       sql.NullString{String: "fallback-1", Valid: true},
+			FallbackKeyMaterial: []byte("opaque fallback material"),
 		},
 		claimErr: sql.ErrNoRows,
 	}
@@ -217,7 +229,7 @@ func TestDMKeyBundleFallsBackWhenOneTimeKeysAreExhausted(t *testing.T) {
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"fallback_key"`) {
 		t.Fatalf("status/body = %d/%s, want fallback bundle", rec.Code, rec.Body.String())
 	}
-	store.bundleDevice.FallbackKey = nil
+	store.bundleDevice.FallbackKeyMaterial = nil
 	store.bundleDevice.FallbackKeyID = sql.NullString{}
 	rec = dmRequest(e, http.MethodGet, "/api/dm/users/"+targetID.String()+"/key-bundle", nil, true)
 	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"DM_KEYS_EXHAUSTED"`) {
@@ -245,7 +257,7 @@ func TestDMIneligibleAndMissingRecipientsHaveSameResponse(t *testing.T) {
 	e := newDMTestServer(store, viewerUser())
 	makeSend := func(recipient uuid.UUID) dmSendRequest {
 		return dmSendRequest{
-			RecipientUserID: recipient, Version: 1, ClientMessageID: uuid.New(),
+			RecipientUserID: recipient, Protocol: "custom-protocol", Version: 1, ClientMessageID: uuid.New(),
 			Ciphertext: []byte("opaque"),
 		}
 	}
@@ -273,7 +285,7 @@ func TestDMUploadOneTimeKeysEnforcesStoredCountLimit(t *testing.T) {
 	}
 	e := newDMTestServer(store, viewerUser())
 	rec := dmRequest(e, http.MethodPost, "/api/dm/device/keys", dmUploadKeysRequest{
-		OneTimeKeys: []dmOneTimeKeyInput{{KeyID: "overflow", PublicKey: make([]byte, 32)}},
+		OneTimeKeys: []dmOneTimeKeyInput{{KeyID: "overflow", KeyMaterial: []byte("opaque key")}},
 	}, true)
 	if rec.Code != http.StatusBadRequest || store.insertedKeys != 0 {
 		t.Fatalf("status/insert count = %d/%d, want 400/0; body=%s", rec.Code, store.insertedKeys, rec.Body.String())
@@ -285,14 +297,17 @@ func TestDMSendIdempotencyAndConflict(t *testing.T) {
 	messageID := uuid.New()
 	ciphertext := []byte("opaque-ciphertext")
 	store := &dmTestStore{
-		device: db.DmDevice{ID: uuid.New(), UserID: testViewerID},
+		device: db.DmDevice{ID: uuid.New(), UserID: testViewerID, Protocol: "custom-v1", ProtocolVersion: 4},
 		existing: db.GetDMInboxMessageByClientIDRow{
 			ID: messageID, RecipientUserID: testOwnerID, SequenceNo: 7,
-			Version: 1, Ciphertext: ciphertext, ClientMessageID: clientID,
+			Protocol: "custom-v1", Version: 4, Ciphertext: ciphertext, ClientMessageID: clientID,
 		},
 	}
 	e := newDMTestServer(store, viewerUser())
-	req := dmSendRequest{RecipientUserID: testOwnerID, Version: 1, ClientMessageID: clientID, Ciphertext: ciphertext}
+	req := dmSendRequest{
+		RecipientUserID: testOwnerID, Protocol: "custom-v1", Version: 4,
+		ClientMessageID: clientID, Ciphertext: ciphertext,
+	}
 	rec := dmRequest(e, http.MethodPost, "/api/dm/messages", req, true)
 	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), messageID.String()) {
 		t.Fatalf("status/body = %d/%s, want existing idempotent result", rec.Code, rec.Body.String())
@@ -307,18 +322,38 @@ func TestDMSendIdempotencyAndConflict(t *testing.T) {
 func TestDMSendAllocatesAndReturnsRecipientSequence(t *testing.T) {
 	clientID := uuid.New()
 	store := &dmTestStore{
-		device:       db.DmDevice{ID: uuid.New(), UserID: testViewerID},
-		existingErr:  sql.ErrNoRows,
-		recipientID:  uuid.New(),
+		device:      db.DmDevice{ID: uuid.New(), UserID: testViewerID, Protocol: "custom-protocol", ProtocolVersion: 32768},
+		existingErr: sql.ErrNoRows,
+		recipientDevice: db.GetEligibleDMRecipientDeviceForSendRow{
+			ID: uuid.New(), Protocol: "custom-protocol", ProtocolVersion: 32768,
+		},
 		nextSequence: 11,
 	}
 	e := newDMTestServer(store, viewerUser())
 	rec := dmRequest(e, http.MethodPost, "/api/dm/messages", dmSendRequest{
-		RecipientUserID: testOwnerID, Version: 1, ClientMessageID: clientID,
+		RecipientUserID: testOwnerID, Protocol: "custom-protocol", Version: 32768, ClientMessageID: clientID,
 		Ciphertext: []byte("opaque"),
 	}, true)
 	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"sequence":11`) {
 		t.Fatalf("status/body = %d/%s, want allocated sequence 11", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDMSendRejectsProtocolVersionMismatch(t *testing.T) {
+	store := &dmTestStore{
+		device:      db.DmDevice{ID: uuid.New(), UserID: testViewerID, Protocol: "sender-protocol", ProtocolVersion: 3},
+		existingErr: sql.ErrNoRows,
+		recipientDevice: db.GetEligibleDMRecipientDeviceForSendRow{
+			ID: uuid.New(), Protocol: "recipient-protocol", ProtocolVersion: 3,
+		},
+	}
+	e := newDMTestServer(store, viewerUser())
+	rec := dmRequest(e, http.MethodPost, "/api/dm/messages", dmSendRequest{
+		RecipientUserID: testOwnerID, Protocol: "sender-protocol", Version: 3,
+		ClientMessageID: uuid.New(), Ciphertext: []byte("opaque"),
+	}, true)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"DM_PROTOCOL_MISMATCH"`) {
+		t.Fatalf("status/body = %d/%s, want protocol mismatch", rec.Code, rec.Body.String())
 	}
 }
 
@@ -345,17 +380,29 @@ func TestDMPollPreservesSequenceOrderAndAckTargetsCurrentDevice(t *testing.T) {
 	}
 }
 
+func TestDMPollSweepsExpiredMessages(t *testing.T) {
+	store := &dmTestStore{device: db.DmDevice{ID: uuid.New(), UserID: testViewerID}}
+	e := newDMTestServer(store, viewerUser())
+	rec := dmRequest(e, http.MethodGet, "/api/dm/inbox?after=0", nil, true)
+	if rec.Code != http.StatusOK || !store.expirySwept {
+		t.Fatalf("status/sweep = %d/%t, want 200/true; body=%s", rec.Code, store.expirySwept, rec.Body.String())
+	}
+}
+
 func TestDMRelayDoesNotLogCiphertextOrKeyBytes(t *testing.T) {
 	ciphertext := []byte("distinct-secret-ciphertext")
-	signingKey := bytes.Repeat([]byte{0xd4}, 32)
-	identityKey := bytes.Repeat([]byte{0xe5}, 32)
+	keyBundle := []byte("distinct-secret-key-bundle")
+	fallbackKey := []byte("distinct-secret-fallback-key")
+	oneTimeKey := []byte("distinct-secret-one-time-key")
 	store := &dmTestStore{
-		device:       db.DmDevice{ID: uuid.New(), UserID: testViewerID},
-		existingErr:  sql.ErrNoRows,
-		recipientID:  uuid.New(),
+		device:      db.DmDevice{ID: uuid.New(), UserID: testViewerID, Protocol: "custom-protocol", ProtocolVersion: 12},
+		existingErr: sql.ErrNoRows,
+		recipientDevice: db.GetEligibleDMRecipientDeviceForSendRow{
+			ID: uuid.New(), Protocol: "custom-protocol", ProtocolVersion: 12,
+		},
 		nextSequence: 1,
 		inboxRows: []db.ListDMInboxAfterRow{{
-			ID: uuid.New(), SequenceNo: 1, Ciphertext: ciphertext,
+			ID: uuid.New(), SequenceNo: 1, Protocol: "custom-protocol", Version: 12, Ciphertext: ciphertext,
 		}},
 	}
 	e := newDMTestServer(store, viewerUser())
@@ -365,13 +412,17 @@ func TestDMRelayDoesNotLogCiphertextOrKeyBytes(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
 	register := dmRequest(e, http.MethodPost, "/api/dm/device", dmRegisterDeviceRequest{
-		SigningKey: signingKey, IdentityKey: identityKey,
+		Protocol: "custom-protocol", Version: 12,
+		KeyBundle:           keyBundle,
+		FallbackKeyID:       "fallback",
+		FallbackKeyMaterial: fallbackKey,
+		OneTimeKeys:         []dmOneTimeKeyInput{{KeyID: "one-time", KeyMaterial: oneTimeKey}},
 	}, true)
 	if register.Code != http.StatusCreated {
 		t.Fatalf("registration status = %d: %s", register.Code, register.Body.String())
 	}
 	send := dmRequest(e, http.MethodPost, "/api/dm/messages", dmSendRequest{
-		RecipientUserID: testOwnerID, Version: 1, ClientMessageID: uuid.New(),
+		RecipientUserID: testOwnerID, Protocol: "custom-protocol", Version: 12, ClientMessageID: uuid.New(),
 		Ciphertext: ciphertext,
 	}, true)
 	if send.Code != http.StatusCreated {
@@ -383,8 +434,9 @@ func TestDMRelayDoesNotLogCiphertextOrKeyBytes(t *testing.T) {
 	}
 	for _, secret := range []string{
 		string(ciphertext), base64Encode(ciphertext),
-		string(signingKey), base64Encode(signingKey),
-		string(identityKey), base64Encode(identityKey),
+		string(keyBundle), base64Encode(keyBundle),
+		string(fallbackKey), base64Encode(fallbackKey),
+		string(oneTimeKey), base64Encode(oneTimeKey),
 	} {
 		if strings.Contains(logs.String(), secret) {
 			t.Fatalf("sensitive bytes appeared in logs: %q", secret)
@@ -411,7 +463,7 @@ func TestDMSendRejectsOversizedCiphertext(t *testing.T) {
 	store := &dmTestStore{}
 	e := newDMTestServer(store, viewerUser())
 	rec := dmRequest(e, http.MethodPost, "/api/dm/messages", dmSendRequest{
-		RecipientUserID: testOwnerID, Version: 1, ClientMessageID: uuid.New(),
+		RecipientUserID: testOwnerID, Protocol: "custom-protocol", Version: 1, ClientMessageID: uuid.New(),
 		Ciphertext: make([]byte, dmMaxCiphertextBytes+1),
 	}, true)
 	if rec.Code != http.StatusBadRequest {
@@ -419,10 +471,29 @@ func TestDMSendRejectsOversizedCiphertext(t *testing.T) {
 	}
 }
 
+func TestDMSendAcceptsMaximumCiphertext(t *testing.T) {
+	store := &dmTestStore{
+		device:      db.DmDevice{ID: uuid.New(), UserID: testViewerID, Protocol: "custom-protocol", ProtocolVersion: 1},
+		existingErr: sql.ErrNoRows,
+		recipientDevice: db.GetEligibleDMRecipientDeviceForSendRow{
+			ID: uuid.New(), Protocol: "custom-protocol", ProtocolVersion: 1,
+		},
+		nextSequence: 1,
+	}
+	e := newDMTestServer(store, viewerUser())
+	rec := dmRequest(e, http.MethodPost, "/api/dm/messages", dmSendRequest{
+		RecipientUserID: testOwnerID, Protocol: "custom-protocol", Version: 1,
+		ClientMessageID: uuid.New(), Ciphertext: make([]byte, dmMaxCiphertextBytes),
+	}, true)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestDMKeyIDsMustBeUniquePerRequest(t *testing.T) {
 	duplicate := []dmOneTimeKeyInput{
-		{KeyID: "one", PublicKey: make([]byte, 32)},
-		{KeyID: "two", PublicKey: make([]byte, 32)},
+		{KeyID: "one", KeyMaterial: []byte("first opaque key")},
+		{KeyID: "two", KeyMaterial: []byte("second opaque key")},
 	}
 	if err := validateDMKeys(duplicate); err != nil {
 		t.Fatalf("distinct key ids rejected: %v", err)
