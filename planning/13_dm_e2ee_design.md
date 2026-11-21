@@ -1,9 +1,10 @@
 # MokiBox Direct Messages — E2EE Design Proposal
 
-**Status:** Design proposal with proposed v1 decisions. No proposed decision is
-approved unless the reviewer records approval in the table. PR #77 pairs this
-proposal with a backend-only opaque ciphertext relay. That backend does not
-implement E2EE, approve client cryptography, or permit production enablement.
+**Status:** D1 and D3-D10 are accepted as written when the repository owner's
+reviewer merges PR #77. D2 (protocol and license) remains open and is decided
+in #78. Merge does not accept a protocol/license or authorize production
+enablement. PR #77 pairs this proposal with a backend-only opaque ciphertext
+relay; that backend does not implement E2EE.
 
 **Purpose:** Define a threat model and a reviewable proposal for a minimal,
 end-to-end encrypted 1:1 text chat for MokiBox. This document starts from the
@@ -376,31 +377,31 @@ reviewed before implementation.
 
 | ID | Proposal | Approver | Status |
 |---|---|---|---|
-| D1 | v1 scope | `<reviewer>` | Proposed |
-| D2 | Olm / `flutter_vodozemac` candidate; protocol and license decision open | `<reviewer>` | Proposed |
-| D3 | One active device in v1 | `<reviewer>` | Proposed |
-| D4 | Message flow | `<reviewer>` | Proposed |
-| D5 | Per-device sequence, store-and-forward, and 168h TTL | `<reviewer>` | Proposed |
-| D6 | No read receipts in v1; delivery ack only | `<reviewer>` | Proposed |
-| D7 | Mutual-follow eligibility and rate limits | `<reviewer>` | Proposed |
-| D8 | Fingerprint verification and key-change warning | `<reviewer>` | Proposed |
-| D9 | Account-deletion contract | `<reviewer>` | Proposed |
-| D10 | Release gates | `<reviewer>` | Proposed |
+| D1 | v1 scope | Repository owner's reviewer (by merging) | Accepted on merge |
+| D2 | Olm / `flutter_vodozemac` candidate; protocol and license decision open | Owner/reviewer in #78 | Open |
+| D3 | One active device in v1 | Repository owner's reviewer (by merging) | Accepted on merge |
+| D4 | Message flow | Repository owner's reviewer (by merging) | Accepted on merge |
+| D5 | Per-device sequence, store-and-forward, and 168h TTL | Repository owner's reviewer (by merging) | Accepted on merge |
+| D6 | No read receipts in v1; delivery ack only | Repository owner's reviewer (by merging) | Accepted on merge |
+| D7 | Mutual-follow eligibility and rate limits | Repository owner's reviewer (by merging) | Accepted on merge |
+| D8 | Fingerprint verification and key-change warning | Repository owner's reviewer (by merging) | Accepted on merge |
+| D9 | Account-deletion contract | Repository owner's reviewer (by merging) | Accepted on merge |
+| D10 | Release gates | Repository owner's reviewer (by merging) | Accepted on merge |
 
 ## Open decisions before client cryptography and production rollout
 
 - Confirm the Flutter client repository, framework, supported platforms, and
   owner; do not fill these in without the repository owner's confirmation.
-- Approve, change, or reject proposed decisions D1-D10, including explicit
-  acceptance or rejection of the AGPL-3.0 license.
+- D2 (protocol and license) remains open and is decided in #78. Merge does not
+  accept the AGPL-3.0 license.
 - The selected undelivered-ciphertext TTL is 168h (7 days); configure
   `DM_INBOX_TTL=168h` wherever the relay is enabled.
 - Decide push-notification and WebSocket design for a later version.
 - Decide whether encrypted video references enter a later version.
 - Agree on security-review ownership and schedule.
 
-Until the decision table records approval, this proposal does not approve the
-protocol or library. PR #77's backend relay and migration do not establish
-E2EE or authorize production rollout. MokiBox DM must not be described as
-end-to-end encrypted until the client implementation and independent security
-review are complete.
+D1 and D3-D10 are not accepted until that reviewer merge occurs. D2 remains
+open in #78, and no library or license is approved by merging PR #77. The
+backend relay and migration do not establish E2EE or authorize production
+rollout. MokiBox DM must not be described as end-to-end encrypted until the
+client implementation and independent security review are complete.

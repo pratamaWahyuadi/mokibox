@@ -1,8 +1,9 @@
 # E2EE DM v1 backend review guide
 
-PR #77 delivers only an opaque backend relay, not E2EE. This guide is not
-approval of D1-D10. Keep the production flag off until the Flutter client and
-independent security review are complete.
+PR #77 delivers only an opaque backend relay, not E2EE. D1 and D3-D10 are
+accepted as written only when the repository owner's reviewer merges the PR.
+D2 stays open and is decided in #78. Keep the production flag off until the
+Flutter client and independent security review are complete.
 
 ## Three review commands
 
@@ -47,7 +48,7 @@ the feature is enabled.
 | ID | Suggested disposition |
 |---|---|
 | D1 | Accept narrow 1:1 mutual-follow backend scope; defer parity features. |
-| D2 | Leave protocol/license open for owner/reviewer; do not assume AGPL acceptance. |
+| D2 | Keep protocol/license open for decision in #78; merge does not accept AGPL. |
 | D3 | Accept one active device; require client key-change warning. |
 | D4 | Accept opaque key-bundle claim and relay only after client protocol review. |
 | D5 | Accept transactional per-device ordering, ack, and 168h TTL. |
@@ -57,8 +58,6 @@ the feature is enabled.
 | D9 | Accept server purge; copies on other devices cannot be recalled. |
 | D10 | Keep production disabled until client crypto and independent review pass. |
 
-These are suggestions, not approvals. For each D row, the reviewer records
-Accept, Change, or Reject with rationale in the PR review or a comment on #76.
-The author then updates Approver/Status (and changed proposal text) in
-`planning/13_dm_e2ee_design.md` in a final PR commit. Keep rows Proposed until
-the reviewer decision is recorded.
+Merging PR #77 as the repository owner's reviewer records acceptance of D1
+and D3-D10 as written. D2 remains open and is decided in #78; the merge does
+not approve a protocol or license and does not implicitly accept AGPL-3.0.

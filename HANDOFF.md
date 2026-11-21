@@ -29,8 +29,9 @@ Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
   device IDs. Device registration still trusts the JWT alone, so a stolen
   session can replace a device; step-up auth is not implemented. Fetching a
   bundle consumes a one-time key even if its response is lost.
-- Reviewer steps and suggested D1-D10 dispositions are in
-  `planning/14_dm_e2ee_reviewer_guide.md`; all suggestions remain unapproved.
+- D1 and D3-D10 are accepted as written when the repository owner's reviewer
+  merges PR #77. D2 remains open in #78; the merge does not accept a protocol
+  or license. Reviewer guidance is in `planning/14_dm_e2ee_reviewer_guide.md`.
 - The smoke test uses random bytes and exercises concurrent key claims and
   sends against PostgreSQL via HTTP. On 2026-11-21, migrations 001, 002, 008,
   and 009 were applied to disposable PostgreSQL 16 and the smoke passed twice
