@@ -25,6 +25,8 @@ func TestErrorMapping(t *testing.T) {
 		{ErrAvatarUploadConflict, http.StatusConflict, CodeAvatarUploadConflict},
 		{ErrVideoNotReady, http.StatusConflict, CodeVideoNotReady},
 		{ErrUploadMissing, http.StatusConflict, CodeUploadMissing},
+		{ErrDMConflict, http.StatusConflict, CodeDMConflict},
+		{ErrDMKeysExhausted, http.StatusConflict, CodeDMKeysExhausted},
 		{ErrUploadSizeInvalid, http.StatusBadRequest, CodeUploadSizeInvalid},
 		{ErrSelfFollow, http.StatusBadRequest, CodeSelfFollowNotAllowed},
 		{ErrWebhookSignature, http.StatusUnauthorized, CodeWebhookInvalidSignature},
@@ -68,20 +70,22 @@ func TestErrorMapping(t *testing.T) {
 // exact bug class the testability-refactor ClassifyError fix
 // closed for the 10 call sites that existed then.
 var allErrorCodes = map[ErrorCode]int{
-	CodeValidationError:        http.StatusBadRequest,
-	CodeUnauthorized:           http.StatusUnauthorized,
-	CodeForbidden:              http.StatusForbidden,
-	CodeNotFound:               http.StatusNotFound,
-	CodeVideoStatusConflict:    http.StatusConflict,
-	CodeAvatarUploadConflict:   http.StatusConflict,
-	CodeVideoNotReady:         http.StatusConflict,
-	CodeUploadMissing:          http.StatusConflict,
-	CodeUploadSizeInvalid:      http.StatusBadRequest,
-	CodeSelfFollowNotAllowed:   http.StatusBadRequest,
+	CodeValidationError:         http.StatusBadRequest,
+	CodeUnauthorized:            http.StatusUnauthorized,
+	CodeForbidden:               http.StatusForbidden,
+	CodeNotFound:                http.StatusNotFound,
+	CodeVideoStatusConflict:     http.StatusConflict,
+	CodeAvatarUploadConflict:    http.StatusConflict,
+	CodeVideoNotReady:           http.StatusConflict,
+	CodeUploadMissing:           http.StatusConflict,
+	CodeDMConflict:              http.StatusConflict,
+	CodeDMKeysExhausted:         http.StatusConflict,
+	CodeUploadSizeInvalid:       http.StatusBadRequest,
+	CodeSelfFollowNotAllowed:    http.StatusBadRequest,
 	CodeWebhookInvalidSignature: http.StatusUnauthorized,
 	CodeWebhookEventUnsupported: http.StatusBadRequest,
-	CodeRateLimited:            http.StatusTooManyRequests,
-	CodeInternalError:          http.StatusInternalServerError,
+	CodeRateLimited:             http.StatusTooManyRequests,
+	CodeInternalError:           http.StatusInternalServerError,
 }
 
 func TestErrorMapping_CodeStatusCoverage(t *testing.T) {
