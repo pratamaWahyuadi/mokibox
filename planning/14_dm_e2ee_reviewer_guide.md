@@ -77,3 +77,8 @@ explicit in every environment where the feature is enabled.
 
 Record the reviewer's actual decision for every D1-D10 row in the decision
 table in `planning/13_dm_e2ee_design.md`; these suggestions are not approvals.
+For each decision, the reviewer should record Accept, Change, or Reject with a
+short rationale in the PR review or a comment on #76. The author then updates
+the Approver and Status columns (and proposal text when changed) in a final PR
+commit before merge. Leave every row Proposed until that explicit decision is
+recorded.
