@@ -82,6 +82,15 @@ db-migrate-avatar: ## Apply migrations/008_user_avatar_upload.sql before deployi
 	@cat $(MIGRATIONS)/008_user_avatar_upload.sql | $(COMPOSE) exec -T $(SERVICE_DB) \
 		psql -U $(POSTGRES_USER) -d $(DB_NAME) -v ON_ERROR_STOP=1
 
+.PHONY: db-migrate-dm
+db-migrate-dm: ## Apply migrations/009_dm_e2ee_relay.sql before deploying the DM relay gateway.
+	@if [ ! -f $(MIGRATIONS)/009_dm_e2ee_relay.sql ]; then \
+		echo "ERROR: $(MIGRATIONS)/009_dm_e2ee_relay.sql not found."; \
+		exit 1; \
+	fi
+	@cat $(MIGRATIONS)/009_dm_e2ee_relay.sql | $(COMPOSE) exec -T $(SERVICE_DB) \
+		psql -U $(POSTGRES_USER) -d $(DB_NAME) -v ON_ERROR_STOP=1
+
 .PHONY: db-psql
 db-psql: ## Open a psql shell as POSTGRES_USER on $(DB_NAME).
 	$(COMPOSE) exec $(SERVICE_DB) psql -U $(POSTGRES_USER) -d $(DB_NAME)
