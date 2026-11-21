@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -16,38 +17,43 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"golang.org/x/time/rate"
 
 	"github.com/pratamaWahyuadi/mokibox/api-gateway/middleware"
 	"github.com/pratamaWahyuadi/mokibox/shared/db"
 )
 
 type dmTestStore struct {
-	device          db.DmDevice
-	deviceErr       error
-	updateDevice    db.DmDevice
-	updateDeviceErr error
-	bundleDevice    db.DmDevice
-	bundleErr       error
-	claimedKey      db.ClaimDMOneTimeKeyRow
-	claimErr        error
-	recipientDevice db.GetEligibleDMRecipientDeviceForSendRow
-	recipientErr    error
-	existing        db.GetDMInboxMessageByClientIDRow
-	existingErr     error
-	inserted        db.InsertDMInboxMessageRow
-	insertErr       error
-	nextSequence    int64
-	inboxRows       []db.ListDMInboxAfterRow
-	ackRows         int64
-	deleteExpired   int64
-	expirySwept     bool
-	registered      db.DmDevice
-	count           int64
-	insertedKeys    int
-	lastAck         db.AckDMInboxMessageParams
+	device               db.DmDevice
+	deviceErr            error
+	updateDevice         db.DmDevice
+	updateDeviceErr      error
+	bundleDevice         db.DmDevice
+	bundleErr            error
+	claimedKey           db.ClaimDMOneTimeKeyRow
+	claimErr             error
+	recipientDevice      db.GetEligibleDMRecipientDeviceForSendRow
+	recipientErr         error
+	existing             db.GetDMSendIdempotencyByClientIDRow
+	existingErr          error
+	idempotencyInsertErr error
+	concurrentExisting   *db.GetDMSendIdempotencyByClientIDRow
+	idempotencyLookups   int
+	inserted             db.InsertDMInboxMessageRow
+	insertErr            error
+	insertedIdempotency  int
+	nextSequence         int64
+	pendingMessages      int64
+	insertedMessages     int
+	inboxRows            []db.ListDMInboxAfterRow
+	ackRows              int64
+	registered           db.DmDevice
+	count                int64
+	insertedKeys         int
+	lastAck              db.AckDMInboxMessageParams
 }
 
-func (s *dmTestStore) RevokeDMDeviceForUser(context.Context, uuid.UUID) error { return nil }
+func (s *dmTestStore) DeleteDMDevicesByUser(context.Context, uuid.UUID) error { return nil }
 func (s *dmTestStore) CreateDMDevice(_ context.Context, arg db.CreateDMDeviceParams) (db.DmDevice, error) {
 	s.registered = db.DmDevice{
 		ID: arg.ID, UserID: arg.UserID, Protocol: arg.Protocol,
@@ -64,7 +70,13 @@ func (s *dmTestStore) InsertDMOneTimeKey(context.Context, db.InsertDMOneTimeKeyP
 func (s *dmTestStore) CountDMOneTimeKeys(context.Context, uuid.UUID) (int64, error) {
 	return s.count, nil
 }
+func (s *dmTestStore) CountPendingDMInboxForRecipient(context.Context, uuid.UUID) (int64, error) {
+	return s.pendingMessages, nil
+}
 func (s *dmTestStore) GetDMDeviceByUser(context.Context, uuid.UUID) (db.DmDevice, error) {
+	return s.device, s.deviceErr
+}
+func (s *dmTestStore) GetDMDeviceByUserForKeyShare(context.Context, uuid.UUID) (db.DmDevice, error) {
 	return s.device, s.deviceErr
 }
 func (s *dmTestStore) GetDMDeviceForUpdate(context.Context, uuid.UUID) (db.DmDevice, error) {
@@ -85,18 +97,34 @@ func (s *dmTestStore) GetEligibleDMRecipientDeviceForSend(context.Context, db.Ge
 func (s *dmTestStore) IncrementDMDeviceSequence(context.Context, uuid.UUID) (int64, error) {
 	return s.nextSequence, nil
 }
-func (s *dmTestStore) GetDMInboxMessageByClientID(context.Context, db.GetDMInboxMessageByClientIDParams) (db.GetDMInboxMessageByClientIDRow, error) {
+func (s *dmTestStore) GetDMSendIdempotencyByClientID(context.Context, db.GetDMSendIdempotencyByClientIDParams) (db.GetDMSendIdempotencyByClientIDRow, error) {
+	s.idempotencyLookups++
+	if s.concurrentExisting != nil && s.idempotencyLookups > 1 {
+		return *s.concurrentExisting, nil
+	}
 	return s.existing, s.existingErr
+}
+func (s *dmTestStore) InsertDMSendIdempotency(_ context.Context, arg db.InsertDMSendIdempotencyParams) (db.InsertDMSendIdempotencyRow, error) {
+	if s.idempotencyInsertErr != nil {
+		return db.InsertDMSendIdempotencyRow{}, s.idempotencyInsertErr
+	}
+	s.insertedIdempotency++
+	createdAt := time.Unix(2, 0).UTC()
+	return db.InsertDMSendIdempotencyRow{
+		MessageID: arg.MessageID, SequenceNo: arg.SequenceNo,
+		CreatedAt: createdAt, ExpiresAt: createdAt.Add(time.Duration(arg.ExpiresInSeconds) * time.Second),
+	}, nil
 }
 func (s *dmTestStore) InsertDMInboxMessage(_ context.Context, arg db.InsertDMInboxMessageParams) (db.InsertDMInboxMessageRow, error) {
 	if s.insertErr != nil {
 		return s.inserted, s.insertErr
 	}
+	s.insertedMessages++
 	return db.InsertDMInboxMessageRow{
-		ID: uuid.New(), SequenceNo: arg.SequenceNo,
+		ID: arg.ID, SequenceNo: arg.SequenceNo,
 		ClientMessageID: arg.ClientMessageID,
-		CreatedAt:       time.Unix(2, 0).UTC(),
-		ExpiresAt:       time.Unix(2, 0).UTC().Add(time.Duration(arg.ExpiresInSeconds) * time.Second),
+		CreatedAt:       arg.CreatedAt,
+		ExpiresAt:       arg.ExpiresAt,
 	}, nil
 }
 func (s *dmTestStore) ListDMInboxAfter(context.Context, db.ListDMInboxAfterParams) ([]db.ListDMInboxAfterRow, error) {
@@ -105,10 +133,6 @@ func (s *dmTestStore) ListDMInboxAfter(context.Context, db.ListDMInboxAfterParam
 func (s *dmTestStore) AckDMInboxMessage(_ context.Context, arg db.AckDMInboxMessageParams) (int64, error) {
 	s.lastAck = arg
 	return s.ackRows, nil
-}
-func (s *dmTestStore) DeleteExpiredDMInbox(context.Context) (int64, error) {
-	s.expirySwept = true
-	return s.deleteExpired, nil
 }
 
 type dmTestRunner struct{ store dmTxStore }
@@ -124,7 +148,7 @@ func newDMTestServer(store *dmTestStore, user db.User) *echo.Echo {
 		Verifier: testVerifier{sub: "test-sub"},
 		Queries:  testUserStore{user: user},
 	}))
-	h.RegisterRoutes(e.Group("/api"))
+	h.RegisterRoutes(e.Group("/api"), DMRateLimits{})
 	return e
 }
 
@@ -149,9 +173,52 @@ func dmRequest(e *echo.Echo, method, path string, body any, authenticated bool) 
 func TestDMAuthRequired(t *testing.T) {
 	store := &dmTestStore{}
 	e := newDMTestServer(store, viewerUser())
-	rec := dmRequest(e, http.MethodGet, "/api/dm/inbox?after=0", nil, false)
+	rec := dmRequest(e, http.MethodGet, "/api/dm/inbox?device_id="+uuid.NewString()+"&after=0", nil, false)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDMRouteRateLimitsRunAfterAuthentication(t *testing.T) {
+	senderDeviceID := uuid.New()
+	recipientDeviceID := uuid.New()
+	store := &dmTestStore{
+		device:       db.DmDevice{ID: senderDeviceID, UserID: testViewerID, Protocol: "custom-v1", ProtocolVersion: 1},
+		updateDevice: db.DmDevice{ID: senderDeviceID, UserID: testViewerID},
+		bundleDevice: db.DmDevice{
+			ID: recipientDeviceID, UserID: testOwnerID, Protocol: "custom-v1", ProtocolVersion: 1,
+			FallbackKeyID:       sql.NullString{String: "fallback", Valid: true},
+			FallbackKeyMaterial: []byte("opaque-key"),
+		},
+		claimErr: sql.ErrNoRows, existingErr: sql.ErrNoRows, nextSequence: 1,
+		recipientDevice: db.GetEligibleDMRecipientDeviceForSendRow{
+			ID: recipientDeviceID, Protocol: "custom-v1", ProtocolVersion: 1,
+		},
+	}
+	limit, err := middleware.NewRateLimitAuth(middleware.RateLimitConfig{
+		Rate: rate.Limit(100), Burst: 100, TTL: time.Minute, SweepInterval: 30 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &DMHandler{Store: store, Run: dmTestRunner{store: store}, TTL: time.Hour}
+	e := echo.New()
+	e.Use(middleware.Authenticate(middleware.AuthenticateConfig{
+		Verifier: testVerifier{sub: "test-sub"},
+		Queries:  testUserStore{user: viewerUser()},
+	}))
+	h.RegisterRoutes(e.Group("/api"), DMRateLimits{KeyBundle: limit, Send: limit})
+	bundle := dmRequest(e, http.MethodGet,
+		"/api/dm/users/"+testOwnerID.String()+"/key-bundle?device_id="+senderDeviceID.String(), nil, true)
+	if bundle.Code != http.StatusOK {
+		t.Fatalf("key-bundle status = %d, want 200; body=%s", bundle.Code, bundle.Body.String())
+	}
+	send := dmRequest(e, http.MethodPost, "/api/dm/messages", dmSendRequest{
+		SenderDeviceID: senderDeviceID, RecipientUserID: testOwnerID, RecipientDeviceID: recipientDeviceID,
+		Protocol: "custom-v1", Version: 1, ClientMessageID: uuid.New(), Ciphertext: []byte("opaque"),
+	}, true)
+	if send.Code != http.StatusCreated {
+		t.Fatalf("send status = %d, want 201; body=%s", send.Code, send.Body.String())
 	}
 }
 
@@ -215,7 +282,10 @@ func TestDMRegisterDeviceStoresKeysWithoutEchoingKeyMaterial(t *testing.T) {
 func TestDMKeyBundleFallsBackWhenOneTimeKeysAreExhausted(t *testing.T) {
 	targetID := uuid.New()
 	deviceID := uuid.New()
+	senderDeviceID := uuid.New()
 	store := &dmTestStore{
+		device:       db.DmDevice{ID: senderDeviceID, UserID: testViewerID},
+		updateDevice: db.DmDevice{ID: senderDeviceID, UserID: testViewerID},
 		bundleDevice: db.DmDevice{
 			ID: deviceID, UserID: targetID, Protocol: "custom-protocol",
 			ProtocolVersion: 32768, KeyBundle: []byte("opaque key bundle"),
@@ -225,31 +295,37 @@ func TestDMKeyBundleFallsBackWhenOneTimeKeysAreExhausted(t *testing.T) {
 		claimErr: sql.ErrNoRows,
 	}
 	e := newDMTestServer(store, viewerUser())
-	rec := dmRequest(e, http.MethodGet, "/api/dm/users/"+targetID.String()+"/key-bundle", nil, true)
+	rec := dmRequest(e, http.MethodGet, "/api/dm/users/"+targetID.String()+"/key-bundle?device_id="+senderDeviceID.String(), nil, true)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"fallback_key"`) {
 		t.Fatalf("status/body = %d/%s, want fallback bundle", rec.Code, rec.Body.String())
 	}
 	store.bundleDevice.FallbackKeyMaterial = nil
 	store.bundleDevice.FallbackKeyID = sql.NullString{}
-	rec = dmRequest(e, http.MethodGet, "/api/dm/users/"+targetID.String()+"/key-bundle", nil, true)
+	rec = dmRequest(e, http.MethodGet, "/api/dm/users/"+targetID.String()+"/key-bundle?device_id="+senderDeviceID.String(), nil, true)
 	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"DM_KEYS_EXHAUSTED"`) {
 		t.Fatalf("status/body = %d/%s, want DM_KEYS_EXHAUSTED", rec.Code, rec.Body.String())
 	}
 }
 
 func TestDMBundleUsesSameNotFoundForMissingAndIneligibleUsers(t *testing.T) {
-	store := &dmTestStore{bundleErr: sql.ErrNoRows}
+	senderDeviceID := uuid.New()
+	store := &dmTestStore{
+		device:       db.DmDevice{ID: senderDeviceID, UserID: testViewerID},
+		updateDevice: db.DmDevice{ID: senderDeviceID, UserID: testViewerID},
+		bundleErr:    sql.ErrNoRows,
+	}
 	e := newDMTestServer(store, viewerUser())
-	first := dmRequest(e, http.MethodGet, "/api/dm/users/"+uuid.NewString()+"/key-bundle", nil, true)
-	second := dmRequest(e, http.MethodGet, "/api/dm/users/"+uuid.NewString()+"/key-bundle", nil, true)
+	first := dmRequest(e, http.MethodGet, "/api/dm/users/"+uuid.NewString()+"/key-bundle?device_id="+senderDeviceID.String(), nil, true)
+	second := dmRequest(e, http.MethodGet, "/api/dm/users/"+uuid.NewString()+"/key-bundle?device_id="+senderDeviceID.String(), nil, true)
 	if first.Code != http.StatusNotFound || second.Code != first.Code || first.Body.String() != second.Body.String() {
 		t.Fatalf("recipient responses differ: %d %q / %d %q", first.Code, first.Body.String(), second.Code, second.Body.String())
 	}
 }
 
 func TestDMIneligibleAndMissingRecipientsHaveSameResponse(t *testing.T) {
+	senderDeviceID := uuid.New()
 	store := &dmTestStore{
-		device:       db.DmDevice{ID: uuid.New(), UserID: testViewerID},
+		device:       db.DmDevice{ID: senderDeviceID, UserID: testViewerID},
 		recipientErr: sql.ErrNoRows,
 		bundleErr:    sql.ErrNoRows,
 		existingErr:  sql.ErrNoRows,
@@ -257,8 +333,9 @@ func TestDMIneligibleAndMissingRecipientsHaveSameResponse(t *testing.T) {
 	e := newDMTestServer(store, viewerUser())
 	makeSend := func(recipient uuid.UUID) dmSendRequest {
 		return dmSendRequest{
-			RecipientUserID: recipient, Protocol: "custom-protocol", Version: 1, ClientMessageID: uuid.New(),
-			Ciphertext: []byte("opaque"),
+			SenderDeviceID: senderDeviceID, RecipientDeviceID: uuid.New(),
+			RecipientUserID: recipient, Protocol: "custom-protocol", Version: 1,
+			ClientMessageID: uuid.New(), Ciphertext: []byte("opaque"),
 		}
 	}
 	ineligible := dmRequest(e, http.MethodPost, "/api/dm/messages", makeSend(uuid.New()), true)
@@ -285,6 +362,7 @@ func TestDMUploadOneTimeKeysEnforcesStoredCountLimit(t *testing.T) {
 	}
 	e := newDMTestServer(store, viewerUser())
 	rec := dmRequest(e, http.MethodPost, "/api/dm/device/keys", dmUploadKeysRequest{
+		DeviceID:    store.updateDevice.ID,
 		OneTimeKeys: []dmOneTimeKeyInput{{KeyID: "overflow", KeyMaterial: []byte("opaque key")}},
 	}, true)
 	if rec.Code != http.StatusBadRequest || store.insertedKeys != 0 {
@@ -295,21 +373,27 @@ func TestDMUploadOneTimeKeysEnforcesStoredCountLimit(t *testing.T) {
 func TestDMSendIdempotencyAndConflict(t *testing.T) {
 	clientID := uuid.New()
 	messageID := uuid.New()
+	senderDeviceID := uuid.New()
+	recipientDeviceID := uuid.New()
 	ciphertext := []byte("opaque-ciphertext")
+	ciphertextDigest := sha256.Sum256(ciphertext)
 	store := &dmTestStore{
-		device: db.DmDevice{ID: uuid.New(), UserID: testViewerID, Protocol: "custom-v1", ProtocolVersion: 4},
-		existing: db.GetDMInboxMessageByClientIDRow{
-			ID: messageID, RecipientUserID: testOwnerID, SequenceNo: 7,
-			Protocol: "custom-v1", Version: 4, Ciphertext: ciphertext, ClientMessageID: clientID,
+		device: db.DmDevice{ID: senderDeviceID, UserID: testViewerID, Protocol: "custom-v1", ProtocolVersion: 4},
+		existing: db.GetDMSendIdempotencyByClientIDRow{
+			MessageID: messageID, RecipientDeviceID: recipientDeviceID, RecipientUserID: testOwnerID, SequenceNo: 7,
+			Protocol: "custom-v1", Version: 4, CiphertextDigest: ciphertextDigest[:],
+			CreatedAt: time.Unix(2, 0).UTC(), ExpiresAt: time.Unix(2, 0).UTC().Add(time.Hour),
 		},
 	}
 	e := newDMTestServer(store, viewerUser())
 	req := dmSendRequest{
-		RecipientUserID: testOwnerID, Protocol: "custom-v1", Version: 4,
+		SenderDeviceID: senderDeviceID, RecipientUserID: testOwnerID, RecipientDeviceID: recipientDeviceID,
+		Protocol: "custom-v1", Version: 4,
 		ClientMessageID: clientID, Ciphertext: ciphertext,
 	}
 	rec := dmRequest(e, http.MethodPost, "/api/dm/messages", req, true)
-	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), messageID.String()) {
+	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), messageID.String()) ||
+		store.insertedMessages != 0 || store.insertedIdempotency != 0 {
 		t.Fatalf("status/body = %d/%s, want existing idempotent result", rec.Code, rec.Body.String())
 	}
 	req.Ciphertext = []byte("different-ciphertext")
@@ -319,19 +403,56 @@ func TestDMSendIdempotencyAndConflict(t *testing.T) {
 	}
 }
 
+func TestDMSendResolvesConcurrentIdempotencyReservation(t *testing.T) {
+	clientID := uuid.New()
+	messageID := uuid.New()
+	senderDeviceID := uuid.New()
+	recipientDeviceID := uuid.New()
+	ciphertext := []byte("opaque-ciphertext")
+	ciphertextDigest := sha256.Sum256(ciphertext)
+	existing := db.GetDMSendIdempotencyByClientIDRow{
+		MessageID: messageID, RecipientDeviceID: recipientDeviceID, RecipientUserID: testOwnerID,
+		SequenceNo: 7, Protocol: "custom-v1", Version: 4, CiphertextDigest: ciphertextDigest[:],
+		CreatedAt: time.Unix(2, 0).UTC(), ExpiresAt: time.Unix(2, 0).UTC().Add(time.Hour),
+	}
+	store := &dmTestStore{
+		device:               db.DmDevice{ID: senderDeviceID, UserID: testViewerID, Protocol: "custom-v1", ProtocolVersion: 4},
+		existingErr:          sql.ErrNoRows,
+		idempotencyInsertErr: sql.ErrNoRows,
+		concurrentExisting:   &existing,
+		recipientDevice: db.GetEligibleDMRecipientDeviceForSendRow{
+			ID: recipientDeviceID, Protocol: "custom-v1", ProtocolVersion: 4,
+		},
+		nextSequence: 8,
+	}
+	e := newDMTestServer(store, viewerUser())
+	rec := dmRequest(e, http.MethodPost, "/api/dm/messages", dmSendRequest{
+		SenderDeviceID: senderDeviceID, RecipientUserID: testOwnerID, RecipientDeviceID: recipientDeviceID,
+		Protocol: "custom-v1", Version: 4, ClientMessageID: clientID, Ciphertext: ciphertext,
+	}, true)
+	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), messageID.String()) ||
+		store.insertedMessages != 0 {
+		t.Fatalf("status/body/insertions = %d/%s/%d, want concurrent idempotent result without another inbox row",
+			rec.Code, rec.Body.String(), store.insertedMessages)
+	}
+}
+
 func TestDMSendAllocatesAndReturnsRecipientSequence(t *testing.T) {
 	clientID := uuid.New()
+	senderDeviceID := uuid.New()
+	recipientDeviceID := uuid.New()
 	store := &dmTestStore{
-		device:      db.DmDevice{ID: uuid.New(), UserID: testViewerID, Protocol: "custom-protocol", ProtocolVersion: 32768},
+		device:      db.DmDevice{ID: senderDeviceID, UserID: testViewerID, Protocol: "custom-protocol", ProtocolVersion: 32768},
 		existingErr: sql.ErrNoRows,
 		recipientDevice: db.GetEligibleDMRecipientDeviceForSendRow{
-			ID: uuid.New(), Protocol: "custom-protocol", ProtocolVersion: 32768,
+			ID: recipientDeviceID, Protocol: "custom-protocol", ProtocolVersion: 32768,
 		},
 		nextSequence: 11,
 	}
 	e := newDMTestServer(store, viewerUser())
 	rec := dmRequest(e, http.MethodPost, "/api/dm/messages", dmSendRequest{
-		RecipientUserID: testOwnerID, Protocol: "custom-protocol", Version: 32768, ClientMessageID: clientID,
+		SenderDeviceID: senderDeviceID, RecipientUserID: testOwnerID, RecipientDeviceID: recipientDeviceID,
+		Protocol: "custom-protocol", Version: 32768, ClientMessageID: clientID,
 		Ciphertext: []byte("opaque"),
 	}, true)
 	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"sequence":11`) {
@@ -340,16 +461,19 @@ func TestDMSendAllocatesAndReturnsRecipientSequence(t *testing.T) {
 }
 
 func TestDMSendRejectsProtocolVersionMismatch(t *testing.T) {
+	senderDeviceID := uuid.New()
+	recipientDeviceID := uuid.New()
 	store := &dmTestStore{
-		device:      db.DmDevice{ID: uuid.New(), UserID: testViewerID, Protocol: "sender-protocol", ProtocolVersion: 3},
+		device:      db.DmDevice{ID: senderDeviceID, UserID: testViewerID, Protocol: "sender-protocol", ProtocolVersion: 3},
 		existingErr: sql.ErrNoRows,
 		recipientDevice: db.GetEligibleDMRecipientDeviceForSendRow{
-			ID: uuid.New(), Protocol: "recipient-protocol", ProtocolVersion: 3,
+			ID: recipientDeviceID, Protocol: "recipient-protocol", ProtocolVersion: 3,
 		},
 	}
 	e := newDMTestServer(store, viewerUser())
 	rec := dmRequest(e, http.MethodPost, "/api/dm/messages", dmSendRequest{
-		RecipientUserID: testOwnerID, Protocol: "sender-protocol", Version: 3,
+		SenderDeviceID: senderDeviceID, RecipientUserID: testOwnerID, RecipientDeviceID: recipientDeviceID,
+		Protocol: "sender-protocol", Version: 3,
 		ClientMessageID: uuid.New(), Ciphertext: []byte("opaque"),
 	}, true)
 	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"DM_PROTOCOL_MISMATCH"`) {
@@ -368,24 +492,19 @@ func TestDMPollPreservesSequenceOrderAndAckTargetsCurrentDevice(t *testing.T) {
 		},
 	}
 	e := newDMTestServer(store, viewerUser())
-	rec := dmRequest(e, http.MethodGet, "/api/dm/inbox?after=0", nil, true)
+	rec := dmRequest(e, http.MethodGet, "/api/dm/inbox?device_id="+deviceID.String()+"&after=0", nil, true)
 	if rec.Code != http.StatusOK ||
 		!strings.Contains(rec.Body.String(), `"next_after":5`) ||
 		strings.Index(rec.Body.String(), firstID.String()) > strings.Index(rec.Body.String(), secondID.String()) {
 		t.Fatalf("poll response does not preserve sequence order: %d %s", rec.Code, rec.Body.String())
 	}
-	rec = dmRequest(e, http.MethodPost, "/api/dm/inbox/"+firstID.String()+"/ack", nil, true)
+	rec = dmRequest(e, http.MethodPost, "/api/dm/inbox/"+firstID.String()+"/ack", dmAckRequest{DeviceID: deviceID}, true)
 	if rec.Code != http.StatusNoContent || store.lastAck.ID != firstID || store.lastAck.RecipientDeviceID != deviceID {
 		t.Fatalf("ack status/target = %d/%+v", rec.Code, store.lastAck)
 	}
-}
-
-func TestDMPollSweepsExpiredMessages(t *testing.T) {
-	store := &dmTestStore{device: db.DmDevice{ID: uuid.New(), UserID: testViewerID}}
-	e := newDMTestServer(store, viewerUser())
-	rec := dmRequest(e, http.MethodGet, "/api/dm/inbox?after=0", nil, true)
-	if rec.Code != http.StatusOK || !store.expirySwept {
-		t.Fatalf("status/sweep = %d/%t, want 200/true; body=%s", rec.Code, store.expirySwept, rec.Body.String())
+	rec = dmRequest(e, http.MethodPost, "/api/dm/inbox/"+firstID.String()+"/ack", dmAckRequest{DeviceID: deviceID}, true)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("repeated ack status = %d, want 204", rec.Code)
 	}
 }
 
@@ -394,11 +513,13 @@ func TestDMRelayDoesNotLogCiphertextOrKeyBytes(t *testing.T) {
 	keyBundle := []byte("distinct-secret-key-bundle")
 	fallbackKey := []byte("distinct-secret-fallback-key")
 	oneTimeKey := []byte("distinct-secret-one-time-key")
+	senderDeviceID := uuid.New()
+	recipientDeviceID := uuid.New()
 	store := &dmTestStore{
-		device:      db.DmDevice{ID: uuid.New(), UserID: testViewerID, Protocol: "custom-protocol", ProtocolVersion: 12},
+		device:      db.DmDevice{ID: senderDeviceID, UserID: testViewerID, Protocol: "custom-protocol", ProtocolVersion: 12},
 		existingErr: sql.ErrNoRows,
 		recipientDevice: db.GetEligibleDMRecipientDeviceForSendRow{
-			ID: uuid.New(), Protocol: "custom-protocol", ProtocolVersion: 12,
+			ID: recipientDeviceID, Protocol: "custom-protocol", ProtocolVersion: 12,
 		},
 		nextSequence: 1,
 		inboxRows: []db.ListDMInboxAfterRow{{
@@ -422,13 +543,14 @@ func TestDMRelayDoesNotLogCiphertextOrKeyBytes(t *testing.T) {
 		t.Fatalf("registration status = %d: %s", register.Code, register.Body.String())
 	}
 	send := dmRequest(e, http.MethodPost, "/api/dm/messages", dmSendRequest{
-		RecipientUserID: testOwnerID, Protocol: "custom-protocol", Version: 12, ClientMessageID: uuid.New(),
+		SenderDeviceID: senderDeviceID, RecipientUserID: testOwnerID, RecipientDeviceID: recipientDeviceID,
+		Protocol: "custom-protocol", Version: 12, ClientMessageID: uuid.New(),
 		Ciphertext: ciphertext,
 	}, true)
 	if send.Code != http.StatusCreated {
 		t.Fatalf("send status = %d: %s", send.Code, send.Body.String())
 	}
-	poll := dmRequest(e, http.MethodGet, "/api/dm/inbox?after=0", nil, true)
+	poll := dmRequest(e, http.MethodGet, "/api/dm/inbox?device_id="+senderDeviceID.String()+"&after=0", nil, true)
 	if poll.Code != http.StatusOK {
 		t.Fatalf("poll status = %d: %s", poll.Code, poll.Body.String())
 	}
@@ -445,12 +567,13 @@ func TestDMRelayDoesNotLogCiphertextOrKeyBytes(t *testing.T) {
 }
 
 func TestDMPollRejectsInvalidLimits(t *testing.T) {
-	store := &dmTestStore{}
+	deviceID := uuid.New()
+	store := &dmTestStore{device: db.DmDevice{ID: deviceID, UserID: testViewerID}}
 	e := newDMTestServer(store, viewerUser())
 	for _, path := range []string{
-		"/api/dm/inbox",
-		"/api/dm/inbox?after=-1",
-		"/api/dm/inbox?after=0&limit=101",
+		"/api/dm/inbox?device_id=" + deviceID.String(),
+		"/api/dm/inbox?device_id=" + deviceID.String() + "&after=-1",
+		"/api/dm/inbox?device_id=" + deviceID.String() + "&after=0&limit=101",
 	} {
 		rec := dmRequest(e, http.MethodGet, path, nil, true)
 		if rec.Code != http.StatusBadRequest {
@@ -460,9 +583,11 @@ func TestDMPollRejectsInvalidLimits(t *testing.T) {
 }
 
 func TestDMSendRejectsOversizedCiphertext(t *testing.T) {
+	senderDeviceID := uuid.New()
 	store := &dmTestStore{}
 	e := newDMTestServer(store, viewerUser())
 	rec := dmRequest(e, http.MethodPost, "/api/dm/messages", dmSendRequest{
+		SenderDeviceID: senderDeviceID, RecipientDeviceID: uuid.New(),
 		RecipientUserID: testOwnerID, Protocol: "custom-protocol", Version: 1, ClientMessageID: uuid.New(),
 		Ciphertext: make([]byte, dmMaxCiphertextBytes+1),
 	}, true)
@@ -472,21 +597,131 @@ func TestDMSendRejectsOversizedCiphertext(t *testing.T) {
 }
 
 func TestDMSendAcceptsMaximumCiphertext(t *testing.T) {
+	senderDeviceID := uuid.New()
+	recipientDeviceID := uuid.New()
 	store := &dmTestStore{
-		device:      db.DmDevice{ID: uuid.New(), UserID: testViewerID, Protocol: "custom-protocol", ProtocolVersion: 1},
+		device:      db.DmDevice{ID: senderDeviceID, UserID: testViewerID, Protocol: "custom-protocol", ProtocolVersion: 1},
 		existingErr: sql.ErrNoRows,
 		recipientDevice: db.GetEligibleDMRecipientDeviceForSendRow{
-			ID: uuid.New(), Protocol: "custom-protocol", ProtocolVersion: 1,
+			ID: recipientDeviceID, Protocol: "custom-protocol", ProtocolVersion: 1,
 		},
 		nextSequence: 1,
 	}
 	e := newDMTestServer(store, viewerUser())
 	rec := dmRequest(e, http.MethodPost, "/api/dm/messages", dmSendRequest{
-		RecipientUserID: testOwnerID, Protocol: "custom-protocol", Version: 1,
+		SenderDeviceID: senderDeviceID, RecipientUserID: testOwnerID, RecipientDeviceID: recipientDeviceID,
+		Protocol: "custom-protocol", Version: 1,
 		ClientMessageID: uuid.New(), Ciphertext: make([]byte, dmMaxCiphertextBytes),
 	}, true)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDMSendRejectsFullRecipientInbox(t *testing.T) {
+	senderDeviceID := uuid.New()
+	recipientDeviceID := uuid.New()
+	store := &dmTestStore{
+		device:      db.DmDevice{ID: senderDeviceID, UserID: testViewerID, Protocol: "custom-v1", ProtocolVersion: 1},
+		existingErr: sql.ErrNoRows,
+		recipientDevice: db.GetEligibleDMRecipientDeviceForSendRow{
+			ID: recipientDeviceID, Protocol: "custom-v1", ProtocolVersion: 1,
+		},
+		nextSequence:    11,
+		pendingMessages: dmMaxPendingPerDevice,
+	}
+	e := newDMTestServer(store, viewerUser())
+	rec := dmRequest(e, http.MethodPost, "/api/dm/messages", dmSendRequest{
+		SenderDeviceID: senderDeviceID, RecipientUserID: testOwnerID, RecipientDeviceID: recipientDeviceID,
+		Protocol: "custom-v1", Version: 1, ClientMessageID: uuid.New(), Ciphertext: []byte("opaque"),
+	}, true)
+	if rec.Code != http.StatusTooManyRequests || !strings.Contains(rec.Body.String(), `"DM_INBOX_FULL"`) ||
+		store.insertedMessages != 0 {
+		t.Fatalf("status/body/insertions = %d/%s/%d, want 429/DM_INBOX_FULL/0", rec.Code, rec.Body.String(), store.insertedMessages)
+	}
+}
+
+func TestDMDeviceBoundRoutesRejectStaleDeviceIDs(t *testing.T) {
+	activeDeviceID := uuid.New()
+	staleDeviceID := uuid.New()
+	store := &dmTestStore{
+		device:       db.DmDevice{ID: activeDeviceID, UserID: testViewerID},
+		updateDevice: db.DmDevice{ID: activeDeviceID, UserID: testViewerID},
+	}
+	e := newDMTestServer(store, viewerUser())
+	tests := []struct {
+		name string
+		call func() *httptest.ResponseRecorder
+	}{
+		{
+			name: "upload one-time keys",
+			call: func() *httptest.ResponseRecorder {
+				return dmRequest(e, http.MethodPost, "/api/dm/device/keys", dmUploadKeysRequest{
+					DeviceID: staleDeviceID,
+				}, true)
+			},
+		},
+		{
+			name: "fetch key bundle",
+			call: func() *httptest.ResponseRecorder {
+				return dmRequest(e, http.MethodGet, "/api/dm/users/"+uuid.NewString()+"/key-bundle?device_id="+staleDeviceID.String(), nil, true)
+			},
+		},
+		{
+			name: "poll inbox",
+			call: func() *httptest.ResponseRecorder {
+				return dmRequest(e, http.MethodGet, "/api/dm/inbox?device_id="+staleDeviceID.String()+"&after=0", nil, true)
+			},
+		},
+		{
+			name: "ack inbox message",
+			call: func() *httptest.ResponseRecorder {
+				return dmRequest(e, http.MethodPost, "/api/dm/inbox/"+uuid.NewString()+"/ack", dmAckRequest{
+					DeviceID: staleDeviceID,
+				}, true)
+			},
+		},
+		{
+			name: "send from stale device",
+			call: func() *httptest.ResponseRecorder {
+				return dmRequest(e, http.MethodPost, "/api/dm/messages", dmSendRequest{
+					SenderDeviceID: staleDeviceID, RecipientDeviceID: uuid.New(),
+					RecipientUserID: testOwnerID, Protocol: "custom-v1", Version: 1,
+					ClientMessageID: uuid.New(), Ciphertext: []byte("opaque"),
+				}, true)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := tt.call()
+			if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"DM_DEVICE_STALE"`) {
+				t.Fatalf("status/body = %d/%s, want 409/DM_DEVICE_STALE", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestDMSendRejectsStaleRecipientDevice(t *testing.T) {
+	senderDeviceID := uuid.New()
+	activeRecipientDeviceID := uuid.New()
+	staleRecipientDeviceID := uuid.New()
+	store := &dmTestStore{
+		device:      db.DmDevice{ID: senderDeviceID, UserID: testViewerID},
+		existingErr: sql.ErrNoRows,
+		recipientDevice: db.GetEligibleDMRecipientDeviceForSendRow{
+			ID: activeRecipientDeviceID, Protocol: "custom-v1", ProtocolVersion: 1,
+		},
+	}
+	e := newDMTestServer(store, viewerUser())
+	rec := dmRequest(e, http.MethodPost, "/api/dm/messages", dmSendRequest{
+		SenderDeviceID: senderDeviceID, RecipientDeviceID: staleRecipientDeviceID,
+		RecipientUserID: testOwnerID, Protocol: "custom-v1", Version: 1,
+		ClientMessageID: uuid.New(), Ciphertext: []byte("opaque"),
+	}, true)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"DM_DEVICE_STALE"`) ||
+		store.insertedMessages != 0 {
+		t.Fatalf("status/body/insertions = %d/%s/%d, want 409/DM_DEVICE_STALE/0", rec.Code, rec.Body.String(), store.insertedMessages)
 	}
 }
 

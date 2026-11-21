@@ -548,6 +548,10 @@ func (s *stubAccountTx) DeleteDMInboxByUser(ctx context.Context, senderUserID uu
 	s.calls = append(s.calls, "DeleteDMInboxByUser")
 	return nil
 }
+func (s *stubAccountTx) DeleteDMSendIdempotencyByUser(ctx context.Context, userID uuid.UUID) error {
+	s.calls = append(s.calls, "DeleteDMSendIdempotencyByUser")
+	return nil
+}
 func (s *stubAccountTx) DeleteDMDevicesByUser(ctx context.Context, userID uuid.UUID) error {
 	s.calls = append(s.calls, "DeleteDMDevicesByUser")
 	return nil
@@ -621,6 +625,7 @@ func TestDeleteMe_HappyPathCascadeAndEnqueue(t *testing.T) {
 		"ListVideoKeysByUser", "GetUserAvatarKeys", "DecrementLikesForUser", "DecrementCommentsForUser",
 		"DeleteVideosByUser", "DeleteFollowsByFollower", "DeleteFollowsByFollowee",
 		"DeleteLikesByUser", "DeleteCommentsByUser", "DeleteDMInboxByUser",
+		"DeleteDMSendIdempotencyByUser",
 		"DeleteDMDevicesByUser", "DeleteNotificationsForUser",
 		"DeleteNotificationsByActor", "TombstoneUser",
 	}
