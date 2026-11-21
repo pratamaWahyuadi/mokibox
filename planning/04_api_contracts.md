@@ -176,10 +176,14 @@ enabled, `DM_INBOX_TTL` is required; `.env.example` currently documents
 `168h` (7 days) as a **PROVISIONAL, unapproved** value.
 
 All payloads use the standard `{ "data": ... }` success envelope and standard
-error envelope. JSON `[]byte` fields use standard padded Base64. Public key
-fields are raw 32-byte values; this validates format only and does not approve
-the proposed protocol or library. Maximum one-time-key upload is 100 keys per
-request and 1,000 stored keys per device. Ciphertext is 1-65,536 bytes.
+error envelope. JSON `[]byte` fields use standard padded Base64. A device
+registers a protocol token and positive integer version; that pair identifies
+its opaque key bundle and one-time/fallback key material. Protocol identifiers
+are not allow-listed. Key bundles are 1-65,536 bytes; individual one-time and
+fallback key material is 1-4,096 bytes. Maximum one-time-key upload is 100
+keys per request and 1,000 stored keys per device. Ciphertext is 1-65,536
+bytes. These are encoding and resource limits only: the backend does not parse
+protocol-specific structures, validate cryptographic keys, or decrypt.
 
 Eligibility requires a follow row in both directions. A missing recipient and
 an ineligible recipient produce the same `404 NOT_FOUND` response. The
@@ -191,50 +195,53 @@ is suitable only for one gateway instance.
 ### `POST /api/dm/device`
 
 Register or replace the authenticated user's active device. Replacement
-revokes the prior device, its public keys/prekeys, and its queued recipient
+revokes the prior device, its opaque key material, and its queued recipient
 inbox. Private keys are never sent.
 
 Request:
 
 ```json
 {
-  "signing_key": "<base64: 32 raw bytes>",
-  "identity_key": "<base64: 32 raw bytes>",
+  "protocol": "<protocol-token>",
+  "version": 1,
+  "key_bundle": "<base64 opaque public key bundle>",
   "fallback_key_id": "fallback-1",
-  "fallback_key": "<base64: 32 raw bytes>",
+  "fallback_key_material": "<base64 opaque key bytes>",
   "one_time_keys": [
-    {"key_id": "otk-1", "public_key": "<base64: 32 raw bytes>"}
+    {"key_id": "otk-1", "key_material": "<base64 opaque key bytes>"}
   ]
 }
 ```
 
-`fallback_key_id` and `fallback_key` must be supplied together. The
+`fallback_key_id` and `fallback_key_material` must be supplied together. The
 `one_time_keys` array may be empty; duplicate IDs within the batch are invalid.
+All key material is opaque and uses the device's registered protocol/version.
 Success is `201 Created`:
 
 ```json
-{"data":{"device_id":"<uuid>","registered_at":"<RFC3339 UTC>"}}
+{"data":{"device_id":"<uuid>","protocol":"<protocol-token>","version":1,"registered_at":"<RFC3339 UTC>"}}
 ```
 
 ### `POST /api/dm/device/keys`
 
-Add one-time public keys to the current active device:
+Add opaque one-time key material to the current active device:
 
 ```json
 {
   "one_time_keys": [
-    {"key_id": "otk-2", "public_key": "<base64: 32 raw bytes>"}
+    {"key_id": "otk-2", "key_material": "<base64 opaque key bytes>"}
   ]
 }
 ```
 
 Success is `200 OK` with `{"data":{"device_id":"<uuid>","uploaded":1}}`.
-Unknown devices return `404`; invalid sizes, duplicate IDs, and exceeded
-count limits return `400 VALIDATION_ERROR`.
+Keys inherit the protocol/version of the registered device. Unknown devices
+return `404`; invalid encoding, sizes, duplicate IDs, and exceeded count limits
+return `400 VALIDATION_ERROR`.
 
 ### `GET /api/dm/users/:id/key-bundle`
 
-Fetch the eligible recipient's active public device bundle. This claims and
+Fetch the eligible recipient's active opaque key bundle. This claims and
 removes one one-time key atomically. When no one-time keys remain, the optional
 fallback key is returned instead. If neither exists, the response is
 `409 DM_KEYS_EXHAUSTED`.
@@ -246,9 +253,10 @@ Success:
   "data": {
     "user_id": "<uuid>",
     "device_id": "<uuid>",
-    "signing_key": "<base64>",
-    "identity_key": "<base64>",
-    "one_time_key": {"key_id":"otk-1","public_key":"<base64>"}
+    "protocol": "<protocol-token>",
+    "version": 1,
+    "key_bundle": "<base64 opaque bytes>",
+    "one_time_key": {"key_id":"otk-1","key_material":"<base64 opaque bytes>"}
   }
 }
 ```
@@ -258,14 +266,17 @@ absent. Missing and ineligible recipients both return `404 NOT_FOUND`.
 
 ### `POST /api/dm/messages`
 
-Send a versioned opaque envelope. Sender identity/device are derived from
-authentication, never accepted from the request body.
+Send an opaque envelope tagged with its protocol and version. Sender
+identity/device are derived from authentication, never accepted from the
+request body. The protocol/version must match both registered devices; the
+backend does not allow-list a protocol or inspect its payload.
 
 Request:
 
 ```json
 {
   "recipient_user_id": "<uuid>",
+  "protocol": "<protocol-token>",
   "version": 1,
   "client_message_id": "<uuid>",
   "ciphertext": "<base64 opaque bytes>"
@@ -274,7 +285,9 @@ Request:
 
 The client message ID is unique per sender device. Repeating an identical
 request returns the original message ID and sequence; reusing the ID with a
-different recipient, version, or ciphertext returns `409 DM_CONFLICT`.
+different recipient, protocol, version, or ciphertext returns `409 DM_CONFLICT`.
+An envelope whose protocol/version does not match the registered devices
+returns `409 DM_PROTOCOL_MISMATCH`.
 Success is `201 Created`:
 
 ```json
@@ -289,8 +302,9 @@ Success is `201 Created`:
 }
 ```
 
-Unknown and ineligible recipients both return `404 NOT_FOUND`. Unsupported
-versions and invalid sizes return `400 VALIDATION_ERROR`.
+Unknown and ineligible recipients both return `404 NOT_FOUND`. Invalid
+protocol-token encoding, non-positive versions, and invalid sizes return
+`400 VALIDATION_ERROR`.
 
 ### `GET /api/dm/inbox?after=<sequence>&limit=<n>`
 
@@ -310,6 +324,7 @@ Success:
         "sequence": 1,
         "sender_user_id": "<uuid>",
         "sender_device_id": "<uuid>",
+        "protocol": "<protocol-token>",
         "version": 1,
         "ciphertext": "<base64 opaque bytes>",
         "client_message_id": "<uuid>",
@@ -379,7 +394,7 @@ person.
 | GET | `/api/notifications` | List notifikasi | JWT |
 | PUT | `/api/notifications/read-all` | Tandai semua notifikasi dibaca | JWT |
 | POST | `/api/dm/device` | Register/replace device (feature flag) | JWT |
-| POST | `/api/dm/device/keys` | Upload one-time public keys (feature flag) | JWT |
+| POST | `/api/dm/device/keys` | Upload opaque one-time key material (feature flag) | JWT |
 | GET | `/api/dm/users/:id/key-bundle` | Claim eligible recipient bundle (feature flag) | JWT |
 | POST | `/api/dm/messages` | Send opaque ciphertext (feature flag) | JWT |
 | GET | `/api/dm/inbox` | Poll per-device ciphertext inbox (feature flag) | JWT |

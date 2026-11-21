@@ -424,12 +424,17 @@ avatar migration and must not be changed.
 
 ### `dm_devices`
 
-One active device per user (`UNIQUE (user_id)`). Stores only public identity
-and signing keys, an optional public fallback key, registration time, and the
-per-device inbox sequence counter. Replacing a device deletes the previous
-row; `dm_one_time_keys` and ciphertext addressed to its inbox cascade away.
-The counter is incremented inside the same transaction that inserts a queued
-message; it is not a global sequence and is not based on `created_at`.
+One active device per user (`UNIQUE (user_id)`). Stores a protocol identifier
+and positive version that apply to the opaque key bundle, fallback key, and
+one-time keys; no Olm-specific key layout is stored. Replacing a device deletes
+the previous row; `dm_one_time_keys` and ciphertext addressed to its inbox
+cascade away. The counter is incremented inside the same transaction that
+inserts a queued message; it is not a global sequence and is not based on
+`created_at`.
+
+The backend validates only protocol-token encoding, positive version, key
+material encoding/size, and counts. Protocol identifiers are not allow-listed
+and key material is not parsed or cryptographically validated.
 
 ### `dm_one_time_keys`
 
@@ -437,12 +442,13 @@ message; it is not a global sequence and is not based on `created_at`.
 |---|---|---|---|
 | `device_id` | UUID | PK part, FK to `dm_devices` with cascade | Owner device |
 | `key_id` | TEXT | PK part, length 1-64 | Client-generated public-key identifier |
-| `public_key` | BYTEA | exactly 32 bytes | Opaque public key material |
+| `key_material` | BYTEA | 1-4,096 bytes | Opaque key bytes using the parent device protocol/version |
 | `created_at` | TIMESTAMPTZ | NOT NULL, default `NOW()` | Stable claim ordering |
 
 Bundle fetch claims the oldest key atomically with `DELETE ... RETURNING` and
-`FOR UPDATE SKIP LOCKED`; if none remains, the device's optional fallback key
-is returned. The backend validates lengths and limits, not key correctness.
+`FOR UPDATE SKIP LOCKED`; if none remains, the device's optional opaque
+fallback key is returned. The backend validates byte lengths and limits, not
+key correctness or protocol-specific structure.
 
 ### `dm_inbox`
 
@@ -454,11 +460,17 @@ is returned. The backend validates lengths and limits, not key correctness.
 | `sequence_no` | BIGINT | unique with recipient device, > 0 | Per-device polling cursor |
 | `sender_user_id` | UUID | FK to `users` with cascade | Routing metadata |
 | `sender_device_id` | UUID | no FK; retained for idempotency | Sender device identifier |
-| `version` | SMALLINT | currently `1` | Envelope format version |
+| `protocol` | TEXT | 1-64 character protocol token | Opaque envelope protocol identifier |
+| `version` | INTEGER | positive | Protocol/envelope version |
 | `ciphertext` | BYTEA | 1-65,536 bytes | Opaque payload; never decrypted or logged |
 | `client_message_id` | UUID | unique with sender device | Idempotent send key |
 | `created_at` | TIMESTAMPTZ | NOT NULL, default `NOW()` | Server receive time |
 | `expires_at` | TIMESTAMPTZ | NOT NULL and after creation | Required retention cutoff |
+
+`dm_devices.key_bundle` contains 1-65,536 opaque bytes; fallback and one-time
+key material contain 1-4,096 opaque bytes. One-time keys inherit the protocol
+and version of their parent device. These bounds are storage limits, not
+cryptographic-format assumptions.
 
 Indexes support `(recipient_device_id, sequence_no)` polling and expiry
 cleanup. Poll excludes expired records. The gateway janitor deletes expired
@@ -466,9 +478,9 @@ rows in batches of 1,000. Acknowledgement deletes only a row owned by the
 active recipient device.
 
 Account deletion removes a user's sent and queued messages and then their
-device row in the existing deletion transaction; device deletion cascades
-public keys and prekeys. Messages already copied to another user's device
-cannot be recalled.
+device row in the existing deletion transaction; device deletion cascades the
+opaque key bundle, fallback key, and one-time key material. Messages already
+copied to another user's device cannot be recalled.
 
 The relay feature is off by default. `DM_INBOX_TTL` is mandatory when enabled;
 `168h` is only a provisional example in `.env.example` and is not approved.

@@ -7,8 +7,9 @@ Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
 
 - PR #77 combines the design proposal with a backend-only opaque ciphertext
   relay. It does not implement encryption/decryption and must not be described
-  as E2EE-ready. Issue #75 remains open for Flutter client work, production
-  rollout, and independent security review; #76 closes only when PR #77 merges.
+  as E2EE-ready. Issues #75 (backend) and #76 (design) close only when PR #77
+  merges; Flutter client work, production rollout, and independent security
+  review are tracked by #78.
 - Proposed v1: 1:1 text ciphertext, one active device per user, mutual-follow
   eligibility, HTTP polling, per-device sequence, explicit acknowledgement,
   and feature flag off by default. Requests, read receipts, WebSocket, media,
@@ -24,9 +25,13 @@ Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
 - API contract and client wire format are in `planning/04_api_contracts.md`;
   schema is in `planning/03_schema.md`. The smoke test uses random bytes and
   proves relay behavior only, not cryptography.
-- Remaining gates: confirm Flutter repository and owner, choose protocol and
-  library/license, confirm TTL, implement client crypto/UI, complete an
-  independent security review, then decide on production rollout.
+- Key bundles, fallback/one-time key material, and ciphertext are opaque bytes.
+  Device registrations carry a protocol token/version; inbox envelopes carry
+  the same pair. The server validates generic encoding/size/count limits and
+  protocol/version consistency, never protocol-specific formats.
+- Remaining gates under #78: confirm Flutter repository and owner, approve or
+  reject protocol/library and license, confirm TTL, implement client crypto/UI,
+  complete an independent security review, then decide on production rollout.
 - Planning conflict to report: `planning/ROADMAP_TIKTOK_PARITY.md` leaves DM
   under P3 (Draft), while this work proceeds as the owner's explicit request;
   do not change roadmap priority here. The schema document's introductory

@@ -142,8 +142,8 @@ device identity key is trustworthy.
 ### Backend
 
 - Authenticates accounts using the existing MokiBox JWT middleware.
-- Stores and serves public device/key material only; claims one-time prekeys
-  atomically and enforces quotas/rate limits.
+- Stores and serves opaque device/key material only; claims one-time key
+  material atomically and enforces quotas/rate limits.
 - Relays opaque ciphertext envelopes without plaintext fallback, content
   indexing, or payload logging.
 - Enforces mutual-follow eligibility and device authorization.
@@ -287,16 +287,19 @@ end.
 
 ### D4. Message flow
 
-1. The client generates device keys and public one-time keys, then registers
-   the public material; private keys remain on the device.
-2. The sender fetches the recipient's bundle only when both users mutually
-   follow. The server atomically claims one one-time key, falling back to the
-   optional fallback key when the batch is exhausted.
+1. The client generates device keys and one-time key material, then registers
+   its protocol identifier/version and opaque public key bundle, including any
+   protocol-specific static material; private keys remain on the device.
+2. The sender fetches the recipient's opaque bundle only when both users
+   mutually follow. The server atomically claims one opaque one-time key,
+   falling back to the optional fallback key when the batch is exhausted.
 3. After client protocol/library approval, the sender creates a session and
-   encrypts locally. It posts a versioned ciphertext envelope with a UUID
-   client message ID; the server validates the byte format and size only.
+   encrypts locally. It posts an envelope tagged with protocol and version and
+   a UUID client message ID; the server validates generic encoding, sizes,
+   counts, and registered protocol/version consistency only. It does not parse
+   protocol-specific key or ciphertext structures.
 4. The recipient polls by per-device sequence, decrypts locally, acknowledges
-   delivered entries, and replenishes public one-time keys as needed.
+   delivered entries, and replenishes one-time key material as needed.
 
 This is a proposed flow, not an approved wire/API contract. The client
 cryptography details must be checked against the selected library API and
@@ -339,9 +342,9 @@ reviewed before implementation.
 
 ### D9. Account deletion
 
-- Deleting an account removes its device keys, prekeys, and queued ciphertext
-  in the account-deletion transaction. Copies on other users' devices cannot
-  be erased; this remains a documented limit.
+- Deleting an account removes its device registration, opaque key material, and
+  queued ciphertext in the account-deletion transaction. Copies on other users'
+  devices cannot be erased; this remains a documented limit.
 
 ### D10. Release gates
 
