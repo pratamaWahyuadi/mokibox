@@ -55,6 +55,21 @@ type DmOneTimeKey struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+type DmSendIdempotency struct {
+	SenderDeviceID    uuid.UUID `json:"sender_device_id"`
+	SenderUserID      uuid.UUID `json:"sender_user_id"`
+	ClientMessageID   uuid.UUID `json:"client_message_id"`
+	RecipientUserID   uuid.UUID `json:"recipient_user_id"`
+	RecipientDeviceID uuid.UUID `json:"recipient_device_id"`
+	Protocol          string    `json:"protocol"`
+	Version           int32     `json:"version"`
+	CiphertextDigest  []byte    `json:"ciphertext_digest"`
+	MessageID         uuid.UUID `json:"message_id"`
+	SequenceNo        int64     `json:"sequence_no"`
+	CreatedAt         time.Time `json:"created_at"`
+	ExpiresAt         time.Time `json:"expires_at"`
+}
+
 type Follow struct {
 	FollowerID uuid.UUID `json:"follower_id"`
 	FolloweeID uuid.UUID `json:"followee_id"`

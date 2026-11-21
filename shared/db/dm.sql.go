@@ -70,6 +70,20 @@ func (q *Queries) CountDMOneTimeKeys(ctx context.Context, deviceID uuid.UUID) (i
 	return count, err
 }
 
+const countPendingDMInboxForRecipient = `-- name: CountPendingDMInboxForRecipient :one
+SELECT COUNT(*)
+FROM dm_inbox
+WHERE recipient_device_id = $1
+  AND expires_at > NOW()
+`
+
+func (q *Queries) CountPendingDMInboxForRecipient(ctx context.Context, recipientDeviceID uuid.UUID) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countPendingDMInboxForRecipient, recipientDeviceID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createDMDevice = `-- name: CreateDMDevice :one
 INSERT INTO dm_devices
     (id, user_id, protocol, protocol_version, key_bundle, fallback_key_id,
@@ -137,6 +151,16 @@ func (q *Queries) DeleteDMInboxByUser(ctx context.Context, senderUserID uuid.UUI
 	return err
 }
 
+const deleteDMSendIdempotencyByUser = `-- name: DeleteDMSendIdempotencyByUser :exec
+DELETE FROM dm_send_idempotency
+WHERE sender_user_id = $1 OR recipient_user_id = $1
+`
+
+func (q *Queries) DeleteDMSendIdempotencyByUser(ctx context.Context, senderUserID uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, deleteDMSendIdempotencyByUser, senderUserID)
+	return err
+}
+
 const deleteExpiredDMInbox = `-- name: DeleteExpiredDMInbox :execrows
 WITH expired AS (
     SELECT id
@@ -159,6 +183,29 @@ func (q *Queries) DeleteExpiredDMInbox(ctx context.Context) (int64, error) {
 	return result.RowsAffected()
 }
 
+const deleteExpiredDMSendIdempotency = `-- name: DeleteExpiredDMSendIdempotency :execrows
+WITH expired AS (
+    SELECT sender_device_id, client_message_id
+    FROM dm_send_idempotency
+    WHERE expires_at <= NOW()
+    ORDER BY expires_at
+    LIMIT 1000
+    FOR UPDATE SKIP LOCKED
+)
+DELETE FROM dm_send_idempotency entry
+USING expired
+WHERE entry.sender_device_id = expired.sender_device_id
+  AND entry.client_message_id = expired.client_message_id
+`
+
+func (q *Queries) DeleteExpiredDMSendIdempotency(ctx context.Context) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteExpiredDMSendIdempotency)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const getDMDeviceByUser = `-- name: GetDMDeviceByUser :one
 
 SELECT id, user_id, protocol, protocol_version, key_bundle, fallback_key_id,
@@ -172,6 +219,31 @@ WHERE user_id = $1
 // =====================================================
 func (q *Queries) GetDMDeviceByUser(ctx context.Context, userID uuid.UUID) (DmDevice, error) {
 	row := q.db.QueryRowContext(ctx, getDMDeviceByUser, userID)
+	var i DmDevice
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Protocol,
+		&i.ProtocolVersion,
+		&i.KeyBundle,
+		&i.FallbackKeyID,
+		&i.FallbackKeyMaterial,
+		&i.NextSequence,
+		&i.RegisteredAt,
+	)
+	return i, err
+}
+
+const getDMDeviceByUserForKeyShare = `-- name: GetDMDeviceByUserForKeyShare :one
+SELECT id, user_id, protocol, protocol_version, key_bundle, fallback_key_id,
+       fallback_key_material, next_sequence, registered_at
+FROM dm_devices
+WHERE user_id = $1
+FOR KEY SHARE
+`
+
+func (q *Queries) GetDMDeviceByUserForKeyShare(ctx context.Context, userID uuid.UUID) (DmDevice, error) {
+	row := q.db.QueryRowContext(ctx, getDMDeviceByUserForKeyShare, userID)
 	var i DmDevice
 	err := row.Scan(
 		&i.ID,
@@ -212,43 +284,41 @@ func (q *Queries) GetDMDeviceForUpdate(ctx context.Context, userID uuid.UUID) (D
 	return i, err
 }
 
-const getDMInboxMessageByClientID = `-- name: GetDMInboxMessageByClientID :one
-SELECT id, recipient_device_id, recipient_user_id, sequence_no, protocol, version,
-       ciphertext, client_message_id, created_at, expires_at
-FROM dm_inbox
+const getDMSendIdempotencyByClientID = `-- name: GetDMSendIdempotencyByClientID :one
+SELECT recipient_user_id, recipient_device_id, protocol, version,
+       ciphertext_digest, message_id, sequence_no, created_at, expires_at
+FROM dm_send_idempotency
 WHERE sender_device_id = $1 AND client_message_id = $2
 `
 
-type GetDMInboxMessageByClientIDParams struct {
+type GetDMSendIdempotencyByClientIDParams struct {
 	SenderDeviceID  uuid.UUID `json:"sender_device_id"`
 	ClientMessageID uuid.UUID `json:"client_message_id"`
 }
 
-type GetDMInboxMessageByClientIDRow struct {
-	ID                uuid.UUID `json:"id"`
-	RecipientDeviceID uuid.UUID `json:"recipient_device_id"`
+type GetDMSendIdempotencyByClientIDRow struct {
 	RecipientUserID   uuid.UUID `json:"recipient_user_id"`
-	SequenceNo        int64     `json:"sequence_no"`
+	RecipientDeviceID uuid.UUID `json:"recipient_device_id"`
 	Protocol          string    `json:"protocol"`
 	Version           int32     `json:"version"`
-	Ciphertext        []byte    `json:"ciphertext"`
-	ClientMessageID   uuid.UUID `json:"client_message_id"`
+	CiphertextDigest  []byte    `json:"ciphertext_digest"`
+	MessageID         uuid.UUID `json:"message_id"`
+	SequenceNo        int64     `json:"sequence_no"`
 	CreatedAt         time.Time `json:"created_at"`
 	ExpiresAt         time.Time `json:"expires_at"`
 }
 
-func (q *Queries) GetDMInboxMessageByClientID(ctx context.Context, arg GetDMInboxMessageByClientIDParams) (GetDMInboxMessageByClientIDRow, error) {
-	row := q.db.QueryRowContext(ctx, getDMInboxMessageByClientID, arg.SenderDeviceID, arg.ClientMessageID)
-	var i GetDMInboxMessageByClientIDRow
+func (q *Queries) GetDMSendIdempotencyByClientID(ctx context.Context, arg GetDMSendIdempotencyByClientIDParams) (GetDMSendIdempotencyByClientIDRow, error) {
+	row := q.db.QueryRowContext(ctx, getDMSendIdempotencyByClientID, arg.SenderDeviceID, arg.ClientMessageID)
+	var i GetDMSendIdempotencyByClientIDRow
 	err := row.Scan(
-		&i.ID,
-		&i.RecipientDeviceID,
 		&i.RecipientUserID,
-		&i.SequenceNo,
+		&i.RecipientDeviceID,
 		&i.Protocol,
 		&i.Version,
-		&i.Ciphertext,
-		&i.ClientMessageID,
+		&i.CiphertextDigest,
+		&i.MessageID,
+		&i.SequenceNo,
 		&i.CreatedAt,
 		&i.ExpiresAt,
 	)
@@ -344,15 +414,15 @@ func (q *Queries) IncrementDMDeviceSequence(ctx context.Context, id uuid.UUID) (
 
 const insertDMInboxMessage = `-- name: InsertDMInboxMessage :one
 INSERT INTO dm_inbox
-    (recipient_device_id, recipient_user_id, sequence_no, sender_user_id,
-     sender_device_id, protocol, version, ciphertext, client_message_id, expires_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
-        NOW() + ($10::double precision * INTERVAL '1 second'))
+    (id, recipient_device_id, recipient_user_id, sequence_no, sender_user_id,
+     sender_device_id, protocol, version, ciphertext, client_message_id, created_at, expires_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 ON CONFLICT (sender_device_id, client_message_id) DO NOTHING
 RETURNING id, sequence_no, client_message_id, created_at, expires_at
 `
 
 type InsertDMInboxMessageParams struct {
+	ID                uuid.UUID `json:"id"`
 	RecipientDeviceID uuid.UUID `json:"recipient_device_id"`
 	RecipientUserID   uuid.UUID `json:"recipient_user_id"`
 	SequenceNo        int64     `json:"sequence_no"`
@@ -362,7 +432,8 @@ type InsertDMInboxMessageParams struct {
 	Version           int32     `json:"version"`
 	Ciphertext        []byte    `json:"ciphertext"`
 	ClientMessageID   uuid.UUID `json:"client_message_id"`
-	ExpiresInSeconds  float64   `json:"expires_in_seconds"`
+	CreatedAt         time.Time `json:"created_at"`
+	ExpiresAt         time.Time `json:"expires_at"`
 }
 
 type InsertDMInboxMessageRow struct {
@@ -375,6 +446,7 @@ type InsertDMInboxMessageRow struct {
 
 func (q *Queries) InsertDMInboxMessage(ctx context.Context, arg InsertDMInboxMessageParams) (InsertDMInboxMessageRow, error) {
 	row := q.db.QueryRowContext(ctx, insertDMInboxMessage,
+		arg.ID,
 		arg.RecipientDeviceID,
 		arg.RecipientUserID,
 		arg.SequenceNo,
@@ -384,7 +456,8 @@ func (q *Queries) InsertDMInboxMessage(ctx context.Context, arg InsertDMInboxMes
 		arg.Version,
 		arg.Ciphertext,
 		arg.ClientMessageID,
-		arg.ExpiresInSeconds,
+		arg.CreatedAt,
+		arg.ExpiresAt,
 	)
 	var i InsertDMInboxMessageRow
 	err := row.Scan(
@@ -415,6 +488,62 @@ func (q *Queries) InsertDMOneTimeKey(ctx context.Context, arg InsertDMOneTimeKey
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const insertDMSendIdempotency = `-- name: InsertDMSendIdempotency :one
+INSERT INTO dm_send_idempotency
+    (sender_device_id, sender_user_id, client_message_id, recipient_user_id,
+     recipient_device_id, protocol, version, ciphertext_digest, message_id,
+     sequence_no, expires_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+        NOW() + ($11::double precision * INTERVAL '1 second'))
+ON CONFLICT (sender_device_id, client_message_id) DO NOTHING
+RETURNING message_id, sequence_no, created_at, expires_at
+`
+
+type InsertDMSendIdempotencyParams struct {
+	SenderDeviceID    uuid.UUID `json:"sender_device_id"`
+	SenderUserID      uuid.UUID `json:"sender_user_id"`
+	ClientMessageID   uuid.UUID `json:"client_message_id"`
+	RecipientUserID   uuid.UUID `json:"recipient_user_id"`
+	RecipientDeviceID uuid.UUID `json:"recipient_device_id"`
+	Protocol          string    `json:"protocol"`
+	Version           int32     `json:"version"`
+	CiphertextDigest  []byte    `json:"ciphertext_digest"`
+	MessageID         uuid.UUID `json:"message_id"`
+	SequenceNo        int64     `json:"sequence_no"`
+	ExpiresInSeconds  float64   `json:"expires_in_seconds"`
+}
+
+type InsertDMSendIdempotencyRow struct {
+	MessageID  uuid.UUID `json:"message_id"`
+	SequenceNo int64     `json:"sequence_no"`
+	CreatedAt  time.Time `json:"created_at"`
+	ExpiresAt  time.Time `json:"expires_at"`
+}
+
+func (q *Queries) InsertDMSendIdempotency(ctx context.Context, arg InsertDMSendIdempotencyParams) (InsertDMSendIdempotencyRow, error) {
+	row := q.db.QueryRowContext(ctx, insertDMSendIdempotency,
+		arg.SenderDeviceID,
+		arg.SenderUserID,
+		arg.ClientMessageID,
+		arg.RecipientUserID,
+		arg.RecipientDeviceID,
+		arg.Protocol,
+		arg.Version,
+		arg.CiphertextDigest,
+		arg.MessageID,
+		arg.SequenceNo,
+		arg.ExpiresInSeconds,
+	)
+	var i InsertDMSendIdempotencyRow
+	err := row.Scan(
+		&i.MessageID,
+		&i.SequenceNo,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+	)
+	return i, err
 }
 
 const listDMInboxAfter = `-- name: ListDMInboxAfter :many
@@ -479,14 +608,4 @@ func (q *Queries) ListDMInboxAfter(ctx context.Context, arg ListDMInboxAfterPara
 		return nil, err
 	}
 	return items, nil
-}
-
-const revokeDMDeviceForUser = `-- name: RevokeDMDeviceForUser :exec
-DELETE FROM dm_devices
-WHERE user_id = $1
-`
-
-func (q *Queries) RevokeDMDeviceForUser(ctx context.Context, userID uuid.UUID) error {
-	_, err := q.db.ExecContext(ctx, revokeDMDeviceForUser, userID)
-	return err
 }

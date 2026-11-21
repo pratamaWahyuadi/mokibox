@@ -15,6 +15,13 @@ FROM dm_devices
 WHERE user_id = $1
 FOR UPDATE;
 
+-- name: GetDMDeviceByUserForKeyShare :one
+SELECT id, user_id, protocol, protocol_version, key_bundle, fallback_key_id,
+       fallback_key_material, next_sequence, registered_at
+FROM dm_devices
+WHERE user_id = $1
+FOR KEY SHARE;
+
 -- name: CreateDMDevice :one
 INSERT INTO dm_devices
     (id, user_id, protocol, protocol_version, key_bundle, fallback_key_id,
@@ -23,14 +30,16 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING id, user_id, protocol, protocol_version, key_bundle, fallback_key_id,
           fallback_key_material, next_sequence, registered_at;
 
--- name: RevokeDMDeviceForUser :exec
-DELETE FROM dm_devices
-WHERE user_id = $1;
-
 -- name: InsertDMOneTimeKey :execrows
 INSERT INTO dm_one_time_keys (device_id, key_id, key_material)
 VALUES ($1, $2, $3)
 ON CONFLICT (device_id, key_id) DO NOTHING;
+
+-- name: CountPendingDMInboxForRecipient :one
+SELECT COUNT(*)
+FROM dm_inbox
+WHERE recipient_device_id = $1
+  AND expires_at > NOW();
 
 -- name: CountDMOneTimeKeys :one
 SELECT COUNT(*)
@@ -86,18 +95,27 @@ SET next_sequence = next_sequence + 1
 WHERE id = $1
 RETURNING next_sequence;
 
--- name: GetDMInboxMessageByClientID :one
-SELECT id, recipient_device_id, recipient_user_id, sequence_no, protocol, version,
-       ciphertext, client_message_id, created_at, expires_at
-FROM dm_inbox
+-- name: GetDMSendIdempotencyByClientID :one
+SELECT recipient_user_id, recipient_device_id, protocol, version,
+       ciphertext_digest, message_id, sequence_no, created_at, expires_at
+FROM dm_send_idempotency
 WHERE sender_device_id = $1 AND client_message_id = $2;
+
+-- name: InsertDMSendIdempotency :one
+INSERT INTO dm_send_idempotency
+    (sender_device_id, sender_user_id, client_message_id, recipient_user_id,
+     recipient_device_id, protocol, version, ciphertext_digest, message_id,
+     sequence_no, expires_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+        NOW() + (sqlc.arg(expires_in_seconds)::double precision * INTERVAL '1 second'))
+ON CONFLICT (sender_device_id, client_message_id) DO NOTHING
+RETURNING message_id, sequence_no, created_at, expires_at;
 
 -- name: InsertDMInboxMessage :one
 INSERT INTO dm_inbox
-    (recipient_device_id, recipient_user_id, sequence_no, sender_user_id,
-     sender_device_id, protocol, version, ciphertext, client_message_id, expires_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
-        NOW() + (sqlc.arg(expires_in_seconds)::double precision * INTERVAL '1 second'))
+    (id, recipient_device_id, recipient_user_id, sequence_no, sender_user_id,
+     sender_device_id, protocol, version, ciphertext, client_message_id, created_at, expires_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 ON CONFLICT (sender_device_id, client_message_id) DO NOTHING
 RETURNING id, sequence_no, client_message_id, created_at, expires_at;
 
@@ -126,6 +144,10 @@ WHERE sender_user_id = $1
 DELETE FROM dm_devices
 WHERE user_id = $1;
 
+-- name: DeleteDMSendIdempotencyByUser :exec
+DELETE FROM dm_send_idempotency
+WHERE sender_user_id = $1 OR recipient_user_id = $1;
+
 -- name: DeleteExpiredDMInbox :execrows
 WITH expired AS (
     SELECT id
@@ -138,3 +160,17 @@ WITH expired AS (
 DELETE FROM dm_inbox inbox
 USING expired
 WHERE inbox.id = expired.id;
+
+-- name: DeleteExpiredDMSendIdempotency :execrows
+WITH expired AS (
+    SELECT sender_device_id, client_message_id
+    FROM dm_send_idempotency
+    WHERE expires_at <= NOW()
+    ORDER BY expires_at
+    LIMIT 1000
+    FOR UPDATE SKIP LOCKED
+)
+DELETE FROM dm_send_idempotency entry
+USING expired
+WHERE entry.sender_device_id = expired.sender_device_id
+  AND entry.client_message_id = expired.client_message_id;
