@@ -12,6 +12,7 @@ const dmInboxCleanupInterval = time.Minute
 
 type dmInboxExpiryStore interface {
 	DeleteExpiredDMInbox(ctx context.Context) (int64, error)
+	DeleteExpiredDMSendIdempotency(ctx context.Context) (int64, error)
 }
 
 func runDMInboxJanitor(ctx context.Context, queries dmInboxExpiryStore) {
@@ -20,7 +21,7 @@ func runDMInboxJanitor(ctx context.Context, queries dmInboxExpiryStore) {
 
 	for {
 		if err := purgeExpiredDMInbox(ctx, queries); err != nil && ctx.Err() == nil {
-			slog.Error("api-gateway: expire DM inbox", "err", err)
+			slog.Error("api-gateway: expire DM relay data", "err", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -32,11 +33,15 @@ func runDMInboxJanitor(ctx context.Context, queries dmInboxExpiryStore) {
 
 func purgeExpiredDMInbox(ctx context.Context, queries dmInboxExpiryStore) error {
 	for {
-		deleted, err := queries.DeleteExpiredDMInbox(ctx)
+		deletedInbox, err := queries.DeleteExpiredDMInbox(ctx)
 		if err != nil {
 			return err
 		}
-		if deleted < 1000 {
+		deletedIdempotency, err := queries.DeleteExpiredDMSendIdempotency(ctx)
+		if err != nil {
+			return err
+		}
+		if deletedInbox < 1000 && deletedIdempotency < 1000 {
 			return nil
 		}
 		if err := ctx.Err(); err != nil {

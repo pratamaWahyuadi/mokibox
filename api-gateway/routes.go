@@ -344,7 +344,24 @@ func NewRouter(d RouterDeps) *echo.Echo {
 		if err != nil {
 			panic(fmt.Sprintf("api-gateway: NewDMHandler: %v", err))
 		}
-		dmHandler.RegisterRoutes(api)
+		dmKeyBundleRateLimit, err := middleware.NewRateLimitAuth(middleware.RateLimitConfig{
+			Rate: rate.Limit(30.0 / 60.0), Burst: 10,
+			TTL: 10 * time.Minute, SweepInterval: 5 * time.Minute,
+		})
+		if err != nil {
+			panic(fmt.Sprintf("api-gateway: NewRateLimitAuth for DM key bundles: %v", err))
+		}
+		dmSendRateLimit, err := middleware.NewRateLimitAuth(middleware.RateLimitConfig{
+			Rate: rate.Limit(60.0 / 60.0), Burst: 20,
+			TTL: 10 * time.Minute, SweepInterval: 5 * time.Minute,
+		})
+		if err != nil {
+			panic(fmt.Sprintf("api-gateway: NewRateLimitAuth for DM sends: %v", err))
+		}
+		dmHandler.RegisterRoutes(api, handlers.DMRateLimits{
+			KeyBundle: dmKeyBundleRateLimit,
+			Send:      dmSendRateLimit,
+		})
 	}
 
 	return e

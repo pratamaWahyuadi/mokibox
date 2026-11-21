@@ -77,6 +77,14 @@ const (
 	// protocol/version does not match the registered devices. 409.
 	CodeDMProtocolMismatch ErrorCode = "DM_PROTOCOL_MISMATCH"
 
+	// CodeDMDeviceStale is returned when a request names a
+	// device that is no longer the account's active device. 409.
+	CodeDMDeviceStale ErrorCode = "DM_DEVICE_STALE"
+
+	// CodeDMInboxFull is returned when a recipient device's
+	// pending inbox has reached its configured message cap. 429.
+	CodeDMInboxFull ErrorCode = "DM_INBOX_FULL"
+
 	// CodeUploadSizeInvalid is returned when the R2 object
 	// size is outside the 1 KB - 200 MB allow-list enforced
 	// at confirm. 400.
@@ -137,6 +145,8 @@ var knownErrorCodes = []ErrorCode{
 	CodeDMConflict,
 	CodeDMKeysExhausted,
 	CodeDMProtocolMismatch,
+	CodeDMDeviceStale,
+	CodeDMInboxFull,
 	CodeUploadSizeInvalid,
 	CodeSelfFollowNotAllowed,
 	CodeWebhookInvalidSignature,
@@ -160,6 +170,8 @@ var (
 	ErrDMConflict           = errors.New("direct-message conflict")
 	ErrDMKeysExhausted      = errors.New("direct-message keys exhausted")
 	ErrDMProtocolMismatch   = errors.New("direct-message protocol mismatch")
+	ErrDMDeviceStale        = errors.New("direct-message device is stale")
+	ErrDMInboxFull          = errors.New("direct-message inbox is full")
 	ErrUploadSizeInvalid    = errors.New("upload size invalid")
 	ErrSelfFollow           = errors.New("self follow not allowed")
 	ErrWebhookSignature     = errors.New("webhook invalid signature")
@@ -191,8 +203,10 @@ func httpStatusFor(err error) int {
 	case errors.Is(err, ErrUploadMissing):
 		return http.StatusConflict
 	case errors.Is(err, ErrDMConflict), errors.Is(err, ErrDMKeysExhausted),
-		errors.Is(err, ErrDMProtocolMismatch):
+		errors.Is(err, ErrDMProtocolMismatch), errors.Is(err, ErrDMDeviceStale):
 		return http.StatusConflict
+	case errors.Is(err, ErrDMInboxFull):
+		return http.StatusTooManyRequests
 	case errors.Is(err, ErrUploadSizeInvalid):
 		return http.StatusBadRequest
 	case errors.Is(err, ErrSelfFollow):
@@ -231,8 +245,10 @@ func httpStatusForCode(code ErrorCode) int {
 	case CodeNotFound:
 		return http.StatusNotFound
 	case CodeVideoStatusConflict, CodeAvatarUploadConflict, CodeVideoNotReady, CodeUploadMissing,
-		CodeDMConflict, CodeDMKeysExhausted, CodeDMProtocolMismatch:
+		CodeDMConflict, CodeDMKeysExhausted, CodeDMProtocolMismatch, CodeDMDeviceStale:
 		return http.StatusConflict
+	case CodeDMInboxFull:
+		return http.StatusTooManyRequests
 	case CodeRateLimited:
 		return http.StatusTooManyRequests
 	default:
@@ -267,6 +283,10 @@ func codeFor(err error) ErrorCode {
 		return CodeDMKeysExhausted
 	case errors.Is(err, ErrDMProtocolMismatch):
 		return CodeDMProtocolMismatch
+	case errors.Is(err, ErrDMDeviceStale):
+		return CodeDMDeviceStale
+	case errors.Is(err, ErrDMInboxFull):
+		return CodeDMInboxFull
 	case errors.Is(err, ErrUploadSizeInvalid):
 		return CodeUploadSizeInvalid
 	case errors.Is(err, ErrSelfFollow):

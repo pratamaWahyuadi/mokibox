@@ -53,9 +53,8 @@ import (
 	"github.com/pratamaWahyuadi/mokibox/shared/db"
 )
 
-// accountTxStore is the delete-cascade tx body: the 10
-// qtx calls DeleteUserData performs, bound to the
-// transaction. Satisfied by *db.Queries via WithTx.
+// accountTxStore is the delete-cascade tx body, bound to
+// the transaction. Satisfied by *db.Queries via WithTx.
 type accountTxStore interface {
 	ListVideoKeysByUser(ctx context.Context, userID uuid.UUID) ([]db.ListVideoKeysByUserRow, error)
 	GetUserAvatarKeys(ctx context.Context, id uuid.UUID) (db.GetUserAvatarKeysRow, error)
@@ -67,6 +66,7 @@ type accountTxStore interface {
 	DeleteLikesByUser(ctx context.Context, userID uuid.UUID) error
 	DeleteCommentsByUser(ctx context.Context, userID uuid.UUID) error
 	DeleteDMInboxByUser(ctx context.Context, senderUserID uuid.UUID) error
+	DeleteDMSendIdempotencyByUser(ctx context.Context, userID uuid.UUID) error
 	DeleteDMDevicesByUser(ctx context.Context, userID uuid.UUID) error
 	DeleteNotificationsForUser(ctx context.Context, userID uuid.UUID) error
 	DeleteNotificationsByActor(ctx context.Context, actorID uuid.UUID) error
@@ -310,10 +310,13 @@ func collectUserR2Keys(ctx context.Context, runner txRunner[accountTxStore], use
 		}
 
 		// Step 7: delete queued ciphertext before
-		// revoking the device; deleting the device also
-		// cascades its public keys and one-time keys.
+		// revoking the device; also purge idempotency
+		// digests and metadata.
 		if err := qtx.DeleteDMInboxByUser(ctx, userID); err != nil {
 			return shared.Wrap(shared.ErrInternal, fmt.Sprintf("delete DM inbox: %v", err))
+		}
+		if err := qtx.DeleteDMSendIdempotencyByUser(ctx, userID); err != nil {
+			return shared.Wrap(shared.ErrInternal, fmt.Sprintf("delete DM send idempotency: %v", err))
 		}
 		if err := qtx.DeleteDMDevicesByUser(ctx, userID); err != nil {
 			return shared.Wrap(shared.ErrInternal, fmt.Sprintf("delete DM devices: %v", err))
