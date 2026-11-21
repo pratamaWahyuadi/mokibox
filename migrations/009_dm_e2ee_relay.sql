@@ -55,3 +55,30 @@ CREATE INDEX idx_dm_inbox_recipient_sequence
 
 CREATE INDEX idx_dm_inbox_expiry
     ON dm_inbox(expires_at);
+
+CREATE TABLE dm_send_idempotency (
+    sender_device_id   UUID NOT NULL,
+    sender_user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    client_message_id  UUID NOT NULL,
+    recipient_user_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    recipient_device_id UUID NOT NULL,
+    protocol           TEXT NOT NULL CHECK (char_length(protocol) BETWEEN 1 AND 64),
+    version            INTEGER NOT NULL CHECK (version > 0),
+    ciphertext_digest  BYTEA NOT NULL CHECK (octet_length(ciphertext_digest) = 32),
+    message_id         UUID NOT NULL,
+    sequence_no        BIGINT NOT NULL CHECK (sequence_no > 0),
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at         TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (sender_device_id, client_message_id),
+    CONSTRAINT chk_dm_send_idempotency_expiry
+        CHECK (expires_at > created_at)
+);
+
+CREATE INDEX idx_dm_send_idempotency_expiry
+    ON dm_send_idempotency(expires_at);
+
+CREATE INDEX idx_dm_send_idempotency_sender_user
+    ON dm_send_idempotency(sender_user_id);
+
+CREATE INDEX idx_dm_send_idempotency_recipient_user
+    ON dm_send_idempotency(recipient_user_id);
