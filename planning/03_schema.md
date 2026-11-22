@@ -504,6 +504,9 @@ Account deletion removes a user's sent/queued messages and idempotency records,
 then their device row in the existing deletion transaction; device deletion
 cascades the opaque key bundle, fallback key, and one-time key material.
 Messages already copied to another user's device cannot be recalled.
+Follow-up: consider indexes on `dm_inbox(sender_user_id)` and
+`dm_inbox(recipient_user_id)` if account-deletion scans become measurable at
+scale. They are intentionally not added for the bounded v1 queue.
 
 The relay feature is off by default. `DM_INBOX_TTL` is mandatory when enabled;
 the selected v1 retention value is `168h` (7 days), shown in `.env.example`.

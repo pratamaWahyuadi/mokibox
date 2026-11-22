@@ -187,12 +187,14 @@ protocol-specific structures, validate cryptographic keys, or decrypt.
 
 Eligibility requires a follow row in both directions. A missing recipient and
 an ineligible recipient produce the same `404 NOT_FOUND` response. The
-current backend has no block mechanism; if one exists before merge, it must be
-included in eligibility checks. The existing per-user limiter is 60 requests
-per minute with burst 60. DM key-bundle fetches have a separate 30/minute,
-burst-10 limiter; sends have a separate 60/minute, burst-20 limiter. All
-limiters are per-process and suitable only for one gateway instance; multiple
-gateways do not share counters.
+mutual-follow check is performed when a message is sent; already queued
+messages remain available until acknowledged or expired if the users later
+unfollow. The current backend has no block mechanism; if one exists before
+merge, it must be included in eligibility checks. The existing per-user
+limiter is 60 requests per minute with burst 60. DM key-bundle fetches have a
+separate 30/minute, burst-10 limiter; sends have a separate 60/minute,
+burst-20 limiter. All limiters are per-process and suitable only for one
+gateway instance; multiple gateways do not share counters.
 
 Each recipient device may have at most 1,000 unacknowledged, unexpired inbox
 messages. A full inbox rejects a new send with `429 DM_INBOX_FULL`. At the
