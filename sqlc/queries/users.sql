@@ -30,63 +30,53 @@ LIMIT 1;
 
 -- name: UpdateUserProfile :one
 -- All fields are optional; only non-NULL params are written.
-WITH previous AS (
-    SELECT users.avatar_key, users.pending_avatar_key
-    FROM users
-    WHERE users.id = $1
+UPDATE users
+SET
+    display_name              = COALESCE(sqlc.narg('display_name'),              users.display_name),
+    bio                       = COALESCE(sqlc.narg('bio'),                       users.bio),
+    avatar_url                = COALESCE(sqlc.narg('avatar_url'),                users.avatar_url),
+    avatar_key                = CASE WHEN sqlc.narg('avatar_url') IS NOT NULL THEN NULL ELSE users.avatar_key END,
+    pending_avatar_key        = CASE WHEN sqlc.narg('avatar_url') IS NOT NULL THEN NULL ELSE users.pending_avatar_key END,
+    pending_avatar_expires_at = CASE WHEN sqlc.narg('avatar_url') IS NOT NULL THEN NULL ELSE users.pending_avatar_expires_at END,
+    is_private                = COALESCE(sqlc.narg('is_private'),                users.is_private)
+FROM (
+    SELECT u.id, u.avatar_key, u.pending_avatar_key
+    FROM users AS u
+    WHERE u.id = $1
     FOR UPDATE
-),
-updated AS (
-    UPDATE users
-    SET
-        display_name = COALESCE(sqlc.narg('display_name'), display_name),
-        bio          = COALESCE(sqlc.narg('bio'),          bio),
-        avatar_url   = COALESCE(sqlc.narg('avatar_url'),   avatar_url),
-        avatar_key   = CASE WHEN sqlc.narg('avatar_url') IS NOT NULL THEN NULL ELSE avatar_key END,
-        pending_avatar_key = CASE WHEN sqlc.narg('avatar_url') IS NOT NULL THEN NULL ELSE pending_avatar_key END,
-        pending_avatar_expires_at = CASE WHEN sqlc.narg('avatar_url') IS NOT NULL THEN NULL ELSE pending_avatar_expires_at END,
-        is_private   = COALESCE(sqlc.narg('is_private'),   is_private)
-    WHERE users.id = $1
-    RETURNING users.*
-)
-SELECT updated.id,
-       updated.zitadel_id,
-       updated.username,
-       updated.display_name,
-       updated.bio,
-       updated.avatar_url,
-       updated.is_private,
-       updated.is_active,
-       updated.deleted_at,
-       updated.created_at,
-       updated.avatar_key,
-       updated.pending_avatar_key,
-       updated.pending_avatar_expires_at,
-       previous.avatar_key AS previous_avatar_key,
-       previous.pending_avatar_key AS previous_pending_avatar_key
-FROM updated
-CROSS JOIN previous;
+) AS previous
+WHERE users.id = previous.id
+RETURNING users.id,
+          users.zitadel_id,
+          users.username,
+          users.display_name,
+          users.bio,
+          users.avatar_url,
+          users.is_private,
+          users.is_active,
+          users.deleted_at,
+          users.created_at,
+          users.avatar_key,
+          users.pending_avatar_key,
+          users.pending_avatar_expires_at,
+          previous.avatar_key AS previous_avatar_key,
+          previous.pending_avatar_key AS previous_pending_avatar_key;
 
 -- name: SetPendingAvatarUpload :one
 -- Replaces any earlier, unconfirmed avatar upload for the user.
-WITH previous AS (
-    SELECT pending_avatar_key
-    FROM users
-    WHERE users.id = $1 AND is_active = TRUE
+UPDATE users
+SET pending_avatar_key = $2,
+    pending_avatar_expires_at = $3
+FROM (
+    SELECT u.id, u.pending_avatar_key
+    FROM users AS u
+    WHERE u.id = $1 AND u.is_active = TRUE
     FOR UPDATE
-),
-updated AS (
-    UPDATE users
-    SET pending_avatar_key = $2,
-        pending_avatar_expires_at = $3
-    WHERE users.id = $1 AND is_active = TRUE
-    RETURNING pending_avatar_key, pending_avatar_expires_at
-)
-SELECT updated.pending_avatar_key,
-       updated.pending_avatar_expires_at,
-       previous.pending_avatar_key AS previous_pending_avatar_key
-FROM updated
-CROSS JOIN previous;
+) AS previous
+WHERE users.id = previous.id
+RETURNING users.pending_avatar_key,
+          users.pending_avatar_expires_at,
+          previous.pending_avatar_key AS previous_pending_avatar_key;
 
 -- name: ConfirmAvatarUpload :one
 -- Promotes only the currently pending, unexpired key. The old key is

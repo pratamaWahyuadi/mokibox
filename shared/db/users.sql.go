@@ -346,24 +346,19 @@ func (q *Queries) ListUsersEligibleForReconcile(ctx context.Context, limit int32
 }
 
 const setPendingAvatarUpload = `-- name: SetPendingAvatarUpload :one
-WITH previous AS (
-    SELECT pending_avatar_key
-    FROM users
-    WHERE users.id = $1 AND is_active = TRUE
+UPDATE users
+SET pending_avatar_key = $2,
+    pending_avatar_expires_at = $3
+FROM (
+    SELECT u.id, u.pending_avatar_key
+    FROM users AS u
+    WHERE u.id = $1 AND u.is_active = TRUE
     FOR UPDATE
-),
-updated AS (
-    UPDATE users
-    SET pending_avatar_key = $2,
-        pending_avatar_expires_at = $3
-    WHERE users.id = $1 AND is_active = TRUE
-    RETURNING pending_avatar_key, pending_avatar_expires_at
-)
-SELECT updated.pending_avatar_key,
-       updated.pending_avatar_expires_at,
-       previous.pending_avatar_key AS previous_pending_avatar_key
-FROM updated
-CROSS JOIN previous
+) AS previous
+WHERE users.id = previous.id
+RETURNING users.pending_avatar_key,
+          users.pending_avatar_expires_at,
+          previous.pending_avatar_key AS previous_pending_avatar_key
 `
 
 type SetPendingAvatarUploadParams struct {
@@ -426,42 +421,37 @@ func (q *Queries) TombstoneUser(ctx context.Context, id uuid.UUID) (User, error)
 }
 
 const updateUserProfile = `-- name: UpdateUserProfile :one
-WITH previous AS (
-    SELECT users.avatar_key, users.pending_avatar_key
-    FROM users
-    WHERE users.id = $1
+UPDATE users
+SET
+    display_name              = COALESCE($2,              users.display_name),
+    bio                       = COALESCE($3,                       users.bio),
+    avatar_url                = COALESCE($4,                users.avatar_url),
+    avatar_key                = CASE WHEN $4 IS NOT NULL THEN NULL ELSE users.avatar_key END,
+    pending_avatar_key        = CASE WHEN $4 IS NOT NULL THEN NULL ELSE users.pending_avatar_key END,
+    pending_avatar_expires_at = CASE WHEN $4 IS NOT NULL THEN NULL ELSE users.pending_avatar_expires_at END,
+    is_private                = COALESCE($5,                users.is_private)
+FROM (
+    SELECT u.id, u.avatar_key, u.pending_avatar_key
+    FROM users AS u
+    WHERE u.id = $1
     FOR UPDATE
-),
-updated AS (
-    UPDATE users
-    SET
-        display_name = COALESCE($2, display_name),
-        bio          = COALESCE($3,          bio),
-        avatar_url   = COALESCE($4,   avatar_url),
-        avatar_key   = CASE WHEN $4 IS NOT NULL THEN NULL ELSE avatar_key END,
-        pending_avatar_key = CASE WHEN $4 IS NOT NULL THEN NULL ELSE pending_avatar_key END,
-        pending_avatar_expires_at = CASE WHEN $4 IS NOT NULL THEN NULL ELSE pending_avatar_expires_at END,
-        is_private   = COALESCE($5,   is_private)
-    WHERE users.id = $1
-    RETURNING users.id, users.zitadel_id, users.username, users.display_name, users.bio, users.avatar_url, users.is_private, users.is_active, users.deleted_at, users.created_at, users.avatar_key, users.pending_avatar_key, users.pending_avatar_expires_at
-)
-SELECT updated.id,
-       updated.zitadel_id,
-       updated.username,
-       updated.display_name,
-       updated.bio,
-       updated.avatar_url,
-       updated.is_private,
-       updated.is_active,
-       updated.deleted_at,
-       updated.created_at,
-       updated.avatar_key,
-       updated.pending_avatar_key,
-       updated.pending_avatar_expires_at,
-       previous.avatar_key AS previous_avatar_key,
-       previous.pending_avatar_key AS previous_pending_avatar_key
-FROM updated
-CROSS JOIN previous
+) AS previous
+WHERE users.id = previous.id
+RETURNING users.id,
+          users.zitadel_id,
+          users.username,
+          users.display_name,
+          users.bio,
+          users.avatar_url,
+          users.is_private,
+          users.is_active,
+          users.deleted_at,
+          users.created_at,
+          users.avatar_key,
+          users.pending_avatar_key,
+          users.pending_avatar_expires_at,
+          previous.avatar_key AS previous_avatar_key,
+          previous.pending_avatar_key AS previous_pending_avatar_key
 `
 
 type UpdateUserProfileParams struct {
