@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MokiBox API — Swagger UI</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+  <style>
+    body { margin: 0; padding: 0; }
+    .topbar { display: flex; align-items: center; gap: 16px; padding: 8px 16px; border-bottom: 1px solid #eee; }
+    .topbar h1 { font-size: 20px; }
+    .topbar a { color: #4990e2; }
+    #swagger-ui { max-width: 1200px; margin: 0 auto; }
+  </style>
+</head>
+<body>
+<div class="topbar">
+  <h1>MokiBox API</h1>
+  <a href="/api/docs/swagger.json">raw OpenAPI spec</a>
+  <a href="https://github.com/pratamaWahyuadi/mokibox">repo</a>
+</div>
+<div id="swagger-ui"></div>
+<script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+<script>
+  window.onload = function () {
+    window.ui = SwaggerUIBundle({
+      url: "/api/docs/swagger.json",
+      dom_id: "#swagger-ui",
+      deepLinking: true,
+      persistAuthorization: true,
+      oauth2RedirectUrl: location.origin + "/api/docs/oauth2-redirect.html",
+      presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
+      layout: "BaseLayout"
+    });
+    // Interactive login: Zitadel OIDC Authorization Code + PKCE (S256,
+    // public client, no client secret).
+    window.ui.initOAuth({
+      clientId: "400880216702054403",
+      usePkceWithAuthorizationCodeGrant: true,
+      scopes: "openid profile email urn:zitadel:iam:org:project:id:392147270604222467:aud",
+    });
+  };
+</script>
+</body>
+</html>

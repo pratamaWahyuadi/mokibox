@@ -42,6 +42,9 @@
 //   - GET  /api/notifications                (auth)
 //   - PUT  /api/notifications/read-all       (auth)
 //   - DELETE /api/users/me                   (auth)
+//   - GET  /api/docs/swagger.json             (no auth; raw OpenAPI spec)
+//   - GET  /api/docs/                         (no auth; minimal Swagger UI index)
+//   - GET  /api/docs                          (no auth; same as above)
 //
 // Phase 9 finalises the global HTTP error handler, the
 // body validator, and the production main.go that
@@ -329,6 +332,13 @@ func NewRouter(d RouterDeps) *echo.Echo {
 		panic(fmt.Sprintf("api-gateway: NewAccountHandler: %v", err))
 	}
 	api.DELETE("/users/me", ah.DeleteMe)
+
+	// Public API-contract docs: the raw OpenAPI spec and a
+	// minimal Swagger UI index, mounted outside the auth
+	// group so the contract is readable anonymously.
+	// Spec lives in api-gateway/docs/swagger.json (go:embed
+	// into docs.go), covering every route above.
+	registerDocsRoutes(e)
 
 	return e
 }
