@@ -1,0 +1,1281 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "MokiBox API",
+    "description": "Backend video-sharing MVP (TikTok-clone), served by api-gateway. All endpoints below are proxied by Nginx (port 80/443) under /api/. Responses use the shared envelope: {\"data\": <resource>} for single resources, {\"data\": [...], \"pagination\": {\"next_cursor\": ...|null}} for lists, and {\"error\": {\"code\", \"message\", \"details?\"}} for errors. Errors collapse unauthorized reads to 404 (anti-enumeration); see shared/errors.go for the stable code list.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "API root. Behind the Nginx edge (default in production); paths below are absolute (they start with /api/)."
+    }
+  ],
+  "tags": [
+    {"name": "Health", "description": "Public liveness probe."},
+    {"name": "Docs", "description": "OpenAPI spec + Swagger UI index (no auth)."},
+    {"name": "Webhook", "description": "Zitadel Actions V2 webhook (HMAC-verified, no JWT)."},
+    {"name": "Users", "description": "User profiles, follow graph, account deletion."},
+    {"name": "Avatar", "description": "R2 avatar upload-intent / confirm flow."},
+    {"name": "Videos", "description": "Video upload pipeline (intent/confirm), feed, detail, status, playlist, delete."},
+    {"name": "Search", "description": "Search users and videos."},
+    {"name": "Social", "description": "Like, view tracking, comments, replies."},
+    {"name": "Notifications", "description": "Notification inbox."},
+    {"name": "Account", "description": "Self-service account deletion."}
+  ],
+  "security": [
+    {"zitadelOAuth": ["openid","profile","email","urn:zitadel:iam:org:project:id:392147270604222467:aud"]}
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "tags": ["Health"],
+        "operationId": "healthz",
+        "summary": "Public liveness probe — always 200 while the gateway process is alive.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/HealthStatus"}}}
+          },
+          "4XX": {"$ref": "#/components/responses/Validation"}
+        },
+        "security": []
+      }
+    },
+    "/api/docs/swagger.json": {
+      "get": {
+        "tags": ["Docs"],
+        "operationId": "getSwaggerSpec",
+        "summary": "Serve the raw OpenAPI 3.0 document (this file).",
+        "responses": {
+          "200": {
+            "description": "OpenAPI document",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DocsSwaggerSpec"}}}
+          },
+          "4XX": {"$ref": "#/components/responses/Validation"}
+        },
+        "security": []
+      }
+    },
+    "/api/docs": {
+      "get": {
+        "tags": ["Docs"],
+        "operationId": "swaggerIndex",
+        "summary": "Minimal Swagger UI page (loaded from CDN) rendering the spec at /api/docs/swagger.json. Also served as /api/docs/ (trailing-slash alias).",
+        "responses": {
+          "200": {
+            "description": "HTML page",
+            "content": {"text/html; charset=utf-8": {"schema": {"type": "string"}}}
+          },
+          "4XX": {"$ref": "#/components/responses/Validation"}
+        },
+        "security": []
+      }
+    },
+    "/api/webhooks/zitadel": {
+      "post": {
+        "tags": ["Webhook"],
+        "operationId": "zitadelWebhook",
+        "summary": "Actions V2 webhook from Zitadel (user.deactivated, user.removed). Signature-verified; no JWT.",
+        "description": "Verified via the ZITADEL-Signature header: HMAC-SHA256 over `<unix-seconds>.<raw_body>` — the signature input is the Unix timestamp in decimal + \".\" + the exact raw request body (zitadel-go actions.computeSignature: mac.Write(fmt.Sprintf(\"%d\", t.Unix())); mac.Write([]byte(\".\")); mac.Write(payload)), keyed with the HMAC signing key. Header format `t=<unix-seconds>,v1=<hex>` (dual-header fallback), 300s timestamp tolerance. Rate limited: 0.5/s (30/min), burst 30, per client IP. Any other event_type -> 400 WEBHOOK_EVENT_UNSUPPORTED. Successful 200 responses contain {\"status\":\"processed\"} inside the shared envelope's data field — there is NO `event` field on the 200 body.",
+        "security": [],
+        "parameters": [
+          {"$ref": "#/components/parameters/ZitadelSignature"}
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "Actions V2 event payload (case-sensitive field names).",
+          "content": {
+            "application/json": {"schema": {"$ref": "#/components/schemas/WebhookPayload"}}
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ACK: {\"data\":{\"status\":\"processed\"}}. Also 200 when the affected user has no local row yet (nothing to do; Zitadel stops retrying).",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/WebhookAck"}}}
+          },
+          "400": {
+            "description": "Bad payload shape or unsupported event_type (WEBHOOK_EVENT_UNSUPPORTED).",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}
+          },
+          "401": {
+            "description": "401 WEBHOOK_INVALID_SIGNATURE — signature missing, mismatched, or stale.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}
+          }
+        }
+      }
+    },
+    "/api/users/me": {
+      "get": {
+        "tags": ["Users"],
+        "operationId": "getMe",
+        "summary": "Get the authenticated user's profile.",
+        "responses": {
+          "200": {
+            "description": "Current user's profile",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/UserProfile"}}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"}
+        }
+      },
+      "put": {
+        "tags": ["Users"],
+        "operationId": "updateMe",
+        "summary": "Partially update the authenticated user's profile (display_name, bio, avatar_url, is_private).",
+        "description": "All fields optional; omitted fields are left unchanged (COALESCE semantics). Passing back one of the user's own presigned R2 avatar URLs keeps the avatar — otherwise use avatar upload-intent/confirm. Rejected for other users' URLs.",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/UpdateMeRequest"}}}
+        },
+        "responses": {
+          "200": {
+            "description": "Updated profile",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/UserProfile"}}}
+          },
+          "400": {"$ref": "#/components/responses/Validation"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "500": {"$ref": "#/components/responses/Internal"}
+        }
+      },
+      "delete": {
+        "tags": ["Account"],
+        "operationId": "deleteMe",
+        "summary": "Delete the authenticated user's account (self-service tombstone; 204 on success).",
+        "description": "Soft delete: users row tombstoned (is_active=false, deleted_at set, username rewritten to deleted_<id>), counter corrections applied, videos/likes/comments/follows/notifications deleted, R2 objects scheduled for cleanup via the cleanup:objects queue task.",
+        "responses": {
+          "204": {"description": "Account deleted (no body)."},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "500": {"$ref": "#/components/responses/Internal"}
+        }
+      }
+    },
+    "/api/users/{id}": {
+      "get": {
+        "tags": ["Users"],
+        "operationId": "getUserProfile",
+        "summary": "Get the public profile of a user plus follow-graph stats.",
+        "description": "Inactive or missing users return 404 (anti-enumeration). Private accounts: only the owner or followers see the full profile; others get 404.",
+        "parameters": [
+          {"$ref": "#/components/parameters/UserId"}
+        ],
+        "responses": {
+          "200": {
+            "description": "Profile + stats",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/UserProfileWithStats"}}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {"$ref": "#/components/responses/NotFound"}
+        }
+      }
+    },
+    "/api/users/{id}/videos": {
+      "get": {
+        "tags": ["Users"],
+        "operationId": "getUserVideos",
+        "summary": "List videos owned by a user (cursor paginated).",
+        "description": "Owner sees all statuses except DELETED; non-owners see READY videos only (private accounts: followers only, otherwise 404).",
+        "parameters": [
+          {"$ref": "#/components/parameters/UserId"},
+          {"$ref": "#/components/parameters/Limit"},
+          {"$ref": "#/components/parameters/Cursor"}
+        ],
+        "responses": {
+          "200": {
+            "description": "Page envelope: data = [UserVideoItem], pagination.next_cursor null on last page",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/UserVideosPage"}}}
+          },
+          "400": {"$ref": "#/components/responses/Validation"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "500": {"$ref": "#/components/responses/Internal"}
+        }
+      }
+    },
+    "/api/users/me/avatar/upload-intent": {
+      "post": {
+        "tags": ["Avatar"],
+        "operationId": "avatarUploadIntent",
+        "summary": "Start an avatar upload: returns a presigned PUT URL for the raw file (JPEG/PNG/WebP, ≤5 MiB).",
+        "description": "The file is uploaded directly to Cloudflare R2 — NOT through this gateway (no body limit here). Existing intent for this user is replaced; previous key scheduled for cleanup. upload_url expires after the presign TTL (default 15 min). Rejects anything that is not a real JPEG/PNG/WebP image at confirm time.",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AvatarUploadIntentRequest"}}}
+        },
+        "responses": {
+          "201": {
+            "description": "New upload intent created",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AvatarUploadIntentResponse"}}}
+          },
+          "400": {
+            "description": "VALIDATION_ERROR (invalid JSON / body shape) or 400 for unsupported content_type (must be image/jpeg, image/png, or image/webp)",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "500": {"$ref": "#/components/responses/Internal"}
+        }
+      }
+    },
+    "/api/users/me/avatar/confirm": {
+      "post": {
+        "tags": ["Avatar"],
+        "operationId": "avatarConfirmUpload",
+        "summary": "Confirm the avatar upload: validates the object (present, ≤5 MiB, real JPEG/PNG/WebP bytes) and activates avatar_key.",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AvatarConfirmRequest"}}}
+        },
+        "responses": {
+          "200": {
+            "description": "Avatar confirmed; avatar_url is now active",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AvatarConfirmResponse"}}}
+          },
+          "400": {"$ref": "#/components/responses/Validation"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "409": {
+            "description": "AVATAR_UPLOAD_CONFLICT (intent expired/replaced), UPLOAD_MISSING (object not in R2), or UPLOAD_SIZE_INVALID.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}
+          },
+          "500": {"$ref": "#/components/responses/Internal"}
+        }
+      }
+    },
+    "/api/users/{id}/follow": {
+      "post": {
+        "tags": ["Social"],
+        "operationId": "followUser",
+        "summary": "Follow a user (idempotent — ON CONFLICT DO NOTHING; existing row untouched).",
+        "description": "Self-follow -> 400 SELF_FOLLOW_NOT_ALLOWED (explicit denial, not anti-enumeration). Inactive target -> 404. A best-effort `follow` notification is inserted for the target (failure does not undo the follow).",
+        "parameters": [
+          {"$ref": "#/components/parameters/UserId"}
+        ],
+        "responses": {
+          "200": {
+            "description": "Follow established (or already existed)",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/FollowObject"}}}
+          },
+          "400": {
+            "description": "400 — SELF_FOLLOW_NOT_ALLOWED or VALIDATION_ERROR",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {"$ref": "#/components/responses/NotFound"}
+        }
+      },
+      "delete": {
+        "tags": ["Social"],
+        "operationId": "unfollowUser",
+        "summary": "Unfollow a user (idempotent — silently no-ops on missing rows).",
+        "description": "Wire response always reports is_following=false, created_at=\"\" (no row to timestamp).",
+        "parameters": [
+          {"$ref": "#/components/parameters/UserId"}
+        ],
+        "responses": {
+          "200": {
+            "description": "Unfollow applied",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/FollowObject"}}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"}
+        }
+      }
+    },
+    "/api/users/{id}/followers": {
+      "get": {
+        "tags": ["Social"],
+        "operationId": "listFollowers",
+        "summary": "List followers of a user (cursor paginated).",
+        "description": "Private accounts: visible to followers only; everyone else gets 404 (anti-enumeration). Owner always sees the own list.",
+        "parameters": [
+          {"$ref": "#/components/parameters/UserId"},
+          {"$ref": "#/components/parameters/Limit"},
+          {"$ref": "#/components/parameters/Cursor"}
+        ],
+        "responses": {
+          "200": {
+            "description": "Page envelope: data = [FollowListItem] ({user: UserSummary, created_at})",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/FollowListPage"}}}
+          },
+          "400": {"$ref": "#/components/responses/Validation"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {"$ref": "#/components/responses/NotFound"}
+        }
+      }
+    },
+    "/api/users/{id}/following": {
+      "get": {
+        "tags": ["Social"],
+        "operationId": "listFollowing",
+        "summary": "List users followed by a user (cursor paginated).",
+        "description": "Same visibility rule as followers (private accounts: followers only, otherwise 404).",
+        "parameters": [
+          {"$ref": "#/components/parameters/UserId"},
+          {"$ref": "#/components/parameters/Limit"},
+          {"$ref": "#/components/parameters/Cursor"}
+        ],
+        "responses": {
+          "200": {
+            "description": "Page envelope: data = [FollowListItem] ({user: UserSummary, created_at})",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/FollowListPage"}}}
+          },
+          "400": {"$ref": "#/components/responses/Validation"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {"$ref": "#/components/responses/NotFound"}
+        }
+      }
+    },
+    "/api/videos/upload-intent": {
+      "post": {
+        "tags": ["Videos"],
+        "operationId": "videoUploadIntent",
+        "summary": "Start a video upload: returns a presigned PUT URL for the raw file (uploaded directly to R2).",
+        "description": "Title required (1–200 visible chars after trim; whitespace-only rejected). Description optional (max 5000 chars). Reuses the user's PENDING_UPLOAD row when one exists (r2_key rotated, previous key scheduled for cleanup). 201 on create, 200 on reuse. Client must PUT with Content-Type: application/octet-stream. Size 1 KiB–200 MiB (validated at confirm).",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/UploadIntentRequest"}}}
+        },
+        "responses": {
+          "201": {
+            "description": "New upload intent created",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/UploadIntentResponse"}}}
+          },
+          "200": {
+            "description": "Pending row reused",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/UploadIntentResponse"}}}
+          },
+          "400": {"$ref": "#/components/responses/Validation"},
+          "401": {"$ref": "#/components/responses/Unauthorized"}
+        }
+      }
+    },
+    "/api/videos/confirm": {
+      "post": {
+        "tags": ["Videos"],
+        "operationId": "videoConfirm",
+        "summary": "Confirm the uploaded video: flips PENDING_UPLOAD → PROCESSING and enqueues the transcode job.",
+        "description": "video_id and r2_key must both match the row. R2 object checked at confirm (HeadObject + size 1 KiB–200 MiB + owner match): missing -> 409 UPLOAD_MISSING (row stays PENDING_UPLOAD); out-of-range -> 400 UPLOAD_SIZE_INVALID (invalid object scheduled for cleanup, row stays PENDING_UPLOAD); concurrent mutation -> 409 VIDEO_STATUS_CONFLICT. Asynq retries: 1 queue-level retry (MaxRetry(1)); worker re-enqueues up to 3 application-level retries with ProcessIn(30s * retry_count).",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ConfirmRequest"}}}
+        },
+        "responses": {
+          "200": {
+            "description": "Video confirmed; status=PROCESSING",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ConfirmResponse"}}}
+          },
+          "400": {
+            "description": "VALIDATION_ERROR (malformed body / bad video_id) or UPLOAD_SIZE_INVALID",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {
+            "description": "404 NOT_FOUND — video missing, or non-owner (anti-enumeration)",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}
+          },
+          "409": {
+            "description": "409 — VIDEO_STATUS_CONFLICT or UPLOAD_MISSING",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}
+          },
+          "500": {"$ref": "#/components/responses/Internal"}
+        }
+      }
+    },
+    "/api/feed/home": {
+      "get": {
+        "tags": ["Videos"],
+        "operationId": "getHomeFeed",
+        "summary": "Home feed: READY videos from active owners — public accounts plus accounts the viewer follows. The viewer's own videos are excluded.",
+        "description": "Pagination over (created_at DESC, id DESC); cursor is base64url of `<RFC3339Nano>|<uuid>`; a next_cursor is emitted only on full pages.",
+        "parameters": [
+          {"$ref": "#/components/parameters/Limit"},
+          {"$ref": "#/components/parameters/Cursor"}
+        ],
+        "responses": {
+          "200": {
+            "description": "Page envelope: data = [VideoObject]",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PageEnvelope"}}}
+          },
+          "400": {"$ref": "#/components/responses/Validation"},
+          "401": {"$ref": "#/components/responses/Unauthorized"}
+        }
+      }
+    },
+    "/api/search": {
+      "get": {
+        "tags": ["Search"],
+        "operationId": "search",
+        "summary": "Search users and/or videos (case-insensitive ILIKE on username/title/description; underscore/wildcard chars escaped).",
+        "parameters": [
+          {"$ref": "#/components/parameters/SearchQ"},
+          {"$ref": "#/components/parameters/SearchType"},
+          {"$ref": "#/components/parameters/Limit"},
+          {"$ref": "#/components/parameters/SearchCursor"}
+        ],
+        "responses": {
+          "200": {
+            "description": "Search response (custom envelope; data.users and data.videos are independently cursored)",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SearchResponse"}}}
+          },
+          "400": {"$ref": "#/components/responses/Validation"},
+          "401": {"$ref": "#/components/responses/Unauthorized"}
+        }
+      }
+    },
+    "/api/videos/{id}": {
+      "get": {
+        "tags": ["Videos"],
+        "operationId": "getVideoDetail",
+        "summary": "Full VideoObject for a video.",
+        "description": "Owner: any status. Non-owner: status must be READY, owner active, and — when the owner is private — the viewer must follow them. All failures collapse to 404 (anti-enumeration).",
+        "parameters": [
+          {"$ref": "#/components/parameters/VideoId"}
+        ],
+        "responses": {
+          "200": {
+            "description": "Video object",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/VideoObject"}}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {"$ref": "#/components/responses/NotFound"}
+        }
+      },
+      "delete": {
+        "tags": ["Videos"],
+        "operationId": "deleteVideo",
+        "summary": "Owner-only delete: tombstone (status=DELETED + deleted_at) and enqueue cleanup:video after 24h; 204 on success.",
+        "description": "Idempotent: already-deleted videos return 204; a non-owner or missing video returns 404 (anti-enumeration).",
+        "parameters": [
+          {"$ref": "#/components/parameters/VideoId"}
+        ],
+        "responses": {
+          "204": {"description": "Video tombstoned; cleanup:video enqueued for after the 24h grace."},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "500": {"$ref": "#/components/responses/Internal"}
+        }
+      }
+    },
+    "/api/videos/{id}/status": {
+      "get": {
+        "tags": ["Videos"],
+        "operationId": "getVideoStatus",
+        "summary": "Processing status of a video — OWNER ONLY.",
+        "description": "duration_seconds is null until the transcode completes. Non-owner or missing -> 404.",
+        "parameters": [
+          {"$ref": "#/components/parameters/VideoId"}
+        ],
+        "responses": {
+          "200": {
+            "description": "Status envelope",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/VideoStatusResponse"}}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {"$ref": "#/components/responses/NotFound"}
+        }
+      }
+    },
+    "/api/videos/{id}/playlist.m3u8": {
+      "get": {
+        "tags": ["Videos"],
+        "operationId": "getPlaylist",
+        "summary": "Signed HLS playlist for a READY video (raw application/vnd.apple.mpegurl, not the JSON envelope).",
+        "description": "Master playlist by default; pass ?variant=480p or ?variant=720p for the variant playlist whose .ts segment URLs are presigned R2 GETs. Auth: Bearer JWT OR anonymous ?token=<media token> (same handler verifies either; token path skips visibility checks). 404 if status != READY (anti-enumeration; playlist mode has no owner bypass — private owners use the ?token= path).",
+        "parameters": [
+          {"$ref": "#/components/parameters/VideoId"},
+          {"$ref": "#/components/parameters/Variant"},
+          {"$ref": "#/components/parameters/MediaToken"}
+        ],
+        "responses": {
+          "200": {
+            "description": "HLS playlist (master or variant)",
+            "content": {"application/vnd.apple.mpegurl": {"schema": {"type": "string"}}}
+          },
+          "400": {
+            "description": "400 VALIDATION_ERROR — unsupported variant (must be 480p or 720p)",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}
+          },
+          "401": {
+            "description": "401 — missing/invalid Bearer token AND no valid ?token= media token",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}
+          },
+          "404": {"$ref": "#/components/responses/NotFound"}
+        }
+      }
+    },
+    "/api/videos/{id}/like": {
+      "post": {
+        "tags": ["Social"],
+        "operationId": "likeVideo",
+        "summary": "Like a video (idempotent — re-like is a no-op returning current counter).",
+        "parameters": [
+          {"$ref": "#/components/parameters/VideoId"}
+        ],
+        "responses": {
+          "200": {
+            "description": "Like state + counter",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LikeObject"}}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {"$ref": "#/components/responses/NotFound"}
+        }
+      },
+      "delete": {
+        "tags": ["Social"],
+        "operationId": "unlikeVideo",
+        "summary": "Unlike a video (idempotent — no notification on unlike).",
+        "parameters": [
+          {"$ref": "#/components/parameters/VideoId"}
+        ],
+        "responses": {
+          "200": {
+            "description": "Like state (liked=false) + counter",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LikeObject"}}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {"$ref": "#/components/responses/NotFound"}
+        }
+      }
+    },
+    "/api/videos/{id}/view": {
+      "post": {
+        "tags": ["Social"],
+        "operationId": "trackView",
+        "summary": "Track one view (no per-user dedup — every POST counts).",
+        "parameters": [
+          {"$ref": "#/components/parameters/VideoId"}
+        ],
+        "responses": {
+          "200": {
+            "description": "Updated views counter",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ViewObject"}}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {"$ref": "#/components/responses/NotFound"}
+        }
+      }
+    },
+    "/api/videos/{id}/comments": {
+      "post": {
+        "tags": ["Social"],
+        "operationId": "createComment",
+        "summary": "Create a top-level comment (max 1000 visible chars). 201 Created; video comments_count incremented in the same tx; notification to the owner (skipped on self-comment).",
+        "parameters": [
+          {"$ref": "#/components/parameters/VideoId"}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CommentRequestBody"}}}
+        },
+        "responses": {
+          "201": {
+            "description": "Created comment (parent_id=null)",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CommentObject"}}}
+          },
+          "400": {"$ref": "#/components/responses/Validation"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "500": {"$ref": "#/components/responses/Internal"}
+        }
+      },
+      "get": {
+        "tags": ["Social"],
+        "operationId": "listComments",
+        "summary": "List comments of a video (created_at DESC, id DESC; cursor paginated).",
+        "description": "Same visibility rule as /api/videos/{id} — a private video's comments never leak; non-READY videos return 404 for non-owners.",
+        "parameters": [
+          {"$ref": "#/components/parameters/VideoId"},
+          {"$ref": "#/components/parameters/Limit"},
+          {"$ref": "#/components/parameters/Cursor"}
+        ],
+        "responses": {
+          "200": {
+            "description": "Page envelope: data = [CommentObject]",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PageEnvelope"}}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {"$ref": "#/components/responses/NotFound"}
+        }
+      }
+    },
+    "/api/comments/{id}": {
+      "delete": {
+        "tags": ["Social"],
+        "operationId": "deleteComment",
+        "summary": "Delete a comment and its whole reply subtree (owner only; 204 on success).",
+        "description": "Deletion is atomic: subtree size counted first, rows deleted, video comments_count decremented by the subtree size — all in one tx. Non-owner or missing -> 404 (anti-enumeration).",
+        "parameters": [
+          {"$ref": "#/components/parameters/CommentId"}
+        ],
+        "responses": {
+          "204": {"description": "Comment + replies deleted."},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "500": {"$ref": "#/components/responses/Internal"}
+        }
+      }
+    },
+    "/api/comments/{id}/reply": {
+      "post": {
+        "tags": ["Social"],
+        "operationId": "replyToComment",
+        "summary": "Reply to a comment — the new CommentObject carries parent_id set.",
+        "description": "Notification fan-out (deduped): video owner + parent comment author each get a type=comment notification, skipping the actor and any recipient already notified.",
+        "parameters": [
+          {"$ref": "#/components/parameters/CommentId"}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CommentRequestBody"}}}
+        },
+        "responses": {
+          "201": {
+            "description": "Reply created (parent_id set)",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CommentObject"}}}
+          },
+          "400": {"$ref": "#/components/responses/Validation"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "500": {"$ref": "#/components/responses/Internal"}
+        }
+      }
+    },
+    "/api/notifications": {
+      "get": {
+        "tags": ["Notifications"],
+        "operationId": "listNotifications",
+        "summary": "List notifications of the authenticated user (newest first; cursor paginated).",
+        "description": "payload is opaque producer-defined JSON, forwarded verbatim (follow: {username}; like: {username, video_id}; comment: {username, video_id, comment_id}).",
+        "parameters": [
+          {"$ref": "#/components/parameters/Limit"},
+          {"$ref": "#/components/parameters/Cursor"}
+        ],
+        "responses": {
+          "200": {
+            "description": "Page envelope: data = [NotificationObject]",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/NotificationPage"}}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"}
+        }
+      }
+    },
+    "/api/notifications/read-all": {
+      "put": {
+        "tags": ["Notifications"],
+        "operationId": "markNotificationsRead",
+        "summary": "Mark every unread notification as read.",
+        "description": "Idempotent; updated_count is 0 when the inbox was already fully read.",
+        "responses": {
+          "200": {
+            "description": "Number of rows flipped",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MarkAllReadResponse"}}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"}
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "Zitadel JWT (OIDC access token)",
+        "description": "Zitadel access token, verified by api-gateway/middleware.Authenticate (OIDC discovery + JWKS against ZITADEL_ISSUER_URL, audience ZITADEL_API_CLIENT_ID). The gateway resolves the local user row by id. Global security alternative for all non-public endpoints."
+      },
+        "zitadelOAuth": {
+          "type": "oauth2",
+          "description": "Login interaktif lewat tombol Authorize: Zitadel OIDC Authorization Code + PKCE (tanpa client secret).",
+          "flows": {
+            "authorizationCode": {
+              "authorizationUrl": "https://auth.mokibox.my.id/oauth/v2/authorize",
+              "tokenUrl": "https://auth.mokibox.my.id/oauth/v2/token",
+              "scopes": {
+                "openid": "OIDC",
+                "profile": "Profil",
+                "email": "Email",
+                "urn:zitadel:iam:org:project:id:392147270604222467:aud": "Audience API"
+              }
+            }
+          }
+        }
+      },
+      "parameters": {
+      "UserId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "Target user UUID (uuid.Parse on the server).",
+        "schema": {"type": "string", "format": "uuid"}
+      },
+      "VideoId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "Video UUID.",
+        "schema": {"type": "string", "format": "uuid"}
+      },
+      "CommentId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "Comment UUID.",
+        "schema": {"type": "string", "format": "uuid"}
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "description": "Page size (1–50). Default 20.",
+        "schema": {"type": "integer", "default": 20, "minimum": 1, "maximum": 50}
+      },
+      "Cursor": {
+        "name": "cursor",
+        "in": "query",
+        "required": false,
+        "description": "Opaque cursor from the previous response's pagination.next_cursor (base64url of `<RFC3339Nano>|<uuid>`). Empty = first page.",
+        "schema": {"type": "string"}
+      },
+      "SearchQ": {
+        "name": "q",
+        "in": "query",
+        "required": true,
+        "description": "Search text; trimmed; 1–100 visible characters (UTF-8 rune count); '%', '_' and '\\' are escaped for ILIKE. Underscore matches literal '_' exactly.",
+        "schema": {"type": "string", "minLength": 1, "maxLength": 100}
+      },
+      "SearchType": {
+        "name": "type",
+        "in": "query",
+        "required": false,
+        "description": "Which resource types to search. Default 'all'.",
+        "schema": {"type": "string", "enum": ["all", "users", "videos"], "default": "all"}
+      },
+      "SearchCursor": {
+        "name": "cursor",
+        "in": "query",
+        "required": false,
+        "description": "Offset cursor: base64url of `offset:<n>` (n is a non-negative integer ≤ 100000). Absent/empty = offset 0.",
+        "schema": {"type": "string"}
+      },
+      "Variant": {
+        "name": "variant",
+        "in": "query",
+        "required": false,
+        "description": "Variant playlist requested from the master playlist. Omit for the master. Note: strings are compared with < on the response side; the allow-list is {\"480p\", \"720p\"}.",
+        "schema": {"type": "string", "enum": ["480p", "720p"]}
+      },
+      "MediaToken": {
+        "name": "token",
+        "in": "query",
+        "required": false,
+        "description": "Media token minted by the API (shared.NewMediaToken over video_id). Required for anonymous access — without an Authorization header the endpoint returns 401. Valid for the configured MediaTokenTTL.",
+        "schema": {"type": "string"}
+      },
+      "ZitadelSignature": {
+        "name": "ZITADEL-Signature",
+        "in": "header",
+        "required": true,
+        "description": "Actions V2 signature header: format `t=<unix-seconds>,v1=<hex-hmac>` over the raw request body (HMAC-SHA256 with the ZITADEL_TARGET_SIGNING_KEY). Also accepts dual-header form.",
+        "schema": {"type": "string"}
+      }
+    },
+    "schemas": {
+      "HealthStatus": {
+        "type": "object",
+        "description": "GET /healthz response (handlers.HealthHandler). Trivial by design — Docker healthcheck is the liveness authority.",
+        "properties": {
+          "status": {"type": "string", "example": "ok"}
+        },
+        "required": ["status"]
+      },
+      "DocsSwaggerSpec": {
+        "type": "object",
+        "description": "The raw OpenAPI 3.0.3 document served by GET /api/docs/swagger.json (this file, embedded via go:embed).",
+        "additionalProperties": true
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "description": "The error envelope produced by shared.RespondError — the canonical {\"error\":{...}} shape used by every endpoint.",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "Machine-readable code from shared/errors.go, e.g. VALIDATION_ERROR, UNAUTHORIZED, FORBIDDEN, NOT_FOUND, VIDEO_STATUS_CONFLICT, AVATAR_UPLOAD_CONFLICT, VIDEO_NOT_READY, UPLOAD_MISSING, UPLOAD_SIZE_INVALID, SELF_FOLLOW_NOT_ALLOWED, WEBHOOK_INVALID_SIGNATURE, WEBHOOK_EVENT_UNSUPPORTED, INTERNAL_ERROR, RATE_LIMITED.",
+                "example": "NOT_FOUND"
+              },
+              "message": {"type": "string"},
+              "details": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "field": {"type": "string"},
+                    "message": {"type": "string"}
+                  },
+                  "required": ["field", "message"]
+                }
+              }
+            },
+            "required": ["code", "message"]
+          }
+        },
+        "required": ["error"]
+      },
+      "UserProfile": {
+        "type": "object",
+        "description": "User profile — shared by GET/PUT /api/users/me and GET /api/users/{id} (userProfileResponse). avatar_url is a short-lived presigned R2 GET when the user has an R2-hosted avatar; null otherwise.",
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string", "format": "uuid"},
+          "username": {"type": "string", "description": "Unique username — immutable."},
+          "display_name": {"type": "string", "nullable": true, "maxLength": 100},
+          "bio": {"type": "string", "nullable": true, "maxLength": 500},
+          "avatar_url": {"type": "string", "nullable": true},
+          "is_private": {"type": "boolean"},
+          "is_active": {"type": "boolean"},
+          "created_at": {"type": "string", "format": "date-time"}
+        },
+        "required": ["id", "username", "display_name", "bio", "avatar_url", "is_private", "is_active", "created_at"]
+      },
+      "UserProfileWithStats": {
+        "type": "object",
+        "description": "UserProfile + follow-graph stats, returned by GET /api/users/{id}.",
+        "allOf": [
+          {"$ref": "#/components/schemas/UserProfile"},
+          {
+            "type": "object",
+            "properties": {
+              "is_following": {"type": "boolean"},
+              "follower_count": {"type": "integer", "minimum": 0},
+              "following_count": {"type": "integer", "minimum": 0}
+            },
+            "required": ["is_following", "follower_count", "following_count"]
+          }
+        ]
+      },
+      "UserSummary": {
+        "type": "object",
+        "description": "Narrow user reference embedded in VideoObject, CommentObject, follow lists, and search results. Deliberately excludes bio / is_active / created_at.",
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string", "format": "uuid"},
+          "username": {"type": "string"},
+          "display_name": {"type": "string", "nullable": true},
+          "avatar_url": {"type": "string", "nullable": true},
+          "is_private": {"type": "boolean"}
+        },
+        "required": ["id", "username", "display_name", "avatar_url", "is_private"]
+      },
+      "VideoStatus": {
+        "type": "string",
+        "enum": ["PENDING_UPLOAD", "PROCESSING", "READY", "FAILED", "DELETED"]
+      },
+      "VideoObject": {
+        "type": "object",
+        "description": "One video entry on feed / detail / search results (handlers/video_object.go). thumbnail_url is a presigned R2 GET (MediaTokenTTL window); hls_playlist_url points at the playlist endpoint with an embedded media token.",
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string", "format": "uuid"},
+          "user_id": {"type": "string", "format": "uuid"},
+          "title": {"type": "string", "nullable": true},
+          "description": {"type": "string", "nullable": true},
+          "duration_seconds": {"type": "integer", "nullable": true, "description": "Populated after the transcode completes (status=READY)."},
+          "status": {"$ref": "#/components/schemas/VideoStatus"},
+          "retry_count": {"type": "integer", "minimum": 0},
+          "likes_count": {"type": "integer", "minimum": 0},
+          "views_count": {"type": "integer", "minimum": 0},
+          "comments_count": {"type": "integer", "minimum": 0},
+          "created_at": {"type": "string", "format": "date-time"},
+          "thumbnail_url": {"type": "string", "nullable": true},
+          "hls_playlist_url": {"type": "string", "nullable": true},
+          "liked_by_me": {"type": "boolean"},
+          "is_owner": {"type": "boolean"},
+          "user": {"$ref": "#/components/schemas/UserSummary"}
+        },
+        "required": ["id", "user_id", "title", "description", "duration_seconds", "status", "retry_count", "likes_count", "views_count", "comments_count", "created_at", "thumbnail_url", "hls_playlist_url", "liked_by_me", "is_owner", "user"]
+      },
+      "UserVideoItem": {
+        "type": "object",
+        "description": "Subset of VideoObject returned by GET /api/users/{id}/videos (userVideoItem). LikedByMe and ThumbnailURL/HLSPlaylistURL are always null today — like state and presigning are not wired on this endpoint.",
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string", "format": "uuid"},
+          "user_id": {"type": "string", "format": "uuid"},
+          "title": {"type": "string", "nullable": true},
+          "description": {"type": "string", "nullable": true},
+          "duration_seconds": {"type": "integer", "nullable": true},
+          "status": {"$ref": "#/components/schemas/VideoStatus"},
+          "retry_count": {"type": "integer", "minimum": 0},
+          "likes_count": {"type": "integer", "minimum": 0},
+          "views_count": {"type": "integer", "minimum": 0},
+          "comments_count": {"type": "integer", "minimum": 0},
+          "created_at": {"type": "string", "format": "date-time"},
+          "thumbnail_url": {"type": "string", "nullable": true},
+          "hls_playlist_url": {"type": "string", "nullable": true},
+          "liked_by_me": {"type": "boolean", "nullable": true},
+          "is_owner": {"type": "boolean"}
+        },
+        "required": ["id", "user_id", "title", "description", "duration_seconds", "status", "retry_count", "likes_count", "views_count", "comments_count", "created_at", "thumbnail_url", "hls_playlist_url", "liked_by_me", "is_owner"]
+      },
+      "CommentObject": {
+        "type": "object",
+        "description": "One comment (top-level or reply) on a video. parent_id is null for top-level comments.",
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string", "format": "uuid"},
+          "video_id": {"type": "string", "format": "uuid"},
+          "user_id": {"type": "string", "format": "uuid"},
+          "parent_id": {"type": "string", "format": "uuid", "nullable": true},
+          "content": {"type": "string", "description": "Visible length 1–1000 characters."},
+          "created_at": {"type": "string", "format": "date-time"},
+          "user": {"$ref": "#/components/schemas/UserSummary"}
+        },
+        "required": ["id", "video_id", "user_id", "parent_id", "content", "created_at", "user"]
+      },
+      "LikeObject": {
+        "type": "object",
+        "description": "Response of the like / unlike endpoints (handlers/social.go).",
+        "additionalProperties": false,
+        "properties": {
+          "video_id": {"type": "string", "format": "uuid"},
+          "liked": {"type": "boolean"},
+          "likes_count": {"type": "integer", "minimum": 0}
+        },
+        "required": ["video_id", "liked", "likes_count"]
+      },
+      "ViewObject": {
+        "type": "object",
+        "description": "Response of POST /api/videos/{id}/view.",
+        "additionalProperties": false,
+        "properties": {
+          "video_id": {"type": "string", "format": "uuid"},
+          "views_count": {"type": "integer", "minimum": 0}
+        },
+        "required": ["video_id", "views_count"]
+      },
+      "FollowObject": {
+        "type": "object",
+        "description": "Response of the follow / unfollow endpoints.",
+        "additionalProperties": false,
+        "properties": {
+          "follower_id": {"type": "string", "format": "uuid"},
+          "followee_id": {"type": "string", "format": "uuid"},
+          "is_following": {"type": "boolean"},
+          "created_at": {"type": "string", "description": "ISO-8601; empty string on unfollow (no row to timestamp)."}
+        },
+        "required": ["follower_id", "followee_id", "is_following", "created_at"]
+      },
+      "FollowListItem": {
+        "type": "object",
+        "description": "One entry in GET /api/users/{id}/followers and /following.",
+        "additionalProperties": false,
+        "properties": {
+          "user": {"$ref": "#/components/schemas/UserSummary"},
+          "created_at": {"type": "string", "format": "date-time"}
+        },
+        "required": ["user", "created_at"]
+      },
+      "NotificationObject": {
+        "type": "object",
+        "description": "One inbox notification.",
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string", "format": "uuid"},
+          "user_id": {"type": "string", "format": "uuid"},
+          "actor_id": {"type": "string", "format": "uuid"},
+          "type": {"type": "string", "enum": ["follow", "like", "comment"]},
+          "payload": {
+            "type": "object",
+            "description": "Opaque producer-defined JSON (string→string maps today: {username, video_id, comment_id}).",
+            "additionalProperties": {"type": "string"}
+          },
+          "is_read": {"type": "boolean"},
+          "created_at": {"type": "string", "format": "date-time"}
+        },
+        "required": ["id", "user_id", "actor_id", "type", "payload", "is_read", "created_at"]
+      },
+      "UploadIntentRequest": {
+        "type": "object",
+        "description": "Body of POST /api/videos/upload-intent. Title is required (1–200 visible chars after trim; whitespace-only rejected). Description is optional (max 5000 chars).",
+        "additionalProperties": false,
+        "properties": {
+          "title": {"type": "string", "maxLength": 200, "description": "Required, non-whitespace after trim."},
+          "description": {"type": "string", "maxLength": 5000}
+        },
+        "required": ["title"]
+      },
+      "UploadIntentResponse": {
+        "type": "object",
+        "description": "Response of POST /api/videos/upload-intent (handlers/video.go uploadIntentResponse). Client PUTs the raw video to upload_url with Content-Type: application/octet-stream. upload_url expires after the presign TTL (default 15 min). Size 1 KiB–200 MiB (validated at confirm).",
+        "additionalProperties": false,
+        "properties": {
+          "video_id": {"type": "string", "format": "uuid"},
+          "r2_key": {"type": "string", "description": "Canonical key uploads/<userID>/<videoID>/source.mp4 — pass to /api/videos/confirm."},
+          "http_method": {"type": "string", "example": "PUT"},
+          "upload_url": {"type": "string", "format": "uri"},
+          "upload_headers": {
+            "type": "object",
+            "description": "Headers the client must send on the presigned PUT (e.g. Content-Type: application/octet-stream).",
+            "additionalProperties": {"type": "string"}
+          },
+          "min_size_bytes": {"type": "integer", "example": 1024},
+          "max_size_bytes": {"type": "integer", "example": 209715200},
+          "expires_at": {"type": "string", "format": "date-time"}
+        },
+        "required": ["video_id", "r2_key", "http_method", "upload_url", "upload_headers", "min_size_bytes", "max_size_bytes", "expires_at"]
+      },
+      "ConfirmRequest": {
+        "type": "object",
+        "description": "Body of POST /api/videos/confirm. video_id + r2_key must match the row.",
+        "additionalProperties": false,
+        "properties": {
+          "video_id": {"type": "string", "format": "uuid"},
+          "r2_key": {"type": "string", "minLength": 1}
+        },
+        "required": ["video_id", "r2_key"]
+      },
+      "ConfirmResponse": {
+        "type": "object",
+        "description": "Response of POST /api/videos/confirm (handlers/video.go confirmResponse).",
+        "additionalProperties": false,
+        "properties": {
+          "video_id": {"type": "string", "format": "uuid"},
+          "status": {"type": "string", "example": "PROCESSING"},
+          "retry_count": {"type": "integer", "minimum": 0, "description": "Always 0 on success (the confirm query resets it)."}
+        },
+        "required": ["video_id", "status", "retry_count"]
+      },
+      "UpdateMeRequest": {
+        "type": "object",
+        "description": "Body of PUT /api/users/me. Omitted/null fields are left unchanged.",
+        "additionalProperties": false,
+        "properties": {
+          "display_name": {"type": "string", "maxLength": 100},
+          "bio": {"type": "string", "maxLength": 500},
+          "avatar_url": {"type": "string", "maxLength": 500, "description": "Behaviour (per UpdateMe in handlers/user.go): if the value is the user's own presigned R2 avatar URL — https://<r2-host>/<bucket>/avatars/<userID>/<uuid>.<ext> with X-Amz-* query params (isPresignedAvatarURLForUser) — the request is IGNORED (field left unchanged). Any other non-null value is stored as the legacy avatar_url field and the user's previous R2 avatar key is scheduled for cleanup. Omitted/null: no change. New avatars should go through the avatar upload-intent/confirm flow."},
+          "is_private": {"type": "boolean"}
+        }
+      },
+      "AvatarUploadIntentRequest": {
+        "type": "object",
+        "description": "Body of POST /api/users/me/avatar/upload-intent.",
+        "additionalProperties": false,
+        "properties": {
+          "content_type": {
+            "type": "string",
+            "enum": ["image/jpeg", "image/png", "image/webp"],
+            "description": "Avatar format. Actual bytes are decoded and format-checked at confirm (dimensions not currently bounded)."
+          }
+        },
+        "required": ["content_type"]
+      },
+      "AvatarUploadIntentResponse": {
+        "type": "object",
+        "description": "Response of POST /api/users/me/avatar/upload-intent (handlers/avatar.go).",
+        "additionalProperties": false,
+        "properties": {
+          "avatar_key": {"type": "string", "description": "Key of the form avatars/<userID>/<uuid>.<ext> — pass to /api/users/me/avatar/confirm."},
+          "http_method": {"type": "string", "example": "PUT"},
+          "upload_url": {"type": "string", "format": "uri"},
+          "upload_headers": {
+            "type": "object",
+            "additionalProperties": {"type": "string"}
+          },
+          "max_size_bytes": {"type": "integer", "example": 5242880, "description": "5 MiB hard limit, validated at confirm."},
+          "expires_at": {"type": "string", "format": "date-time"}
+        },
+        "required": ["avatar_key", "http_method", "upload_url", "upload_headers", "max_size_bytes", "expires_at"]
+      },
+      "AvatarConfirmRequest": {
+        "type": "object",
+        "description": "Body of POST /api/users/me/avatar/confirm.",
+        "additionalProperties": false,
+        "properties": {
+          "avatar_key": {"type": "string", "minLength": 1}
+        },
+        "required": ["avatar_key"]
+      },
+      "AvatarConfirmResponse": {
+        "type": "object",
+        "description": "Response of POST /api/users/me/avatar/confirm.",
+        "additionalProperties": false,
+        "properties": {
+          "avatar_url": {"type": "string", "format": "uri"}
+        },
+        "required": ["avatar_url"]
+      },
+      "CommentRequestBody": {
+        "type": "object",
+        "description": "Body of POST /api/videos/{id}/comments and POST /api/comments/{id}/reply. Content is trimmed and must be 1–1000 non-whitespace characters.",
+        "additionalProperties": false,
+        "properties": {
+          "content": {"type": "string", "minLength": 1, "maxLength": 1000}
+        },
+        "required": ["content"]
+      },
+      "VideoStatusResponse": {
+        "type": "object",
+        "description": "Response of GET /api/videos/{id}/status — owner only.",
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string", "format": "uuid"},
+          "status": {"$ref": "#/components/schemas/VideoStatus"},
+          "retry_count": {"type": "integer", "minimum": 0},
+          "duration_seconds": {"type": "integer", "nullable": true, "description": "Null until the transcode completes (status=READY)."}
+        },
+        "required": ["id", "status", "retry_count", "duration_seconds"]
+      },
+      "MarkAllReadResponse": {
+        "type": "object",
+        "description": "Response of PUT /api/notifications/read-all.",
+        "additionalProperties": false,
+        "properties": {
+          "updated_count": {"type": "integer", "minimum": 0}
+        },
+        "required": ["updated_count"]
+      },
+      "SearchResponse": {
+        "type": "object",
+        "description": "Response of GET /api/search — NOTE: uses a custom envelope (searchEnvelope), not the standard shared envelope.",
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "type": "object",
+            "properties": {
+              "users": {"type": "array", "items": {"$ref": "#/components/schemas/UserSummary"}},
+              "videos": {"type": "array", "items": {"$ref": "#/components/schemas/VideoObject"}}
+            },
+            "required": ["users", "videos"]
+          },
+          "pagination": {
+            "type": "object",
+            "description": "users_next_cursor / videos_next_cursor are omitted when that result set is exhausted.",
+            "properties": {
+              "users_next_cursor": {"type": "string", "nullable": true},
+              "videos_next_cursor": {"type": "string", "nullable": true}
+            }
+          }
+        },
+        "required": ["data", "pagination"]
+      },
+      "WebhookPayload": {
+        "type": "object",
+        "description": "Actions V2 event payload (handlers/webhook.go zitadelActionV2Event). Field names are case-sensitive: aggregateID, event_type, etc.",
+        "additionalProperties": false,
+        "properties": {
+          "aggregateID": {"type": "string", "description": "For user.* events: the affected user (Zitadel subject)."},
+          "aggregateType": {"type": "string", "example": "user"},
+          "resourceOwner": {"type": "string"},
+          "instanceID": {"type": "string"},
+          "version": {"type": "string"},
+          "sequence": {"type": "number", "description": "Actions V2 sequence number (json.Number on the wire)."},
+          "event_type": {
+            "type": "string",
+            "enum": ["user.deactivated", "user.removed"],
+            "description": "Any other event_type -> 400 WEBHOOK_EVENT_UNSUPPORTED."
+          },
+          "created_at": {"type": "string", "format": "date-time"},
+          "userID": {"type": "string", "description": "The triggering actor id; fallback when aggregateID is absent."},
+          "event_payload": {"type": "object", "nullable": true, "description": "Present but currently unused by the handler."}
+        },
+        "required": ["aggregateID", "aggregateType", "resourceOwner", "instanceID", "version", "sequence", "event_type", "created_at", "userID", "event_payload"]
+      },
+      "WebhookAck": {
+        "type": "object",
+        "description": "Webhook success ACK — verified against handlers/webhook.go: 200 body is exactly {\"data\":{\"status\":\"processed\"}}; there is no `event` field on the 200 response; 200 also when the target has no local row (nothing to do; Zitadel stops retrying).",
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "type": "object",
+            "properties": {
+              "status": {"type": "string", "enum": ["processed"]}
+            },
+            "required": ["status"]
+          }
+        },
+        "required": ["data"]
+      },
+      "PageEnvelope": {
+        "type": "object",
+        "description": "shared.RespondList wire shape: {\"data\": [...], \"pagination\": {\"next_cursor\": \"<opaque>\"|null}}. next_cursor is null on the last page. Items are the endpoint's resource objects (see each path for the item schema).",
+        "additionalProperties": false,
+        "properties": {
+          "data": {"type": "array", "items": {}},
+          "pagination": {
+            "type": "object",
+            "properties": {
+              "next_cursor": {"type": "string", "nullable": true}
+            },
+            "required": ["next_cursor"]
+          }
+        },
+        "required": ["data", "pagination"]
+      },
+      "UserVideosPage": {
+        "type": "object",
+        "description": "GET /api/users/{id}/videos — shared.RespondList shape: {\"data\": [UserVideoItem...], \"pagination\": {\"next_cursor\": \"<opaque>\"|null}}.",
+        "additionalProperties": false,
+        "properties": {
+          "data": {"type": "array", "items": {"$ref": "#/components/schemas/UserVideoItem"}},
+          "pagination": {
+            "type": "object",
+            "properties": {
+              "next_cursor": {"type": "string", "nullable": true}
+            },
+            "required": ["next_cursor"]
+          }
+        },
+        "required": ["data", "pagination"]
+      },
+      "FollowListPage": {
+        "type": "object",
+        "description": "GET /api/users/{id}/followers and GET /api/users/{id}/following — shared.RespondList shape: {\"data\": [FollowListItem...], \"pagination\": {\"next_cursor\": \"<opaque>\"|null}}.",
+        "additionalProperties": false,
+        "properties": {
+          "data": {"type": "array", "items": {"$ref": "#/components/schemas/FollowListItem"}},
+          "pagination": {
+            "type": "object",
+            "properties": {
+              "next_cursor": {"type": "string", "nullable": true}
+            },
+            "required": ["next_cursor"]
+          }
+        },
+        "required": ["data", "pagination"]
+      },
+      "NotificationPage": {
+        "type": "object",
+        "description": "GET /api/notifications — shared.RespondList shape: {\"data\": [NotificationObject...], \"pagination\": {\"next_cursor\": \"<opaque>\"|null}}.",
+        "additionalProperties": false,
+        "properties": {
+          "data": {"type": "array", "items": {"$ref": "#/components/schemas/NotificationObject"}},
+          "pagination": {
+            "type": "object",
+            "properties": {
+              "next_cursor": {"type": "string", "nullable": true}
+            },
+            "required": ["next_cursor"]
+          }
+        },
+        "required": ["data", "pagination"]
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "401 — JWT missing, invalid or expired (UNAUTHORIZED).",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}
+      },
+      "NotFound": {
+        "description": "404 — resource missing, or not visible to the caller (anti-enumeration; NOT_FOUND).",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}
+      },
+      "Validation": {
+        "description": "400 — malformed body / bad parameters (VALIDATION_ERROR).",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}
+      },
+      "Internal": {
+        "description": "500 — unexpected server error (INTERNAL_ERROR).",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}
+      }
+    }
+  }
+}
