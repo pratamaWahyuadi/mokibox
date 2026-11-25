@@ -59,6 +59,10 @@ type APIConfig struct {
 
 	// Upload intent (presigned PUT expiry)
 	PresignUploadExpiry time.Duration
+
+	// Direct messages remain disabled unless explicitly enabled.
+	DME2EEEnabled bool
+	DMInboxTTL    time.Duration
 }
 
 // WorkerConfig is the configuration consumed by transcoder-worker.
@@ -126,6 +130,23 @@ func LoadAPI() (*APIConfig, error) {
 		return nil, err
 	}
 	c.PresignUploadExpiry = expiry
+
+	dmEnabled := false
+	if raw := os.Getenv("DM_E2EE_ENABLED"); raw != "" {
+		dmEnabled, err = strconv.ParseBool(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid boolean for DM_E2EE_ENABLED=%q: %w", raw, err)
+		}
+	}
+	c.DME2EEEnabled = dmEnabled
+
+	c.DMInboxTTL, err = envDuration("DM_INBOX_TTL", 168*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+	if c.DME2EEEnabled && c.DMInboxTTL != 168*time.Hour {
+		return nil, fmt.Errorf("DM_INBOX_TTL must be 168h when DM_E2EE_ENABLED=true")
+	}
 
 	if err := requireFields(
 		"API_BASE_URL", c.APIBaseURL,
