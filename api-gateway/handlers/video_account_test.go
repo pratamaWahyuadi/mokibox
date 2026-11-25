@@ -31,15 +31,15 @@ import (
 
 // stubVideoStore scripts videoStore reads.
 type stubVideoStore struct {
-	getVideoByID       func(ctx context.Context, id uuid.UUID) (db.Video, error)
-	getUserByID        func(ctx context.Context, id uuid.UUID) (db.User, error)
-	isFollowing        func(ctx context.Context, arg db.IsFollowingParams) (bool, error)
-	getPendingVideo    func(ctx context.Context, userID uuid.UUID) (db.Video, error)
-	insertVideo        func(ctx context.Context, arg db.InsertVideoParams) (db.Video, error)
-	updateR2Key        func(ctx context.Context, arg db.UpdatePendingVideoR2KeyParams) (db.Video, error)
-	updateMetadata     func(ctx context.Context, arg db.UpdatePendingVideoMetadataParams) (db.Video, error)
-	getVideoDetail     func(ctx context.Context, arg db.GetVideoDetailParams) (db.GetVideoDetailRow, error)
-	markVideoDeleted   func(ctx context.Context, arg db.MarkVideoDeletedParams) (db.Video, error)
+	getVideoByID     func(ctx context.Context, id uuid.UUID) (db.Video, error)
+	getUserByID      func(ctx context.Context, id uuid.UUID) (db.User, error)
+	isFollowing      func(ctx context.Context, arg db.IsFollowingParams) (bool, error)
+	getPendingVideo  func(ctx context.Context, userID uuid.UUID) (db.Video, error)
+	insertVideo      func(ctx context.Context, arg db.InsertVideoParams) (db.Video, error)
+	updateR2Key      func(ctx context.Context, arg db.UpdatePendingVideoR2KeyParams) (db.Video, error)
+	updateMetadata   func(ctx context.Context, arg db.UpdatePendingVideoMetadataParams) (db.Video, error)
+	getVideoDetail   func(ctx context.Context, arg db.GetVideoDetailParams) (db.GetVideoDetailRow, error)
+	markVideoDeleted func(ctx context.Context, arg db.MarkVideoDeletedParams) (db.Video, error)
 }
 
 func (s *stubVideoStore) GetVideoByID(ctx context.Context, id uuid.UUID) (db.Video, error) {
@@ -99,8 +99,8 @@ func (s *stubVideoStore) MarkVideoDeleted(ctx context.Context, arg db.MarkVideoD
 
 // stubVideoTx scripts the confirm-tx body.
 type stubVideoTx struct {
-	getForUpdate   func(ctx context.Context, id uuid.UUID) (db.Video, error)
-	confirmFlip    func(ctx context.Context, arg db.ConfirmVideoProcessingParams) (db.Video, error)
+	getForUpdate func(ctx context.Context, id uuid.UUID) (db.Video, error)
+	confirmFlip  func(ctx context.Context, arg db.ConfirmVideoProcessingParams) (db.Video, error)
 }
 
 func (s *stubVideoTx) GetVideoByIDForUpdate(ctx context.Context, id uuid.UUID) (db.Video, error) {
@@ -118,9 +118,9 @@ func (s *stubVideoTx) ConfirmVideoProcessing(ctx context.Context, arg db.Confirm
 
 // stubVideoTxRunner mirrors sqlTxRunner for videoTxStore.
 type stubVideoTxRunner struct {
-	tx       *stubVideoTx
-	beginErr error
-	runs     int
+	tx        *stubVideoTx
+	beginErr  error
+	runs      int
 	committed bool
 	aborted   bool
 }
@@ -140,10 +140,10 @@ func (r *stubVideoTxRunner) Run(ctx context.Context, fn func(q videoTxStore) err
 
 // stubR2 scripts the R2 surface.
 type stubR2 struct {
-	presignPut  func(ctx context.Context, key, contentType string, expiry time.Duration) (string, error)
-	presignGet  func(ctx context.Context, key string, expiry time.Duration) (string, error)
-	headObject  func(ctx context.Context, key string) (int64, error)
-	getObject   func(ctx context.Context, key string, maxBytes int64) ([]byte, error)
+	presignPut func(ctx context.Context, key, contentType string, expiry time.Duration) (string, error)
+	presignGet func(ctx context.Context, key string, expiry time.Duration) (string, error)
+	headObject func(ctx context.Context, key string) (int64, error)
+	getObject  func(ctx context.Context, key string, maxBytes int64) ([]byte, error)
 }
 
 func (s *stubR2) PresignPut(ctx context.Context, key, contentType string, expiry time.Duration) (string, error) {
@@ -209,8 +209,8 @@ func (s *stubEnqueuer) EnqueueCleanupVideo(payload shared.CleanupVideoPayload, d
 
 var testConfirmCfg = &shared.APIConfig{
 	PresignUploadExpiry: 15 * time.Minute,
-	APIBaseURL:         "https://api.example.com",
-	MediaTokenSecret:   "test-secret",
+	APIBaseURL:          "https://api.example.com",
+	MediaTokenSecret:    "test-secret",
 }
 
 const testR2Key = "uploads/22222222-2222-2222-2222-222222222222/33333333-3333-3333-3333-333333333333/source.mp4"
@@ -499,10 +499,14 @@ func TestUploadIntent_ReusesPendingRowAndRotatesKey(t *testing.T) {
 
 // stubAccountTx records the delete cascade call order.
 type stubAccountTx struct {
-	listVideoKeys      func(ctx context.Context, userID uuid.UUID) ([]db.ListVideoKeysByUserRow, error)
-	avatarKeys         db.GetUserAvatarKeysRow
-	tombstoneErr       error
-	calls              []string
+	listVideoKeys       func(ctx context.Context, userID uuid.UUID) ([]db.ListVideoKeysByUserRow, error)
+	avatarKeys          db.GetUserAvatarKeysRow
+	dmInboxDeleteErr    error
+	dmDeviceDeleteErr   error
+	dmInboxDeletedFor   []uuid.UUID
+	dmDevicesDeletedFor []uuid.UUID
+	tombstoneErr        error
+	calls               []string
 }
 
 func (s *stubAccountTx) ListVideoKeysByUser(ctx context.Context, userID uuid.UUID) ([]db.ListVideoKeysByUserRow, error) {
@@ -552,6 +556,22 @@ func (s *stubAccountTx) DeleteNotificationsByActor(ctx context.Context, actorID 
 	s.calls = append(s.calls, "DeleteNotificationsByActor")
 	return nil
 }
+func (s *stubAccountTx) DeleteDMInboxByUser(ctx context.Context, userID uuid.UUID) (int64, error) {
+	s.calls = append(s.calls, "DeleteDMInboxByUser")
+	s.dmInboxDeletedFor = append(s.dmInboxDeletedFor, userID)
+	if s.dmInboxDeleteErr != nil {
+		return 0, s.dmInboxDeleteErr
+	}
+	return 1, nil
+}
+func (s *stubAccountTx) DeleteDMDevicesByUser(ctx context.Context, userID uuid.UUID) (int64, error) {
+	s.calls = append(s.calls, "DeleteDMDevicesByUser")
+	s.dmDevicesDeletedFor = append(s.dmDevicesDeletedFor, userID)
+	if s.dmDeviceDeleteErr != nil {
+		return 0, s.dmDeviceDeleteErr
+	}
+	return 1, nil
+}
 func (s *stubAccountTx) TombstoneUser(ctx context.Context, id uuid.UUID) (db.User, error) {
 	s.calls = append(s.calls, "TombstoneUser")
 	if s.tombstoneErr != nil {
@@ -562,9 +582,9 @@ func (s *stubAccountTx) TombstoneUser(ctx context.Context, id uuid.UUID) (db.Use
 
 // stubAccountRunner mirrors sqlTxRunner for accountTxStore.
 type stubAccountRunner struct {
-	tx         *stubAccountTx
-	committed  bool
-	aborted    bool
+	tx        *stubAccountTx
+	committed bool
+	aborted   bool
 }
 
 func (r *stubAccountRunner) Run(ctx context.Context, fn func(q accountTxStore) error) error {
@@ -613,7 +633,8 @@ func TestDeleteMe_HappyPathCascadeAndEnqueue(t *testing.T) {
 		"ListVideoKeysByUser", "GetUserAvatarKeys", "DecrementLikesForUser", "DecrementCommentsForUser",
 		"DeleteVideosByUser", "DeleteFollowsByFollower", "DeleteFollowsByFollowee",
 		"DeleteLikesByUser", "DeleteCommentsByUser", "DeleteNotificationsForUser",
-		"DeleteNotificationsByActor", "TombstoneUser",
+		"DeleteNotificationsByActor", "DeleteDMInboxByUser", "DeleteDMDevicesByUser",
+		"TombstoneUser",
 	}
 	if len(tx.calls) != len(wantOrder) {
 		t.Fatalf("cascade calls = %v, want %v", tx.calls, wantOrder)
@@ -629,6 +650,13 @@ func TestDeleteMe_HappyPathCascadeAndEnqueue(t *testing.T) {
 	// Video and current/pending avatar keys are all removed.
 	if len(enq.cleanupObjectsKeys) != 1 || len(enq.cleanupObjectsKeys[0]) != 5 {
 		t.Errorf("cleanup keys = %+v, want 1 batch with 5 keys", enq.cleanupObjectsKeys)
+	}
+	user := viewerUser()
+	if len(tx.dmInboxDeletedFor) != 1 || tx.dmInboxDeletedFor[0] != user.ID {
+		t.Errorf("DM inbox cleanup users = %v, want [%s]", tx.dmInboxDeletedFor, user.ID)
+	}
+	if len(tx.dmDevicesDeletedFor) != 1 || tx.dmDevicesDeletedFor[0] != user.ID {
+		t.Errorf("DM device cleanup users = %v, want [%s]", tx.dmDevicesDeletedFor, user.ID)
 	}
 }
 
@@ -693,6 +721,39 @@ func TestDeleteMe_CascadeFailureIs500(t *testing.T) {
 	assertErrCode(t, rec, http.StatusInternalServerError, shared.CodeInternalError)
 	if runner.committed {
 		t.Error("cascade failure must not commit")
+	}
+}
+
+func TestDeleteMe_DMCleanupFailureIs500(t *testing.T) {
+	tx := &stubAccountTx{
+		listVideoKeys: func(ctx context.Context, userID uuid.UUID) ([]db.ListVideoKeysByUserRow, error) {
+			return nil, nil
+		},
+		dmInboxDeleteErr: errors.New("dm db down"),
+	}
+	runner := &stubAccountRunner{tx: tx}
+	ah := newAccountHandlerForTest(runner, &stubEnqueuer{})
+
+	e := echo.New()
+	e.Use(middleware.Authenticate(middleware.AuthenticateConfig{
+		Verifier: testVerifier{sub: "test-sub"},
+		Queries:  testUserStore{user: viewerUser()},
+	}))
+	e.DELETE("/api/users/me", ah.DeleteMe)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/users/me", nil)
+	req.Header.Set(echo.HeaderAuthorization, "Bearer t")
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	assertErrCode(t, rec, http.StatusInternalServerError, shared.CodeInternalError)
+	if runner.committed {
+		t.Error("DM cleanup failure must not commit")
+	}
+	for _, call := range tx.calls {
+		if call == "TombstoneUser" {
+			t.Fatal("tombstone must not run after DM cleanup failure")
+		}
 	}
 }
 

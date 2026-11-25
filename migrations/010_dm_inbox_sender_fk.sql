@@ -13,6 +13,3 @@ ALTER TABLE dm_inbox
     ADD CONSTRAINT fk_dm_inbox_sender_user
         FOREIGN KEY (sender_user_id)
         REFERENCES users(id) ON DELETE RESTRICT;
-
-CREATE INDEX IF NOT EXISTS idx_dm_inbox_sender_user_id
-    ON dm_inbox(sender_user_id);

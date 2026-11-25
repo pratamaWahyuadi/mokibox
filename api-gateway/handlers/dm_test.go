@@ -66,6 +66,15 @@ func (s *dmFakeStore) GetDMDeviceByUserAndID(_ context.Context, arg db.GetDMDevi
 	return device, nil
 }
 
+func (s *dmFakeStore) GetDMDeviceOwner(_ context.Context, deviceID uuid.UUID) (uuid.UUID, error) {
+	for userID, device := range s.devices {
+		if device.DeviceID == deviceID {
+			return userID, nil
+		}
+	}
+	return uuid.Nil, sql.ErrNoRows
+}
+
 func (s *dmFakeStore) GetDMTargetDevice(_ context.Context, userID uuid.UUID) (db.DmDevice, error) {
 	return s.GetDMDeviceByUser(context.Background(), userID)
 }
@@ -307,6 +316,26 @@ func TestRegisterDMDeviceIsIdempotentAndReplacementPurgesOldDevice(t *testing.T)
 	}
 	if got := store.devices[user.ID].DeviceID; got != otherDeviceID {
 		t.Fatalf("active device = %s, want %s", got, otherDeviceID)
+	}
+}
+
+func TestRegisterDMDeviceRejectsForeignDeviceID(t *testing.T) {
+	user := viewerUser()
+	ownerID := uuid.New()
+	foreignDeviceID := uuid.New()
+	store := newDMFakeStore()
+	store.devices[ownerID] = db.DmDevice{DeviceID: foreignDeviceID, UserID: ownerID}
+	handler := newDMHandlerForTest(store, dmFakeRunner{store: store}, 168*time.Hour)
+	e := newDMTestEcho(user, http.MethodPost, "/api/dm/device", handler.RegisterDevice)
+
+	body := fmt.Sprintf(`{"device_id":%q,"identity_curve25519":%q,"identity_ed25519":%q}`,
+		foreignDeviceID, base64.RawStdEncoding.EncodeToString(bytesOf(1, 32)), base64.RawStdEncoding.EncodeToString(bytesOf(2, 32)))
+	assertErrCode(t, doJSON(e, http.MethodPost, "/api/dm/device", body), http.StatusConflict, shared.CodeDMDeviceStale)
+	if store.devices[ownerID].DeviceID != foreignDeviceID {
+		t.Fatal("foreign device was replaced")
+	}
+	if _, ok := store.devices[user.ID]; ok {
+		t.Fatal("caller was given a device owned by another user")
 	}
 }
 
@@ -575,6 +604,98 @@ func TestPollAndAcknowledgeDMMessage(t *testing.T) {
 	if got := store.inbox[messageID].Ciphertext; got != nil {
 		t.Fatalf("ack did not clear ciphertext: %q", got)
 	}
+}
+
+func TestDMEndpointsHideNonMutualFollow(t *testing.T) {
+	user := viewerUser()
+	targetID := uuid.New()
+	senderDeviceID, targetDeviceID := uuid.New(), uuid.New()
+	store := newDMFakeStore()
+	store.eligible = false
+	store.devices[user.ID] = db.DmDevice{DeviceID: senderDeviceID, UserID: user.ID}
+	store.devices[targetID] = db.DmDevice{DeviceID: targetDeviceID, UserID: targetID}
+	handler := newDMHandlerForTest(store, dmFakeRunner{store: store}, 168*time.Hour)
+
+	bundlePath := fmt.Sprintf("/api/dm/users/%s/key-bundle?device_id=%s&include_one_time_key=false", targetID, senderDeviceID)
+	bundleEcho := newDMTestEcho(user, http.MethodGet, "/api/dm/users/:id/key-bundle", handler.GetKeyBundle)
+	assertErrCode(t, doJSON(bundleEcho, http.MethodGet, bundlePath, ""), http.StatusNotFound, shared.CodeNotFound)
+
+	sendEcho := newDMTestEcho(user, http.MethodPost, "/api/dm/messages", handler.SendMessage)
+	body := makeBodyWithClientID(t, senderDeviceID, targetID, targetDeviceID, uuid.New(), "non-mutual")
+	assertErrCode(t, doJSON(sendEcho, http.MethodPost, "/api/dm/messages", body), http.StatusNotFound, shared.CodeNotFound)
+}
+
+func TestDMDeviceSpecificEndpointsRejectStaleDevice(t *testing.T) {
+	user := viewerUser()
+	staleDeviceID := uuid.New()
+	store := newDMFakeStore()
+	handler := newDMHandlerForTest(store, dmFakeRunner{store: store}, 168*time.Hour)
+
+	uploadEcho := newDMTestEcho(user, http.MethodPost, "/api/dm/device/one-time-keys", handler.UploadOneTimeKeys)
+	uploadBody := fmt.Sprintf(`{"device_id":%q,"keys":[{"key_id":"k","public_key":%q,"signature":%q}]}`,
+		staleDeviceID, base64.RawStdEncoding.EncodeToString(bytesOf(1, 32)), base64.RawStdEncoding.EncodeToString(bytesOf(2, 64)))
+	assertErrCode(t, doJSON(uploadEcho, http.MethodPost, "/api/dm/device/one-time-keys", uploadBody),
+		http.StatusConflict, shared.CodeDMDeviceStale)
+
+	pollEcho := newDMTestEcho(user, http.MethodGet, "/api/dm/inbox", handler.PollInbox)
+	pollPath := fmt.Sprintf("/api/dm/inbox?device_id=%s&after=0", staleDeviceID)
+	assertErrCode(t, doJSON(pollEcho, http.MethodGet, pollPath, ""), http.StatusConflict, shared.CodeDMDeviceStale)
+
+	ackEcho := newDMTestEcho(user, http.MethodPost, "/api/dm/inbox/:message_id/ack", handler.AcknowledgeMessage)
+	ackPath := fmt.Sprintf("/api/dm/inbox/%s/ack", uuid.New())
+	ackBody := fmt.Sprintf(`{"device_id":%q}`, staleDeviceID)
+	assertErrCode(t, doJSON(ackEcho, http.MethodPost, ackPath, ackBody), http.StatusConflict, shared.CodeDMDeviceStale)
+}
+
+func TestDMAckRejectsMessageForAnotherDevice(t *testing.T) {
+	user := viewerUser()
+	activeDeviceID, otherDeviceID := uuid.New(), uuid.New()
+	messageID := uuid.New()
+	store := newDMFakeStore()
+	store.devices[user.ID] = db.DmDevice{DeviceID: activeDeviceID, UserID: user.ID}
+	store.inbox[messageID] = db.ListPendingDMInboxRow{MessageID: messageID, RecipientDeviceID: otherDeviceID}
+	handler := newDMHandlerForTest(store, dmFakeRunner{store: store}, 168*time.Hour)
+	e := newDMTestEcho(user, http.MethodPost, "/api/dm/inbox/:message_id/ack", handler.AcknowledgeMessage)
+
+	body := fmt.Sprintf(`{"device_id":%q}`, activeDeviceID)
+	path := fmt.Sprintf("/api/dm/inbox/%s/ack", messageID)
+	assertErrCode(t, doJSON(e, http.MethodPost, path, body), http.StatusNotFound, shared.CodeNotFound)
+	if store.acknowledged[messageID] {
+		t.Fatal("message addressed to another device was acknowledged")
+	}
+}
+
+func TestDMPollValidatesAfterAndLimit(t *testing.T) {
+	user := viewerUser()
+	deviceID := uuid.New()
+	store := newDMFakeStore()
+	store.devices[user.ID] = db.DmDevice{DeviceID: deviceID, UserID: user.ID}
+	handler := newDMHandlerForTest(store, dmFakeRunner{store: store}, 168*time.Hour)
+	e := newDMTestEcho(user, http.MethodGet, "/api/dm/inbox", handler.PollInbox)
+
+	base := "/api/dm/inbox?device_id=" + deviceID.String()
+	for _, target := range []string{
+		base,
+		base + "&after=-1",
+		base + "&after=0&limit=0",
+		base + "&after=0&limit=101",
+		base + "&after=not-a-number",
+	} {
+		assertErrCode(t, doJSON(e, http.MethodGet, target, ""), http.StatusBadRequest, shared.CodeValidationError)
+	}
+	if rec := doJSON(e, http.MethodGet, base+"&after=0&limit=100", ""); rec.Code != http.StatusOK {
+		t.Fatalf("valid poll status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDMRejectsInactiveUser(t *testing.T) {
+	user := viewerUser()
+	user.IsActive = false
+	store := newDMFakeStore()
+	handler := newDMHandlerForTest(store, dmFakeRunner{store: store}, 168*time.Hour)
+	e := newDMTestEcho(user, http.MethodPost, "/api/dm/messages", handler.SendMessage)
+	body := makeBodyWithClientID(t, uuid.New(), uuid.New(), uuid.New(), uuid.New(), "inactive")
+	assertErrCode(t, doJSON(e, http.MethodPost, "/api/dm/messages", body), http.StatusUnauthorized, shared.CodeUnauthorized)
 }
 
 func makeBodyWithClientID(t *testing.T, senderDeviceID, recipientID, recipientDeviceID, clientMessageID uuid.UUID, content string) string {
