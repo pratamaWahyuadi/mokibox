@@ -85,6 +85,21 @@ FROM candidate c
 WHERE k.id = c.id
 RETURNING k.key_id, k.public_key, k.signature;
 
+-- name: UpsertDMFallbackKey :one
+INSERT INTO dm_fallback_keys (device_id, key_id, public_key, signature)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (device_id) DO UPDATE
+SET key_id = EXCLUDED.key_id,
+    public_key = EXCLUDED.public_key,
+    signature = EXCLUDED.signature,
+    updated_at = NOW()
+RETURNING device_id, key_id, public_key, signature, created_at, updated_at;
+
+-- name: GetDMFallbackKey :one
+SELECT device_id, key_id, public_key, signature, created_at, updated_at
+FROM dm_fallback_keys
+WHERE device_id = $1;
+
 -- name: GetDMIdempotency :one
 SELECT request_digest, message_id, response_sequence, expires_at
 FROM dm_idempotency

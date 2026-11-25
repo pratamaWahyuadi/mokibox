@@ -2,6 +2,7 @@ package dm
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -129,6 +130,10 @@ func (s *Service) UploadKeys(ctx context.Context, count uint) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	fallback, err := GenerateFallbackKey(acc)
+	if err != nil {
+		return 0, err
+	}
 	st.AccountPickle, err = PickleAccount(acc, s.pickleKey)
 	if err != nil {
 		return 0, err
@@ -136,7 +141,7 @@ func (s *Service) UploadKeys(ctx context.Context, count uint) (int, error) {
 	if err := s.Store.Save(st); err != nil {
 		return 0, err
 	}
-	accepted, err := s.Client.UploadOneTimeKeys(ctx, st.DeviceID, keys)
+	accepted, err := s.Client.UploadOneTimeKeys(ctx, st.DeviceID, keys, fallback)
 	if err != nil {
 		return 0, err
 	}
@@ -260,6 +265,43 @@ func (s *Service) Send(ctx context.Context, recipientUserID, plaintext, clientMe
 	if err != nil {
 		return SendResult{}, err
 	}
+	digest := sha256.Sum256([]byte(plaintext))
+	plaintextHash := hex.EncodeToString(digest[:])
+
+	if existing, ok := st.Outbox[clientMessageID]; ok {
+		if existing == nil || !existing.ExpiresAt.After(time.Now()) {
+			return SendResult{}, fmt.Errorf("%w: expired or corrupt entry", ErrOutboxConflict)
+		}
+		if existing.PlaintextHash != plaintextHash || existing.Request.ClientMessageID != clientMessageID ||
+			existing.Request.RecipientUserID != recipientUserID {
+			return SendResult{}, fmt.Errorf("%w: plaintext or recipient changed", ErrOutboxConflict)
+		}
+		bundle, err := s.Client.GetKeyBundle(ctx, st.DeviceID, existing.Request.RecipientUserID, false)
+		if err != nil {
+			return SendResult{}, err
+		}
+		if bundle.UserID != existing.Request.RecipientUserID || bundle.DeviceID != existing.Request.RecipientDeviceID {
+			return SendResult{}, fmt.Errorf("%w: recipient device changed", ErrFingerprintChanged)
+		}
+		if _, err := s.assertTrusted(bundle); err != nil {
+			return SendResult{}, err
+		}
+		if existing.Result != nil {
+			return *existing.Result, nil
+		}
+		result, err := s.Client.SendMessage(ctx, existing.Request)
+		if err != nil {
+			return SendResult{}, err
+		}
+		stored := *existing
+		stored.Result = &result
+		st.Outbox[clientMessageID] = &stored
+		if err := s.Store.Save(st); err != nil {
+			return SendResult{}, err
+		}
+		return result, nil
+	}
+
 	identityBundle, err := s.Client.GetKeyBundle(ctx, st.DeviceID, recipientUserID, false)
 	if err != nil {
 		return SendResult{}, err
@@ -281,9 +323,6 @@ func (s *Service) Send(ctx context.Context, recipientUserID, plaintext, clientMe
 		return SendResult{}, err
 	}
 	st.Sessions[key] = encodedSession
-	if err := s.Store.Save(st); err != nil {
-		return SendResult{}, err
-	}
 	req := SendRequest{
 		DeviceID:          st.DeviceID,
 		RecipientUserID:   identityBundle.UserID,
@@ -294,11 +333,27 @@ func (s *Service) Send(ctx context.Context, recipientUserID, plaintext, clientMe
 		MessageType:       msgType,
 		Ciphertext:        ciphertext,
 	}
-	return s.Client.SendMessage(ctx, req)
+	st.Outbox[clientMessageID] = &OutboxEntry{
+		Request:       req,
+		PlaintextHash: plaintextHash,
+		ExpiresAt:     time.Now().Add(outboxTTL),
+	}
+	if err := s.Store.Save(st); err != nil {
+		return SendResult{}, err
+	}
+	result, err := s.Client.SendMessage(ctx, req)
+	if err != nil {
+		return SendResult{}, err
+	}
+	st.Outbox[clientMessageID].Result = &result
+	if err := s.Store.Save(st); err != nil {
+		return SendResult{}, err
+	}
+	return result, nil
 }
 
-func (s *Service) sessionForSend(ctx context.Context, st *State, identityBundle KeyBundle, key string) (*session.OlmSession, error) {
-	if encoded, ok := st.Sessions[key]; ok {
+func (s *Service) sessionForSend(ctx context.Context, st *State, identityBundle KeyBundle, sessionKey string) (*session.OlmSession, error) {
+	if encoded, ok := st.Sessions[sessionKey]; ok {
 		return UnpickleSession(encoded, s.pickleKey)
 	}
 	acc, err := UnpickleAccount(st.AccountPickle, s.pickleKey)
@@ -317,14 +372,26 @@ func (s *Service) sessionForSend(ctx context.Context, st *State, identityBundle 
 	if _, err := s.assertTrusted(bundle); err != nil {
 		return nil, err
 	}
-	if bundle.OneTimeKey == nil {
-		return nil, fmt.Errorf("recipient has no one-time key available")
+	key := bundle.OneTimeKey
+	if key == nil {
+		key = bundle.FallbackKey
 	}
-	if err := VerifyOneTimeKeySignature(bundle.Identity.Ed25519, *bundle.OneTimeKey); err != nil {
+	if key == nil {
+		return nil, fmt.Errorf("recipient has no one-time or fallback key available")
+	}
+	if err := VerifyOneTimeKeySignature(bundle.Identity.Ed25519, *key); err != nil {
 		return nil, err
 	}
-	return NewOutboundSession(acc, bundle.Identity, *bundle.OneTimeKey)
+	return NewOutboundSession(acc, bundle.Identity, *key)
 }
+
+const (
+	quarantineInvalidEnvelope    = "invalid_envelope"
+	quarantineInvalidCiphertext  = "invalid_ciphertext"
+	quarantineDecryptFailed      = "olm_decrypt_failed"
+	quarantineFingerprintChanged = "fingerprint_changed"
+	quarantineNoSession          = "no_session"
+)
 
 type DecryptedMessage struct {
 	MessageID        string
@@ -333,6 +400,8 @@ type DecryptedMessage struct {
 	Sequence         int64
 	Plaintext        []byte
 	AlreadyDelivered bool
+	Quarantined      bool
+	QuarantineReason string
 }
 
 func (s *Service) Receive(ctx context.Context, limit int) ([]DecryptedMessage, error) {
@@ -352,8 +421,31 @@ func (s *Service) Receive(ctx context.Context, limit int) ([]DecryptedMessage, e
 	identityCache := make(map[string]KeyBundle)
 	delivered := make([]DecryptedMessage, 0, len(result.Messages))
 	for _, message := range result.Messages {
+		if entry, ok := st.Quarantine[message.MessageID]; ok && entry != nil {
+			delivered = append(delivered, DecryptedMessage{
+				MessageID: message.MessageID, SenderUserID: message.SenderUserID,
+				SenderDeviceID: message.SenderDeviceID, Sequence: message.Sequence,
+				Quarantined: true, QuarantineReason: entry.Reason,
+			})
+			if err := s.advanceInboxAfter(st, message); err != nil {
+				return delivered, err
+			}
+			continue
+		}
 		if err := validateInboxMessage(st.DeviceID, message); err != nil {
-			return delivered, err
+			reason, fatal := quarantineReason(err)
+			if fatal {
+				return delivered, err
+			}
+			if err := s.quarantineAndAdvance(st, message, reason); err != nil {
+				return delivered, err
+			}
+			delivered = append(delivered, DecryptedMessage{
+				MessageID: message.MessageID, SenderUserID: message.SenderUserID,
+				SenderDeviceID: message.SenderDeviceID, Sequence: message.Sequence,
+				Quarantined: true, QuarantineReason: reason,
+			})
+			continue
 		}
 		key := peerKey(message.SenderUserID, message.SenderDeviceID)
 		if _, pending := st.PendingAcks[message.MessageID]; pending {
@@ -365,7 +457,24 @@ func (s *Service) Receive(ctx context.Context, limit int) ([]DecryptedMessage, e
 		} else {
 			plaintext, sess, err := s.decrypt(ctx, st, acc, message, identityCache, key)
 			if err != nil {
-				return delivered, err
+				reason, fatal := quarantineReason(err)
+				if fatal {
+					return delivered, err
+				}
+				if err := s.quarantineAndAdvance(st, message, reason); err != nil {
+					return delivered, err
+				}
+				st, acc, err = s.load()
+				if err != nil {
+					return delivered, err
+				}
+				identityCache = make(map[string]KeyBundle)
+				delivered = append(delivered, DecryptedMessage{
+					MessageID: message.MessageID, SenderUserID: message.SenderUserID,
+					SenderDeviceID: message.SenderDeviceID, Sequence: message.Sequence,
+					Quarantined: true, QuarantineReason: reason,
+				})
+				continue
 			}
 			encodedSession, err := PickleSession(sess, s.pickleKey)
 			if err != nil {
@@ -391,14 +500,51 @@ func (s *Service) Receive(ctx context.Context, limit int) ([]DecryptedMessage, e
 			return delivered, err
 		}
 		delete(st.PendingAcks, message.MessageID)
-		if message.Sequence > st.InboxAfter {
-			st.InboxAfter = message.Sequence
-		}
-		if err := s.Store.Save(st); err != nil {
+		if err := s.advanceInboxAfter(st, message); err != nil {
 			return delivered, err
 		}
 	}
 	return delivered, nil
+}
+
+func (s *Service) quarantineAndAdvance(st *State, message InboxMessage, reason string) error {
+	st.Quarantine[message.MessageID] = &QuarantineEntry{
+		Sequence:       message.Sequence,
+		SenderUserID:   message.SenderUserID,
+		SenderDeviceID: message.SenderDeviceID,
+		Reason:         reason,
+		Ciphertext:     message.Ciphertext,
+		FailedAt:       time.Now(),
+	}
+	if message.Sequence > st.InboxAfter {
+		st.InboxAfter = message.Sequence
+	}
+	return s.Store.Save(st)
+}
+
+func (s *Service) advanceInboxAfter(st *State, message InboxMessage) error {
+	if message.Sequence <= st.InboxAfter {
+		return nil
+	}
+	st.InboxAfter = message.Sequence
+	return s.Store.Save(st)
+}
+
+func quarantineReason(err error) (string, bool) {
+	switch {
+	case errors.Is(err, ErrInvalidEnvelope):
+		return quarantineInvalidEnvelope, false
+	case errors.Is(err, ErrInvalidCiphertext):
+		return quarantineInvalidCiphertext, false
+	case errors.Is(err, ErrOlmDecrypt):
+		return quarantineDecryptFailed, false
+	case errors.Is(err, ErrFingerprintChanged):
+		return quarantineFingerprintChanged, false
+	case errors.Is(err, ErrNoSession):
+		return quarantineNoSession, false
+	default:
+		return "", true
+	}
 }
 
 func validateInboxMessage(deviceID string, message InboxMessage) error {

@@ -61,7 +61,8 @@ Redis (Asynq).
 ## Direct-message E2EE relay
 
 Go gateway menyediakan key/device endpoints dan relay ciphertext opaque
-(`DM_E2EE_ENABLED=false` secara default). Lihat
+(`DM_E2EE_ENABLED=false` secara default). Terapkan migrasi DM dengan
+`make db-migrate-dm` (009–011: relay, sender FK, fallback key). Lihat
 [desain backend DM E2EE](./planning/13_dm_e2ee_design.md).
 
 ### Go client SDK + CLI
@@ -69,7 +70,10 @@ Go gateway menyediakan key/device endpoints dan relay ciphertext opaque
 `clients/dm` berisi SDK Go untuk Olm v1 (pure Go via `mautrix/crypto/goolm`),
 dan `clients/dm/cmd/dmcli` adalah CLI referensi. Client melakukan key
 verification, encrypt/decrypt, dan menyimpan private state dalam account/session
-pickle terenkripsi; server tetap hanya melihat ciphertext opaque.
+pickle terenkripsi; server tetap hanya melihat ciphertext opaque. `upload-keys`
+juga mempublikasikan signed fallback key, `send -message-id <uuid>` mengirim
+ulang ciphertext persis sama dari outbox lokal, dan `poll` menampilkan pesan
+yang dikarantina tanpa menghentikan pesan berikutnya.
 
 Sebelum memakai CLI, aktifkan `DM_E2EE_ENABLED=true` di backend dan siapkan:
 

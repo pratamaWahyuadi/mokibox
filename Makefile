@@ -82,6 +82,19 @@ db-migrate-avatar: ## Apply migrations/008_user_avatar_upload.sql before deployi
 	@cat $(MIGRATIONS)/008_user_avatar_upload.sql | $(COMPOSE) exec -T $(SERVICE_DB) \
 		psql -U $(POSTGRES_USER) -d $(DB_NAME) -v ON_ERROR_STOP=1
 
+.PHONY: db-migrate-dm
+db-migrate-dm: ## Apply E2EE DM migrations (009-011, forward-only).
+	@for migration in 009_dm_e2ee.sql 010_dm_inbox_sender_fk.sql 011_dm_fallback_keys.sql; do \
+		if [ ! -f $(MIGRATIONS)/$$migration ]; then \
+			echo "ERROR: $(MIGRATIONS)/$$migration not found."; \
+			exit 1; \
+		fi; \
+	done
+	@for migration in 009_dm_e2ee.sql 010_dm_inbox_sender_fk.sql 011_dm_fallback_keys.sql; do \
+		cat $(MIGRATIONS)/$$migration | $(COMPOSE) exec -T $(SERVICE_DB) \
+			psql -U $(POSTGRES_USER) -d $(DB_NAME) -v ON_ERROR_STOP=1 || exit 1; \
+	done
+
 .PHONY: db-psql
 db-psql: ## Open a psql shell as POSTGRES_USER on $(DB_NAME).
 	$(COMPOSE) exec $(SERVICE_DB) psql -U $(POSTGRES_USER) -d $(DB_NAME)

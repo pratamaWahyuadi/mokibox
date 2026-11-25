@@ -68,10 +68,11 @@ type RegisterDeviceResult struct {
 }
 
 type KeyBundle struct {
-	UserID     string      `json:"user_id"`
-	DeviceID   string      `json:"device_id"`
-	Identity   Identity    `json:"-"`
-	OneTimeKey *OneTimeKey `json:"one_time_key"`
+	UserID      string      `json:"user_id"`
+	DeviceID    string      `json:"device_id"`
+	Identity    Identity    `json:"-"`
+	OneTimeKey  *OneTimeKey `json:"one_time_key"`
+	FallbackKey *OneTimeKey `json:"fallback_key"`
 }
 
 func (b *KeyBundle) UnmarshalJSON(raw []byte) error {
@@ -81,6 +82,7 @@ func (b *KeyBundle) UnmarshalJSON(raw []byte) error {
 		IdentityCurve25519 string      `json:"identity_curve25519"`
 		IdentityEd25519    string      `json:"identity_ed25519"`
 		OneTimeKey         *OneTimeKey `json:"one_time_key"`
+		FallbackKey        *OneTimeKey `json:"fallback_key"`
 	}
 	if err := json.Unmarshal(raw, &wire); err != nil {
 		return err
@@ -89,6 +91,7 @@ func (b *KeyBundle) UnmarshalJSON(raw []byte) error {
 	b.DeviceID = wire.DeviceID
 	b.Identity = Identity{Curve25519: wire.IdentityCurve25519, Ed25519: wire.IdentityEd25519}
 	b.OneTimeKey = wire.OneTimeKey
+	b.FallbackKey = wire.FallbackKey
 	return nil
 }
 
@@ -143,16 +146,17 @@ func (c *Client) RegisterDevice(ctx context.Context, deviceID string, identity I
 	return out.Data, err
 }
 
-func (c *Client) UploadOneTimeKeys(ctx context.Context, deviceID string, keys []OneTimeKey) (int, error) {
+func (c *Client) UploadOneTimeKeys(ctx context.Context, deviceID string, keys []OneTimeKey, fallback *OneTimeKey) (int, error) {
 	var out struct {
 		Data struct {
 			Accepted int `json:"accepted"`
 		} `json:"data"`
 	}
 	body := struct {
-		DeviceID string       `json:"device_id"`
-		Keys     []OneTimeKey `json:"keys"`
-	}{DeviceID: deviceID, Keys: keys}
+		DeviceID    string       `json:"device_id"`
+		Keys        []OneTimeKey `json:"keys"`
+		FallbackKey *OneTimeKey  `json:"fallback_key"`
+	}{DeviceID: deviceID, Keys: keys, FallbackKey: fallback}
 	_, err := c.do(ctx, http.MethodPost, "/api/dm/device/one-time-keys", body, &out)
 	return out.Data.Accepted, err
 }

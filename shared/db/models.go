@@ -30,6 +30,15 @@ type DmDevice struct {
 	CreatedAt          time.Time `json:"created_at"`
 }
 
+type DmFallbackKey struct {
+	DeviceID  uuid.UUID `json:"device_id"`
+	KeyID     string    `json:"key_id"`
+	PublicKey string    `json:"public_key"`
+	Signature string    `json:"signature"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 type DmIdempotency struct {
 	SenderDeviceID   uuid.UUID     `json:"sender_device_id"`
 	ClientMessageID  uuid.UUID     `json:"client_message_id"`
