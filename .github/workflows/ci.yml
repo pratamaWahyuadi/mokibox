@@ -1,0 +1,85 @@
+name: go-ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: go-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: build, vet and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./... -count=1
+      - name: Race test
+        run: go test -race ./clients/... ./api-gateway/... -count=1
+      - name: Verify modules
+        run: go mod verify
+
+  dm-migrations:
+    name: apply DM migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: mokibox_dm_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d mokibox_dm_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      PGPASSWORD: postgres
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Apply migrations
+        run: |
+          set -euo pipefail
+          for migration in \
+            migrations/001_init.sql \
+            migrations/002_reconcile_users_grant.sql \
+            migrations/008_user_avatar_upload.sql \
+            migrations/009_dm_e2ee.sql \
+            migrations/010_dm_inbox_sender_fk.sql \
+            migrations/011_dm_fallback_keys.sql
+          do
+            psql -h 127.0.0.1 -U postgres -d mokibox_dm_ci -v ON_ERROR_STOP=1 -f "$migration" >/dev/null
+          done
+      - name: Verify DM schema
+        run: |
+          set -euo pipefail
+          result="$(psql -h 127.0.0.1 -U postgres -d mokibox_dm_ci -Atqc "
+            SELECT to_regclass('dm_devices') IS NOT NULL
+               AND to_regclass('dm_fallback_keys') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_dm_inbox_sender_user')
+               AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_dm_inbox_sender_device')
+               AND NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_dm_inbox_sender_user_id')")"
+          test "$result" = t
