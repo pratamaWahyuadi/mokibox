@@ -95,6 +95,13 @@ db-migrate-dm: ## Apply E2EE DM migrations (009-011, forward-only).
 			psql -U $(POSTGRES_USER) -d $(DB_NAME) -v ON_ERROR_STOP=1 || exit 1; \
 	done
 
+.PHONY: db-migrate-dm-existing
+db-migrate-dm-existing: ## Apply DM 010-011 to a database that already has 009.
+	@for migration in 010_dm_inbox_sender_fk.sql 011_dm_fallback_keys.sql; do \
+		cat $(MIGRATIONS)/$$migration | $(COMPOSE) exec -T $(SERVICE_DB) \
+			psql -U $(POSTGRES_USER) -d $(DB_NAME) -v ON_ERROR_STOP=1 || exit 1; \
+	done
+
 .PHONY: db-psql
 db-psql: ## Open a psql shell as POSTGRES_USER on $(DB_NAME).
 	$(COMPOSE) exec $(SERVICE_DB) psql -U $(POSTGRES_USER) -d $(DB_NAME)

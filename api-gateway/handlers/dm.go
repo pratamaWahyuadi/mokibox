@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/labstack/echo/v4"
 
 	"github.com/pratamaWahyuadi/mokibox/api-gateway/middleware"
@@ -31,6 +32,7 @@ const (
 type dmStore interface {
 	GetDMDeviceByUser(ctx context.Context, userID uuid.UUID) (db.DmDevice, error)
 	GetDMDeviceByUserAndID(ctx context.Context, arg db.GetDMDeviceByUserAndIDParams) (db.DmDevice, error)
+	GetDMDeviceOwner(ctx context.Context, deviceID uuid.UUID) (uuid.UUID, error)
 	GetDMTargetDevice(ctx context.Context, userID uuid.UUID) (db.DmDevice, error)
 	IsDMMutualFollow(ctx context.Context, arg db.IsDMMutualFollowParams) (bool, error)
 	InsertDMOneTimeKey(ctx context.Context, arg db.InsertDMOneTimeKeyParams) (int64, error)
@@ -135,6 +137,16 @@ func (h *DMHandler) RegisterDevice(c echo.Context) error {
 			return dmStoreError("lock user for device registration", err)
 		}
 
+		owner, err := q.GetDMDeviceOwner(c.Request().Context(), deviceID)
+		switch {
+		case err == nil && owner != user.ID:
+			return shared.Wrap(shared.ErrDMDeviceStale, "device_id belongs to another user")
+		case err == nil:
+		case errors.Is(err, sql.ErrNoRows):
+		default:
+			return dmStoreError("read device owner", err)
+		}
+
 		current, err := q.GetDMDeviceByUser(c.Request().Context(), user.ID)
 		switch {
 		case err == nil:
@@ -160,6 +172,9 @@ func (h *DMHandler) RegisterDevice(c echo.Context) error {
 			IdentityEd25519:    edKey,
 		})
 		if err != nil {
+			if isDMUniqueViolation(err) {
+				return shared.Wrap(shared.ErrDMDeviceStale, "device_id belongs to another user")
+			}
 			return dmStoreError("create DM device", err)
 		}
 		return nil
@@ -499,13 +514,13 @@ func (h *DMHandler) SendMessage(c echo.Context) error {
 	status := http.StatusCreated
 
 	err = h.Run.Run(c.Request().Context(), func(q dmTxStore) error {
-		if _, err := q.GetDMDeviceByUserAndID(c.Request().Context(), db.GetDMDeviceByUserAndIDParams{
+		if _, err := q.GetDMDeviceForUpdate(c.Request().Context(), db.GetDMDeviceForUpdateParams{
 			UserID: user.ID, DeviceID: senderDeviceID,
 		}); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return shared.Wrap(shared.ErrDMDeviceStale, "device is not active")
 			}
-			return dmStoreError("read sending DM device", err)
+			return dmStoreError("lock sending DM device", err)
 		}
 
 		created, err := q.CreateDMIdempotency(c.Request().Context(), db.CreateDMIdempotencyParams{
@@ -793,6 +808,11 @@ func decodeDMBase64(value string, maxBytes int) ([]byte, string, error) {
 func dmValidation(c echo.Context, field, message string) error {
 	return shared.RespondError(c, shared.NewAPIError(shared.CodeValidationError, "Invalid DM request").
 		WithDetails(shared.FieldError{Field: field, Message: message}))
+}
+
+func isDMUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
 
 func dmStoreError(operation string, err error) error {

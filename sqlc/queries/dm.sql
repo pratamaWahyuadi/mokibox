@@ -15,6 +15,11 @@ SELECT device_id, user_id, identity_curve25519, identity_ed25519,
 FROM dm_devices
 WHERE user_id = $1 AND device_id = $2;
 
+-- name: GetDMDeviceOwner :one
+SELECT user_id
+FROM dm_devices
+WHERE device_id = $1;
+
 -- name: GetDMDeviceForUpdate :one
 SELECT device_id, user_id, identity_curve25519, identity_ed25519,
        next_inbox_sequence, created_at
@@ -31,6 +36,10 @@ FOR UPDATE;
 -- name: DeleteDMDevicesByUser :execrows
 DELETE FROM dm_devices
 WHERE user_id = $1;
+
+-- name: DeleteDMInboxByUser :execrows
+DELETE FROM dm_inbox
+WHERE sender_user_id = sqlc.arg(user_id) OR recipient_user_id = sqlc.arg(user_id);
 
 -- name: CreateDMDevice :one
 INSERT INTO dm_devices (

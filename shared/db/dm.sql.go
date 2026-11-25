@@ -250,6 +250,19 @@ func (q *Queries) DeleteDMDevicesByUser(ctx context.Context, userID uuid.UUID) (
 	return result.RowsAffected()
 }
 
+const deleteDMInboxByUser = `-- name: DeleteDMInboxByUser :execrows
+DELETE FROM dm_inbox
+WHERE sender_user_id = $1 OR recipient_user_id = $1
+`
+
+func (q *Queries) DeleteDMInboxByUser(ctx context.Context, userID uuid.UUID) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteDMInboxByUser, userID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const deleteExpiredDMIdempotency = `-- name: DeleteExpiredDMIdempotency :execrows
 DELETE FROM dm_idempotency
 WHERE expires_at <= NOW()
@@ -353,6 +366,19 @@ func (q *Queries) GetDMDeviceForUpdate(ctx context.Context, arg GetDMDeviceForUp
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const getDMDeviceOwner = `-- name: GetDMDeviceOwner :one
+SELECT user_id
+FROM dm_devices
+WHERE device_id = $1
+`
+
+func (q *Queries) GetDMDeviceOwner(ctx context.Context, deviceID uuid.UUID) (uuid.UUID, error) {
+	row := q.db.QueryRowContext(ctx, getDMDeviceOwner, deviceID)
+	var user_id uuid.UUID
+	err := row.Scan(&user_id)
+	return user_id, err
 }
 
 const getDMFallbackKey = `-- name: GetDMFallbackKey :one

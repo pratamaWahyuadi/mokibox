@@ -62,8 +62,12 @@ Redis (Asynq).
 
 Go gateway menyediakan key/device endpoints dan relay ciphertext opaque
 (`DM_E2EE_ENABLED=false` secara default). Terapkan migrasi DM dengan
-`make db-migrate-dm` (009–011: relay, sender FK, fallback key). Lihat
-[desain backend DM E2EE](./planning/13_dm_e2ee_design.md).
+`make db-migrate-dm` (009–011: relay, sender FK, fallback key); untuk DB yang
+sudah punya 009, pakai `make db-migrate-dm-existing` (010–011). Migrasi harus
+diterapkan di semua deploy walaupun flag DM mati, karena penghapusan akun
+selalu membersihkan data DM. Lihat
+[desain backend DM E2EE](./planning/13_dm_e2ee_design.md) dan
+[smoke DM](./scripts/smoketest/dm/README.md).
 
 ### Go client SDK + CLI
 
