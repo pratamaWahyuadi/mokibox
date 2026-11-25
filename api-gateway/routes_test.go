@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"database/sql"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -79,6 +81,20 @@ func TestDMRoutesFollowFeatureFlag(t *testing.T) {
 			key := want.method + " " + want.path
 			if routes[key] != enabled {
 				t.Fatalf("enabled=%v route %s present=%v", enabled, key, routes[key])
+			}
+		}
+	}
+}
+
+func TestUnknownAPIRouteSkipsAuthAndRateLimit(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		router := newRouteTestRouter(t, enabled)
+		for _, path := range []string{"/api/does-not-exist", "/api/dm/does-not-exist"} {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("enabled=%v unknown route %s returned %d: %s", enabled, path, rec.Code, rec.Body.String())
 			}
 		}
 	}

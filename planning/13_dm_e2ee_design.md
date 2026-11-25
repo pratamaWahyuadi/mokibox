@@ -118,9 +118,12 @@ only its bounded ciphertext queue supports offline recipients.
   Account deletion removes all DM inbox rows where the user is sender or
   recipient, plus device keys, fallback keys and idempotency records, in its
   existing transaction. This runs even when the DM feature flag is off, so the
-  009-011 migrations are mandatory for every deployment. Sent inbox rows
-  reference the sender user (not the short-lived device), so re-registering a
-  device does not delete delivery history.
+  009-011 migrations are mandatory for every deployment and must be applied
+  before the new binary takes traffic. Sent inbox rows reference the sender
+  user (not the short-lived device), so re-registering a device does not delete
+  delivery history. The v1 privacy decision is one-sided: deleting an account
+  also removes messages that account sent but whose recipients have not polled
+  them yet; the alternative would retain deleted-user ciphertext in the relay.
 - `GET /api/dm/users/:id/key-bundle` with `include_one_time_key=true` claims a
   one-time key and advances that device's key pool. Clients should use
   `include_one_time_key=false` for fingerprint inspection; rate limits bound
@@ -142,6 +145,10 @@ only its bounded ciphertext queue supports offline recipients.
    `scripts/smoketest/dm/README.md`.
 3. The Go SDK integration tests in `clients/dm` cover a local Olm end-to-end run
    with an in-memory relay; those tests are not a network interoperability test.
+4. `TestUnknownAPIRouteSkipsAuthAndRateLimit` proves unknown `/api/...` and
+   `/api/dm/...` paths return 404 without entering the auth or rate-limit
+   middleware. Echo adds group middleware to its synthetic not-found catch-all,
+   so `NewRouter` re-registers those two not-found paths without middleware.
 
 Smoke evidence is not a security audit. Production enablement still requires
 an independently reviewed, interoperable client and an independent security

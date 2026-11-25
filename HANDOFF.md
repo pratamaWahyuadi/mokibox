@@ -77,13 +77,22 @@ Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
   LOCKED`, `ON CONFLICT ... WHERE`, dan ciphertext-only storage. Bukti ada di
   `scripts/smoketest/dm/README.md`.
 - `apiDelivery` hanya dibuat saat flag DM aktif; tes route memeriksa enam route
-  DM mengikuti flag dan tidak ada catch-all `/api/*` buatan.
+  DM mengikuti flag. Echo secara otomatis memberi middleware group pada
+  catch-all 404 buatannya, jadi `NewRouter` mendaftar ulang `/api/*` dan
+  `/api/dm/*` tanpa middleware; `TestUnknownAPIRouteSkipsAuthAndRateLimit`
+  membuktikan path tak dikenal kembali 404 tanpa auth/rate limit.
 - Registrasi `device_id` milik user lain kini `409 DM_DEVICE_STALE`, termasuk
   fallback untuk race `23505`. Send mengunci device pengirim dengan
   `FOR UPDATE` agar re-register konkuren tidak menyisakan FK error 500.
 - Tes tambahan: non-mutual follow 404, stale device upload/poll/ack 409, ack
   pesan device lain 404, validasi `after`/`limit`, user nonaktif 401, janitor,
   dan state v1 → v2.
+- Smoke concurrent claim diperkuat: transaksi pertama menahan lock, transaksi
+  kedua harus mengambil key berbeda dalam 3 detik; cleanup dipindah ke `defer`
+  agar gagal di tengah tidak menyisakan data.
+- Deploy gate didokumentasikan: migrasi 009–011 wajib sebelum binary baru
+  melayani traffic. Keputusan v1 penghapusan sepihak dan drift index 010 lama
+  juga dicatat.
 
 ## DM E2EE — backend relay only
 

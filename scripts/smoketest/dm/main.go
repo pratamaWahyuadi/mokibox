@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -122,6 +121,25 @@ func run() error {
 		return fmt.Errorf("ping database: %w", err)
 	}
 	q := db.New(sqlDB)
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cleanupCancel()
+		if _, err := q.DeleteDMInboxByUser(cleanupCtx, userA); err != nil {
+			fmt.Fprintln(os.Stderr, "cleanup inbox A:", err)
+		}
+		if _, err := q.DeleteDMInboxByUser(cleanupCtx, userB); err != nil {
+			fmt.Fprintln(os.Stderr, "cleanup inbox B:", err)
+		}
+		if _, err := q.DeleteDMDevicesByUser(cleanupCtx, userA); err != nil {
+			fmt.Fprintln(os.Stderr, "cleanup devices A:", err)
+		}
+		if _, err := q.DeleteDMDevicesByUser(cleanupCtx, userB); err != nil {
+			fmt.Fprintln(os.Stderr, "cleanup devices B:", err)
+		}
+		if _, err := sqlDB.ExecContext(cleanupCtx, `DELETE FROM follows WHERE (follower_id = $1 AND followee_id = $2) OR (follower_id = $2 AND followee_id = $1)`, userA, userB); err != nil {
+			fmt.Fprintln(os.Stderr, "cleanup follows:", err)
+		}
+	}()
 
 	if err := assertSchema(ctx, sqlDB); err != nil {
 		return err
@@ -195,11 +213,6 @@ func run() error {
 		return err
 	}
 
-	_, _ = q.DeleteDMInboxByUser(ctx, userA)
-	_, _ = q.DeleteDMInboxByUser(ctx, userB)
-	_, _ = q.DeleteDMDevicesByUser(ctx, userA)
-	_, _ = q.DeleteDMDevicesByUser(ctx, userB)
-	_, _ = sqlDB.ExecContext(ctx, `DELETE FROM follows WHERE (follower_id = $1 AND followee_id = $2) OR (follower_id = $2 AND followee_id = $1)`, userA, userB)
 	return nil
 }
 
@@ -275,38 +288,59 @@ func assertFallbackKey(ctx context.Context, sqlDB *sql.DB, deviceID uuid.UUID) e
 }
 
 func verifyConcurrentKeyClaim(ctx context.Context, sqlDB *sql.DB, q *db.Queries, deviceID uuid.UUID) error {
-	claimed := make([]string, 2)
-	errs := make([]error, 2)
-	var wg sync.WaitGroup
-	for i := 0; i < 2; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			tx, err := sqlDB.BeginTx(ctx, nil)
-			if err != nil {
-				errs[i] = err
-				return
-			}
-			defer tx.Rollback()
-			row, err := q.WithTx(tx).ClaimDMOneTimeKey(ctx, deviceID)
-			if err != nil {
-				errs[i] = err
-				return
-			}
-			errs[i] = tx.Commit()
-			claimed[i] = row.KeyID
-		}(i)
+	type claimResult struct {
+		keyID string
+		err   error
 	}
-	wg.Wait()
-	for i, err := range errs {
+
+	firstTx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin first key claim: %w", err)
+	}
+	defer firstTx.Rollback()
+
+	first, err := q.WithTx(firstTx).ClaimDMOneTimeKey(ctx, deviceID)
+	if err != nil {
+		return fmt.Errorf("first key claim: %w", err)
+	}
+
+	claimCtx, claimCancel := context.WithTimeout(ctx, 3*time.Second)
+	defer claimCancel()
+	done := make(chan claimResult, 1)
+	go func() {
+		tx, err := sqlDB.BeginTx(claimCtx, nil)
 		if err != nil {
-			return fmt.Errorf("concurrent key claim %d: %w", i, err)
+			done <- claimResult{err: err}
+			return
 		}
+		defer tx.Rollback()
+		row, err := q.WithTx(tx).ClaimDMOneTimeKey(claimCtx, deviceID)
+		if err != nil {
+			done <- claimResult{err: err}
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			done <- claimResult{err: err}
+			return
+		}
+		done <- claimResult{keyID: row.KeyID}
+	}()
+
+	select {
+	case result := <-done:
+		if result.err != nil {
+			return fmt.Errorf("overlapping key claim: %w", result.err)
+		}
+		if result.keyID == first.KeyID {
+			return fmt.Errorf("overlapping claims returned the same key %q", result.keyID)
+		}
+		if err := firstTx.Commit(); err != nil {
+			return fmt.Errorf("commit first key claim: %w", err)
+		}
+		return nil
+	case <-claimCtx.Done():
+		return fmt.Errorf("overlapping claim blocked on locked row: %w", claimCtx.Err())
 	}
-	if claimed[0] == claimed[1] {
-		return fmt.Errorf("concurrent claims returned the same key %q", claimed[0])
-	}
-	return nil
 }
 
 func verifyIdempotencyUpsert(ctx context.Context, sqlDB *sql.DB, q *db.Queries, deviceID uuid.UUID) error {
