@@ -38,8 +38,9 @@ Optional:
   the old `fk_dm_inbox_sender_device` is gone. This covers migrations `009`-`011`.
 - Two devices register through HTTP; one uploads two one-time keys and a fallback
   key; the fallback row is visible in PostgreSQL.
-- Two concurrent transactions call `ClaimDMOneTimeKey` and receive different
-  keys, exercising `FOR UPDATE SKIP LOCKED`.
+- One transaction claims a key and holds it open while a second transaction
+  must claim a different key within 3 seconds, proving `FOR UPDATE SKIP LOCKED`
+  instead of merely testing two fast commits.
 - An expired idempotency row is replaced through `ON CONFLICT ... WHERE`, and a
   second conflicting write on the refreshed row returns `sql.ErrNoRows` without
   overwriting it.
@@ -48,8 +49,9 @@ Optional:
 - `GET /api/dm/inbox` sees the message; `POST /api/dm/inbox/:message_id/ack`
   sets `acknowledged_at` and NULLs `ciphertext`.
 - No row contains the smoke plaintext substring `smoke-ciphertext`.
-- Test rows, follows, devices, keys, and idempotency records are removed at the
-  end with the same queries used by account deletion.
+- Test rows, follows, devices, keys, and idempotency records are removed with
+  `defer` using the same queries as account deletion, so failures mid-run do not
+  leave state behind.
 
 ## Evidence
 
@@ -63,7 +65,11 @@ Go 1.25.5, gateway built from this branch):
   `fk_dm_inbox_sender_device` absent.
 - `go run ./scripts/smoketest/dm` → `PASS scripts/smoketest/dm` on both the
   fresh database and the existing-`009` database; the fresh run was repeated
-  back-to-back for rerun safety.
+  back-to-back. The overlapping-claim check held one transaction open while the
+  second claimed a different key within 3 seconds.
+- `curl` against the running gateway: unknown `/api/tidak-ada` and
+  `/api/dm/tidak-ada` both returned `404 NOT_FOUND` without auth or rate-limit
+  middleware.
 - Separate two-user end-to-end client run → `LIVE_DM_E2EE_SMOKE_OK` and
   `LIVE_DM_OUTBOX_RETRY_OK`.
 - Live `DELETE /api/users/me` on a seeded user with an active DM device,
