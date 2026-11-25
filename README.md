@@ -65,9 +65,16 @@ Go gateway menyediakan key/device endpoints dan relay ciphertext opaque
 `make db-migrate-dm` (009–011: relay, sender FK, fallback key); untuk DB yang
 sudah punya 009, pakai `make db-migrate-dm-existing` (010–011). Migrasi harus
 diterapkan di semua deploy walaupun flag DM mati, karena penghapusan akun
-selalu membersihkan data DM. Lihat
-[desain backend DM E2EE](./planning/13_dm_e2ee_design.md) dan
-[smoke DM](./scripts/smoketest/dm/README.md).
+selalu membersihkan data DM. Ini adalah gate deploy: jalankan migrasi sebelum
+binary baru melayani traffic; kalau tidak, `DELETE /api/users/me` akan 500 saat tx
+cleanup menyentuh tabel DM yang belum ada.
+
+DB yang sudah menerapkan revisi lama migrasi 010 mungkin masih memiliki index
+`idx_dm_inbox_sender_user_id` yang duplikat. Ini hanya drift, tidak merusak;
+hapus manual dengan `DROP INDEX IF EXISTS idx_dm_inbox_sender_user_id;` jika
+ingin rapi. Lihat
+ [desain backend DM E2EE](./planning/13_dm_e2ee_design.md)
+dan [smoke DM](./scripts/smoketest/dm/README.md).
 
 ### Go client SDK + CLI
 

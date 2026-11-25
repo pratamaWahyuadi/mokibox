@@ -382,5 +382,11 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	// into docs.go), covering every route above.
 	registerDocsRoutes(e)
 
+	notFound := func(c echo.Context) error { return echo.ErrNotFound }
+	e.RouteNotFound("/api/*", notFound)
+	if d.Cfg != nil && d.Cfg.DME2EEEnabled {
+		e.RouteNotFound("/api/dm/*", notFound)
+	}
+
 	return e
 }
