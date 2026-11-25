@@ -72,8 +72,9 @@ cleanup menyentuh tabel DM yang belum ada.
 DB yang sudah menerapkan revisi lama migrasi 010 mungkin masih memiliki index
 `idx_dm_inbox_sender_user_id` yang duplikat. Ini hanya drift, tidak merusak;
 hapus manual dengan `DROP INDEX IF EXISTS idx_dm_inbox_sender_user_id;` jika
-ingin rapi. Lihat [desain backend DM E2EE](./planning/13_dm_e2ee_design.md)
-dan [smoke DM](./scripts/smoketest/dm/README.md).
+ingin rapi. Lihat [desain backend DM E2EE](./planning/13_dm_e2ee_design.md),
+[gate rilis DM](./planning/14_dm_e2ee_release_gate.md), dan
+[smoke DM](./scripts/smoketest/dm/README.md).
 
 CI menjalankan build, vet, test, race test, verifikasi modul, dan migrasi
 009–011 pada PostgreSQL 16 untuk setiap PR; definisinya ada di
