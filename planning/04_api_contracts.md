@@ -19,7 +19,10 @@
      "event_payload": { }
    }
    ```
-   User ID terdampak diambil dari field `userID`. `event_type` yang relevan: `user.removed` (user dihapus) dan `user.deactivated` (user dinonaktifkan) — nilai ini konstanta resmi Zitadel, bukan skema custom.
+   User ID terdampak diambil dari field `aggregateID` (user yang terdampak
+  event; `userID` hanya fallback bila `aggregateID` kosong — `userID`
+  biasanya adalah AKTOR/admin).
+  `event_type` yang relevan: `user.removed` (user dihapus) dan `user.deactivated` (user dinonaktifkan) — nilai ini konstanta resmi Zitadel, bukan skema custom.
 
    Signature diletakkan di header `ZITADEL-Signature`, formatnya `t=<timestamp>,v1=<hmac_hex>`. HMAC dihitung dari `timestamp + "." + raw_body` menggunakan `signingKey` yang didapat sekali dari response `CreateTarget` (disimpan sebagai `ZITADEL_TARGET_SIGNING_KEY`), **bukan** secret statis yang dibuat sendiri. Verifikasi memakai helper resmi `actions.ValidateRequestPayload` dari `github.com/zitadel/zitadel-go/v3/pkg/actions`.
 
@@ -556,17 +559,10 @@ Response `200 OK`:
       "views_count": 120,
       "comments_count": 2,
       "created_at": "2025-01-01T12:00:00Z",
-      "thumbnail_url": "https://r2.example.com/thumb/...",
-      "hls_playlist_url": "https://api.example.com/api/videos/d3f4.../playlist.m3u8?token=...",
-      "liked_by_me": false,
-      "is_owner": false,
-      "user": {
-        "id": "9f7d3c86-....",
-        "username": "bob",
-        "display_name": "Bob",
-        "avatar_url": "https://r2.example.com/avatars/bob.jpg",
-        "is_private": true
-      }
+      "thumbnail_url": null,
+      "hls_playlist_url": null,
+      "liked_by_me": null,
+      "is_owner": false
     }
   ],
   "pagination": {
@@ -574,6 +570,8 @@ Response `200 OK`:
   }
 }
 ```
+
+Catatan: pada list ini `thumbnail_url`, `hls_playlist_url`, dan `liked_by_me` selalu `null` (pointer tidak pernah diisi di handler), dan TIDAK ada objek `user` embedded (beda dengan detail video / feed).
 
 Error: `400`, `401`, `404`, `500`.
 
@@ -601,7 +599,7 @@ Request body:
 }
 ```
 
-`title` dan `description` opsional.
+`title` WAJIB (1–200 karakter setelah trim; whitespace-only ditolak dengan `400 VALIDATION_ERROR`), `description` opsional (maks 5000).
 
 Response `201 Created` jika record `PENDING_UPLOAD` baru dibuat.  
 Response `200 OK` jika user sudah punya record `PENDING_UPLOAD` dan presigned URL baru diterbitkan.
@@ -772,6 +770,8 @@ Mengembalikan HLS playlist yang sudah di-rewrite. Setiap URL segmen di dalam pla
 
 Auth: bisa menggunakan header Bearer JWT, atau query parameter `?token=` jika client media player tidak bisa mengirim header.
 
+Query parameter opsional: `?variant=480p|720p` untuk variant playlist (tanpa parameter → master playlist; nilai lain → `400 VALIDATION_ERROR`).
+
 Headers:
 
 ```
@@ -794,7 +794,7 @@ https://r2.example.com/hls/<user_id>/<video_id>/segment1.ts?X-Amz-...
 #EXT-X-ENDLIST
 ```
 
-Error: `401`, `403`, `404`, `500`.
+Error: `401`, `404` (bukan owner / video tidak ditemukan — anti-enumerasi, bukan 403), `500`.
 
 ---
 
@@ -812,7 +812,7 @@ Authorization: Bearer <access_token>
 
 Response `204 No Content`.
 
-Error: `401`, `403`, `404`, `500`.
+Error: `401`, `404` (bukan owner / tidak ditemukan — anti-enumerasi, bukan 403), `500`.
 
 ---
 
@@ -926,14 +926,15 @@ Authorization: Bearer <access_token>
 
 Tidak ada request body.
 
-Response `200 OK`:
+Response `200 OK` (`created_at` kosong `""` — tidak ada row untuk diambil timestamp-nya):
 
 ```json
 {
   "data": {
     "follower_id": "3f7d3c86-a1b2-4e5f-9c0d-1234567890ab",
     "followee_id": "9f7d3c86-....",
-    "is_following": false
+    "is_following": false,
+    "created_at": ""
   }
 }
 ```
@@ -1058,8 +1059,7 @@ Response `200 OK`:
 
 Error:
 - `401`
-- `404` — video tidak ditemukan / tidak bisa diakses.
-- `409 VIDEO_NOT_READY` — video belum siap (khusus owner).
+- `404` — video tidak ditemukan / tidak bisa diakses. (Catatan: video non-READY untuk non-owner juga 404 via anti-enumerasi; kode tidak lagi mengembalikan `409 VIDEO_NOT_READY`.)
 - `500`
 
 ---
@@ -1138,8 +1138,7 @@ Response `201 Created`:
 Error:
 - `400 VALIDATION_ERROR` — content kosong / lebih dari 1000 karakter.
 - `401`
-- `404` — video tidak ditemukan / tidak bisa diakses.
-- `409 VIDEO_NOT_READY`
+- `404` — video tidak ditemukan / tidak bisa diakses (video non-READY juga 404, anti-enumerasi).
 - `500`
 
 ---
@@ -1204,7 +1203,7 @@ Authorization: Bearer <access_token>
 
 Response `204 No Content`.
 
-Error: `401`, `403`, `404`, `500`.
+Error: `401`, `404` (bukan owner / tidak ditemukan — anti-enumerasi, bukan 403), `500`.
 
 ---
 
@@ -1252,8 +1251,7 @@ Response `201 Created`:
 Error:
 - `400 VALIDATION_ERROR`
 - `401`
-- `404` — parent comment tidak ditemukan / video tidak bisa diakses.
-- `409 VIDEO_NOT_READY`
+- `404` — parent comment tidak ditemukan / video tidak bisa diakses (video non-READY juga 404, anti-enumerasi).
 - `500`
 
 ---
@@ -1287,8 +1285,7 @@ Response `200 OK`:
 
 Error:
 - `401`
-- `404` — video tidak ditemukan / tidak bisa diakses.
-- `409 VIDEO_NOT_READY`
+- `404` — video tidak ditemukan / tidak bisa diakses (video non-READY juga 404, anti-enumerasi).
 - `500`
 
 ---
@@ -1396,17 +1393,18 @@ Request body (format bawaan Actions V2, bukan skema custom):
 ```
 
 Behavior:
-- `event_type == "user.removed"` → tombstone user lokal (`userID`), nonaktifkan `is_active = false`, set `deleted_at`, hapus data relasional, enqueue cleanup R2.
-- `event_type == "user.deactivated"` → set `is_active = false` untuk `userID`.
+- `event_type == "user.removed"` → tombstone user lokal (`aggregateID`, fallback `userID`), nonaktifkan `is_active = false`, set `deleted_at`, hapus data relasional, enqueue cleanup R2.
+- `event_type == "user.deactivated"` → set `is_active = false` untuk user terdampak.
 - `event_type` lain yang ke-trigger tak sengaja → `400 WEBHOOK_EVENT_UNSUPPORTED`.
 
-Response `200 OK`:
+Verifikasi signature: HMAC-SHA256 atas string `"<unix-seconds>.<raw_body>"`, header `ZITADEL-Signature: t=<unix-seconds>,v1=<hex>`, toleransi timestamp 300 detik.
+
+Response `200 OK` (tanpa field `event`; `sequence` bertipe number):
 
 ```json
 {
   "data": {
-    "status": "processed",
-    "event": "user.removed"
+    "status": "processed"
   }
 }
 ```
@@ -1418,3 +1416,46 @@ Error:
 - `500`
 
 ---
+
+---
+
+## 99. Utilitas & Dokumentasi
+
+### `GET /healthz`
+
+Health check gateway. Tanpa auth, di luar grup `/api`.
+
+Response `200 OK`: `{"data":{"status":"ok"}}` (tanpa cek dependensi — verifier-retry safe).
+
+Error: `500` (gateway internal).
+
+---
+
+### `GET /api/search`
+
+Search users + videos. Query Parameters:
+
+| Nama | Tipe | Keterangan |
+|---|---|---|
+| `q` | string | Wajib, 1–100 karakter (rune count) |
+| `type` | string | `all` (default) / `users` / `videos` |
+| `limit` | integer | Default 20, max 50 |
+| `cursor` | string | Opsional, offset-based (`offset:<n>` base64) |
+
+Rules:
+- Hanya akun aktif & video `READY` + `deleted_at IS NULL`.
+- Video privat hanya muncul untuk owner.
+- Exact-match username (case-insensitive) diberi ranking lebih tinggi.
+- `%`/`_` di-escape (bukan wildcard).
+
+Auth: JWT (dalam grup `/api`).
+
+Error: `400 VALIDATION_ERROR`, `401`, `500`.
+
+---
+
+### `GET /api/docs` (dan `/api/docs/swagger.json`, `/api/docs/oauth2-redirect.html`)
+
+Swagger UI + spec + OAuth2 redirect helper. Tanpa auth (di-root Echo, luar grup `/api`), di-serve gateway via `go:embed` — perubahan docs butuh rebuild image.
+
+Response `200 OK`: HTML / JSON / JS statis.
