@@ -95,6 +95,9 @@ Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
   juga dicatat.
 - CI ditambahkan di `.github/workflows/ci.yml`: build/vet/test/race/mod verify
   dengan Go dari `go.mod` (1.25.5) dan job migrasi 009–011 pada PostgreSQL 16.
+- Gate rilis DM, template keputusan produk, dan template persetujuan
+  lisensi/audit dirangkum di
+  `planning/14_dm_e2ee_release_gate.md`.
 
 ## DM E2EE — backend relay only
 
