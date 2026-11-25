@@ -3,6 +3,74 @@
 State captured 2026-09-09, post domain-migration lokal (DOMAIN-MIGRATION-LOCAL-PROMPT.md).
 Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
 
+## Go DM client SDK + CLI (ditambahkan sesi ini)
+
+- `clients/dm` dan `clients/dm/cmd/dmcli` menyediakan client Olm v1 referensi:
+  register device, upload signed one-time keys, key bundle + fingerprint
+  verification, encrypt/decrypt, inbox poll, ack retry, dan pickle state
+  terenkripsi (`0600`).
+- Dependensi kriptografi: `maunium.net/go/mautrix v0.30.0`
+  (`crypto/goolm`, pure Go, MPL-2.0). Tidak ada cgo/libolm.
+- `go build ./...`, `go vet ./...`, `go test ./... -count=1` lulus. Tes client
+  memakai relay in-memory (`httptest`), bukan PostgreSQL/Zitadel.
+- Smoke live lokal 2026-11-25 memakai gateway `.smoke` + fake OIDC + PostgreSQL:
+  dua user saling follow, tukar fingerprint dari key bundle, A→B dan B→A
+  berhasil di-encrypt/relay/decrypt/ack. Row unacked berisi 95 byte ciphertext,
+  sentinel plaintext tidak ditemukan di DB; hasil `LIVE_DM_E2EE_SMOKE_OK`.
+- Flag backend tetap `DM_E2EE_ENABLED=false`; client ini belum melewati
+  independent security review/pentest. Jangan klaim production-ready.
+
+## Security review + PR readiness (2026-11-25)
+
+- HIGH diperbaiki: `dmStoreError`/`dmInternal` dulu mengirim detail DB/nama operasi
+  ke klien lewat `ClassifyError`; sekarang respons generic `INTERNAL_ERROR`, detail
+  tetap di log (`api-gateway/handlers/dm.go:754`,
+  `api-gateway/handlers/dm_test.go:498`).
+- MEDIUM diperbaiki: rotasi fingerprint ditolak sampai `ForceVerify`/`-force`
+  (`clients/dm/service.go:191`), `Send`/`Receive` dimutex untuk pemakaian konkuren,
+  `NewClient` menolak `http` ke host non-loopback (`clients/dm/client.go:36`),
+  CLI bisa baca plaintext dari stdin, dan trust store hanya mutasi setelah write
+  sukses (`clients/dm/store.go:144`).
+- Risiko residual: server tidak memverifikasi tanda tangan OTK (sesuai kontrak;
+  client yang memverifikasi), satu device aktif per user, metadata terlihat server,
+  rate limit DM 20 burst, Zitadel asli/pentest belum diuji.
+- Verified: `go build ./...`, `go vet ./...`, `go test ./... -count=1`,
+  `go test -race ./clients/... ./api-gateway/... -count=1`, `go mod verify`, dan
+  secret scan; hanya placeholder/example + dummy `.smoke`, private key dan pickle
+  key ber-mode `0600`.
+- Untuk PR: sertakan `clients/dm`, `go.mod/go.sum`, `api-gateway/handlers/dm.go`,
+  `api-gateway/handlers/dm_test.go`, `migrations/009_dm_e2ee.sql`, `README.md`, dan
+  `HANDOFF.md`. Aktifkan flag di environment; jangan commit token/pickle key.
+
+## DM E2EE — backend relay only
+
+- Go gateway, migration `009_dm_e2ee.sql`, opaque ciphertext relay, key/device
+  endpoints, inbox polling/ack, idempotency, TTL janitor, dan feature gate
+  tersedia. Compose meneruskan `DM_E2EE_ENABLED` dan `DM_INBOX_TTL`; flag
+  default tetap mati dan TTL v1 adalah 168 jam.
+- Pemilik menjalankan smoke lokal; bukti rinci ada di folder kerja asli
+  `mokibox-main/.smoke/REPORT.md` dan tidak ikut disalin ke sini. Laporan mencatat
+  Go build/vet/test/race, HTTP/PostgreSQL relay, ciphertext-only storage,
+  feature-flag-off, dan Olm encrypt→relay→decrypt. Zitadel asli dan production
+  tidak diuji; ini bukan audit keamanan independen.
+- Laporan smoke menemukan dua Critical yang kemudian diperbaiki: base64 DM
+  kini dikembalikan tanpa padding secara kanonis, dan `make db-migrate`
+  menerapkan migration files berurutan. Perintah migrasi forward-only, tanpa
+  ledger: gunakan hanya pada database kosong yang disposable, jangan ulangi.
+- Respon ganda setelah kegagalan auth dari laporan smoke sudah diperbaiki di
+  middleware dan dicakup tes regresi Go.
+- Validasi setelah patch auth: `go test ./... -count=1`, `go vet ./...`, dan
+  `go build ./...` lulus. Smoke tidak dijalankan ulang dan migration tidak
+  diterapkan oleh assistant.
+- Atas keputusan pemilik, package `clients/dm_core` dan helper Dart sementara
+  di `.smoke/` dihapus. Laporan/log bukti lokal dipertahankan. Backend tetap
+  hanya relay ciphertext; client Olm yang melakukan key verification,
+  encrypt/decrypt, dan secure local storage harus disediakan terpisah. SDK Go +
+  CLI referensi kini tersedia di `clients/dm` (lihat bagian atas), tetapi belum
+  melewati independent security review.
+- Production flag tetap mati. Belum ada client Olm eksternal terintegrasi,
+  independent security review, atau pentest; jangan klaim production-ready.
+
 ## Profile avatar upload — PR #72
 
 - Backend menyediakan `POST /api/users/me/avatar/upload-intent` dan

@@ -42,6 +42,12 @@
 //   - GET  /api/notifications                (auth)
 //   - PUT  /api/notifications/read-all       (auth)
 //   - DELETE /api/users/me                   (auth)
+//   - POST /api/dm/device                    (auth + feature flag)
+//   - POST /api/dm/device/one-time-keys      (auth + feature flag)
+//   - GET  /api/dm/users/:id/key-bundle      (auth + feature flag)
+//   - POST /api/dm/messages                  (auth + feature flag)
+//   - GET  /api/dm/inbox                     (auth + feature flag)
+//   - POST /api/dm/inbox/:message_id/ack     (auth + feature flag)
 //   - GET  /api/docs/swagger.json             (no auth; raw OpenAPI spec)
 //   - GET  /api/docs/                         (no auth; minimal Swagger UI index)
 //   - GET  /api/docs                          (no auth; same as above)
@@ -177,6 +183,29 @@ func NewRouter(d RouterDeps) *echo.Echo {
 		}),
 		authRateLimit,
 	)
+
+	if d.Cfg != nil && d.Cfg.DME2EEEnabled {
+		dmHandler, err := handlers.NewDMHandler(d.Queries, d.DB, d.Cfg.DMInboxTTL)
+		if err != nil {
+			panic(fmt.Sprintf("api-gateway: NewDMHandler: %v", err))
+		}
+		dmRateLimit, err := middleware.NewRateLimitAuth(middleware.RateLimitConfig{
+			Rate:          rate.Limit(1.0 / 3.0),
+			Burst:         20,
+			TTL:           10 * time.Minute,
+			SweepInterval: 5 * time.Minute,
+		})
+		if err != nil {
+			panic(fmt.Sprintf("api-gateway: NewRateLimitAuth for DM: %v", err))
+		}
+		dm := api.Group("/dm", dmRateLimit)
+		dm.POST("/device", dmHandler.RegisterDevice)
+		dm.POST("/device/one-time-keys", dmHandler.UploadOneTimeKeys)
+		dm.GET("/users/:id/key-bundle", dmHandler.GetKeyBundle)
+		dm.POST("/messages", dmHandler.SendMessage)
+		dm.GET("/inbox", dmHandler.PollInbox)
+		dm.POST("/inbox/:message_id/ack", dmHandler.AcknowledgeMessage)
+	}
 
 	uh, err := handlers.NewUserHandler(d.Queries, d.R2, d.Queue, d.Cfg)
 	if err != nil {
