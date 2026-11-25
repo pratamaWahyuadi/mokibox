@@ -172,6 +172,9 @@ Semua endpoint berada di `/api/dm`, memerlukan JWT Zitadel dan hanya
 diregistrasikan saat `DM_E2EE_ENABLED=true`. API tidak pernah menerima
 plaintext atau private key. Semua binary key/ciphertext dikirim sebagai
 base64. User/device authorization tidak bergantung pada UUID rahasia.
+Rate limit dibagi dua bucket per user: kontrol (device, key upload, bundle,
+send) 20 burst 1/3 detik, dan pengiriman (poll/ack) 120 burst 10/detik;
+poll/ack sengaja tidak memakai limiter auth generik 60/menit.
 
 ### `POST /api/dm/device`
 
@@ -204,7 +207,9 @@ lagi.
 ### `POST /api/dm/device/one-time-keys`
 
 Upload batch maksimum 100 signed Olm one-time keys. Device harus device aktif
-milik caller.
+milik caller. Field `fallback_key` opsional dan formatnya sama seperti satu
+one-time key; server menyimpan satu fallback key per device untuk dipakai saat
+one-time key habis.
 
 ```json
 {
@@ -215,23 +220,31 @@ milik caller.
       "public_key": "base64-public-key",
       "signature": "base64-ed25519-signature"
     }
-  ]
+  ],
+  "fallback_key": {
+    "key_id": "fallback-key-id",
+    "public_key": "base64-public-key",
+    "signature": "base64-ed25519-signature"
+  }
 }
 ```
 
-Response `200`: `{ "data": { "accepted": 1 } }`. Server menyimpan signatures
-secara opaque; peer client wajib memverifikasinya dengan identity key.
+Response `200`: `{ "data": { "accepted": 1 } }` (`accepted` hanya menghitung
+one-time key). Server menyimpan signatures secara opaque; peer client wajib
+memverifikasinya dengan identity key.
 
 ### `GET /api/dm/users/:id/key-bundle?device_id=uuid&include_one_time_key=true`
 
 Caller harus memiliki device aktif. Target harus aktif dan mutual-follow.
 Response `200` berisi target `user_id`, `device_id`, kedua identity public
-keys, dan default-nya satu one-time key yang diklaim secara atomik. Dengan
-`include_one_time_key=false`, response hanya berisi identity keys dan
-`one_time_key: null`; client memakai opsi ini untuk fingerprint checking agar
-tidak membakar key. Jika key diminta tetapi tidak tersedia, response
-`409 DM_KEY_UNAVAILABLE`. Target yang tidak ditemukan atau tidak memenuhi
-mutual-follow sama-sama `404 NOT_FOUND`.
+keys, dan default-nya satu one-time key yang diklaim secara atomik. Jika tidak
+ada one-time key, server mengembalikan `fallback_key` yang tersimpan (tidak
+dikonsumsi per sesi). Dengan `include_one_time_key=false`, response hanya berisi
+identity keys dan `one_time_key: null`; client memakai opsi ini untuk
+fingerprint checking agar tidak membakar key. Jika key diminta tetapi neither
+one-time nor fallback key tersedia, response `409 DM_KEY_UNAVAILABLE`. Target
+yang tidak ditemukan atau tidak memenuhi mutual-follow sama-sama
+`404 NOT_FOUND`.
 
 ### `POST /api/dm/messages`
 
@@ -267,9 +280,10 @@ Retry yang cocok mengembalikan body yang sama dengan status `200`.
 Hanya pesan pending untuk device aktif caller dengan `sequence > after` yang
 dikembalikan, urut sequence menaik. Response berisi IDs/routing metadata,
 Olm envelope, ciphertext, dan timestamps. Poll tidak memperpanjang TTL dan
-tidak acknowledge pesan. Client hanya memajukan cursor lokal setelah pesan
-berhasil diproses dan di-ack secara berurutan; cursor tidak boleh melompati
-pesan pending dengan sequence lebih rendah.
+tidak acknowledge pesan. Client memajukan cursor setelah ack sukses. Pesan
+dengan envelope/ciphertext rusak, decrypt gagal, session hilang, atau
+fingerprint berubah dikarantina lokal (tidak di-ack, tidak menghentikan
+sequence berikutnya); cursor tetap maju melewati pesan tersebut.
 
 ### `POST /api/dm/inbox/:message_id/ack`
 
@@ -288,10 +302,10 @@ ack berhasil dengan `204`; ciphertext dihapus dari penyimpanan inbox.
 | 401 | `UNAUTHORIZED` | JWT hilang, invalid, atau user nonaktif |
 | 404 | `NOT_FOUND` | Target tak ada atau mutual-follow tidak terpenuhi |
 | 409 | `DM_DEVICE_STALE` | Device ID tidak lagi aktif untuk caller |
-| 409 | `DM_KEY_UNAVAILABLE` | Tidak ada one-time key untuk target |
+| 409 | `DM_KEY_UNAVAILABLE` | Tidak ada one-time atau fallback key untuk target |
 | 409 | `DM_IDEMPOTENCY_CONFLICT` | ID client dipakai ulang dengan body berbeda |
 | 409 | `DM_INBOX_FULL` | Recipient memiliki 1,000 pesan pending |
-| 429 | `RATE_LIMITED` | Per-user DM limiter menolak request |
+| 429 | `RATE_LIMITED` | Per-user DM control (20 burst) atau delivery (120 burst) limiter menolak request |
 | 500 | `INTERNAL_ERROR` | Kegagalan DB/internal; detail hanya di log |
 
 Pengiriman diperiksa mutual-follow pada saat send. Jika follow relation berubah
