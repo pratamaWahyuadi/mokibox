@@ -43,6 +43,17 @@ Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
 
 ## Production deploy VPS (2026-09-10) — AKTIF (prompt 2 selesai)
 
+> **DOMAIN TRIO SAAT INI (2026-11, keputusan user 2026-11-25):**
+> backend `https://api.mokibox.my.id`, Zitadel
+> `https://auth.mokibox.my.id`, frontend apex
+> `https://mokibox.my.id`. Migrasi dari
+> `mokiboxapi.binery.my.id` sudah live di VPS (vhost + DNS +
+> TLS + R2 CORS origin + target webhook Zitadel baru
+> `https://api.mokibox.my.id/api/webhooks/zitadel`).
+> Referensi `*.binery.my.id` di bawah dan di dokumen
+> riwayat (bagian 2026-09) adalah KONDISI LAMA — lihat
+> juga bagian "Riwayat domain API (pre-2026-11)" di bawah.
+
 MokiBox production live di VPS multi-tenant `43.157.227.130`,
 repo `/www/wwwroot/mokibox` (branch `deploy/aapanel` — bukan main,
 sesuai keputusan user: main bebas perubahan yang menyesuaikan aaPanel).
@@ -57,29 +68,35 @@ sesuai keputusan user: main bebas perubahan yang menyesuaikan aaPanel).
 - Zitadel: sibling compose `zitadel-compose/` fresh instance
   (volumes bootstrap+postgres-data fresh), Traefik publish
   `127.0.0.1:8181:80`, deny-list DEFAULT (tanpa bypass dev).
-- vhost aaPanel: `mokiboxapi.binery.my.id` → 127.0.0.1:8180,
-  `auth.mokibox.my.id` → 127.0.0.1:8181 (file
-  `/www/server/panel/vhost/nginx/mokiboxapi.binery.my.id.conf`,
-  `/www/server/panel/vhost/nginx/auth.mokibox.my.id.conf`;
-  HSTS max-age=63072000, X-Content-Type-Options, X-Frame-Options,
-  Referrer-Policy; /callback 302). Alias `/demo/` di vhost sudah
-  tidak relevan — demo web DIHAPUS, digantikan Swagger UI `/api/docs`.
-- TLS: wildcard LE `*.binery.my.id` + apex via acme.sh DNS-01
-  (Cloudflare API token), cert di
+- vhost aaPanel SAAT INI (2026-11): `api.mokibox.my.id` → 127.0.0.1:8180,
+  `auth.mokibox.my.id` → 127.0.0.1:8181, apex `mokibox.my.id` → SPA
+  MokiBox-web (HSTS max-age=63072000, X-Content-Type-Options,
+  X-Frame-Options, Referrer-Policy; /callback 302). Riwayat vhost lama
+  `mokiboxapi.binery.my.id.conf` (pre-2026-11) sudah dipensiunkan.
+  Demo web DIHAPUS, digantikan Swagger UI `/api/docs`.
+- TLS SAAT INI: cert per-domain via acme.sh DNS-01 (Cloudflare API
+  token) — `api.mokibox.my.id`, `auth.mokibox.my.id`,
+  `mokibox.my.id`, wildcard `*.mokibox.my.id` — di
   `/www/server/panel/vhost/cert/<domain>/{fullchain,privkey}.pem`,
-  renewal otomatis (cron acme.sh, ARI window Nov 2026).
+  renewal otomatis (cron acme.sh). Riwayat: wildcard LE
+  `*.binery.my.id` dipakai sebelum migrasi TLD.
   HTTP→HTTPS 301 aktif.
-- DNS: `mokiboxapi` + `auth` A-record 43.157.227.130 **DNS-only** (grey).
-  `mokibox` (frontend) belum dibuat — frontend memang di-host terpisah.
-  Zitadel domain baru: `auth.mokibox.my.id` (migrasi dari `auth.binery.my.id`
+- DNS SAAT INI: `api`, `auth`, apex `mokibox.my.id` → VPS,
+  DNS-only (grey). Riwayat: `mokiboxapi` A-record lama. Zitadel
+  domain: `auth.mokibox.my.id` (migrasi dari `auth.binery.my.id`
   2026-09-24, fresh re-init Zitadel + re-provisioning penuh).
 
 ### Provisioning (Zitadel v4.16.0, script `scripts/zitadel-provision-prod.sh`)
+- Script sekarang env-driven: `ZITADEL_DOMAIN` (default
+  `auth.mokibox.my.id`), `API_BASE` (default
+  `https://api.mokibox.my.id`) — redirect URI apps +
+  endpoint webhook mengikuti `API_BASE`.
 - Project mokibox + apps: `mokibox_web` (confidential BASIC),
   `mokibox_spa` (PKCE public), `mokibox_api` (JWT audience).
 - Actions V2: target `mokibox-webhook` →
-  `https://mokiboxapi.binery.my.id/api/webhooks/zitadel` (Opsi W,
+  `https://api.mokibox.my.id/api/webhooks/zitadel` (Opsi W,
   tanpa deny-list bypass), execution `user.deactivated`.
+  Riwayat: target pre-2026-11 memakai `mokiboxapi.binery.my.id`.
 - Test users test1/test2, password sesuai kontrak integration_test.sh
   (`MokiTest1-A`/`MokiTest2-B`, di-set via
   `POST /management/v1/users/{id}/password` + `noVerification:true`).
@@ -94,7 +111,9 @@ sesuai keputusan user: main bebas perubahan yang menyesuaikan aaPanel).
   (aggregateID), soft delete + cleanup).
 - integration_test.sh diperbaiki: `ADMIN_LOGIN` domain update ke
   `zitadel-admin@zitadel.auth.mokibox.my.id` (commit 061f46d).
-- R2 CORS origin `https://mokiboxapi.binery.my.id` terverifikasi
+- R2 CORS origin SAAT INI: `https://api.mokibox.my.id`
+  (ditambah saat migrasi 2026-11). Riwayat origin lama
+  `https://mokiboxapi.binery.my.id` juga sempat terverifikasi
   (ACAO header muncul di presigned GET — lesson prompt-1 #8 closed).
 - /api/users/me 401 envelope; anonymous video-GET 401
   (rate-limit middleware depan — DEViasi dari ekspektasi prompt
@@ -139,7 +158,14 @@ sesuai keputusan user: main bebas perubahan yang menyesuaikan aaPanel).
   password manager; acme.sh renewal di VPS butuh token aktif.
 
 
-## Domain-asli lokal (2026-09-09) — AKTIF
+## Riwayat domain API (pre-2026-11) — Domain-asli lokal (2026-09-09)
+
+> **[RIWAYAT]** Bagian ini mendokumentasikan kondisi saat itu:
+> backend `mokiboxapi.binery.my.id`, auth `auth.binery.my.id`,
+> frontend `mokibox.binery.my.id`. SAAT INI backend
+> `api.mokibox.my.id`, Zitadel `auth.mokibox.my.id`, frontend
+> `mokibox.my.id`. Domain trio binery di sini tidak lagi
+> dipakai — jangan dijadikan referensi konfigurasi sekarang.
 
 Domain trio (keputusan user 2026-09-04): backend
 `mokiboxapi.binery.my.id`, auth `auth.binery.my.id`,
@@ -220,7 +246,8 @@ frontend `mokibox.binery.my.id`. Semua verifikasi hijau:
    env-driven (baca `API_BASE_URL`/`ZITADEL_ISSUER_URL` dari
    `.env`; ADMIN_LOGIN/ADMIN_PASS overridable env var).
 5. [DIHAPUS] Demo UI browser `http://mokiboxapi.binery.my.id/demo/`
-   — digantikan Swagger UI: `https://mokiboxapi.binery.my.id/api/docs`.
+   — sekarang digantikan Swagger UI: `https://api.mokibox.my.id/api/docs`
+   (riwayat saat runbook ini aktif: `mokiboxapi.binery.my.id`).
 
 ### Urutan deploy produksi (VPS, tiga-file compose)
 
@@ -567,10 +594,13 @@ Demo web lama (`deploy/demo/index.html`) dihapus; dokumentasi API +
   (client ID tercatat di `api-gateway/docs/index.html`).
 - Redirect URI yang harus terdaftar di Zitadel app:
   - lokal: `http://localhost/api/docs/oauth2-redirect.html`
-  - produksi: `https://mokiboxapi.binery.my.id/api/docs/oauth2-redirect.html`
+  - produksi: `https://api.mokibox.my.id/api/docs/oauth2-redirect.html`
 - Di dialog Authorize Swagger, **Auth Token Type harus JWT**
   (bukan default opaque) agar access token bisa dipakai
   api-gateway (audience ZITADEL_API_CLIENT_ID).
+- Redirect URI ini harus terdaftar di Zitadel app docs; setelah
+  migrasi API-domain 2026-11 ke `api.mokibox.my.id`, URI lama
+  di app Zitadel perlu diganti/ ditambah (lihat migrasi infra).
 
 ## Pelajaran operasional baru (ringkas)
 
