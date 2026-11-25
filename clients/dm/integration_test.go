@@ -22,15 +22,17 @@ type relayDevice struct {
 	Curve       string
 	Ed          string
 	OneTimeKeys []OneTimeKey
+	FallbackKey *OneTimeKey
 	Claimed     map[string]bool
 }
 
 type relay struct {
-	mu          sync.Mutex
-	devices     map[string]*relayDevice
-	messages    map[string]InboxMessage
-	acked       map[string]bool
-	failAckOnce bool
+	mu           sync.Mutex
+	devices      map[string]*relayDevice
+	messages     map[string]InboxMessage
+	acked        map[string]bool
+	failAckOnce  bool
+	failSendOnce bool
 }
 
 func newRelay() *relay {
@@ -74,7 +76,8 @@ func (r *relay) registerDevice(w http.ResponseWriter, req *http.Request) {
 
 func (r *relay) uploadKeys(w http.ResponseWriter, req *http.Request) {
 	var body struct {
-		Keys []OneTimeKey `json:"keys"`
+		Keys        []OneTimeKey `json:"keys"`
+		FallbackKey *OneTimeKey  `json:"fallback_key"`
 	}
 	if err := decodeRelayJSON(req, &body); err != nil {
 		writeRelayError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
@@ -88,6 +91,7 @@ func (r *relay) uploadKeys(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	device.OneTimeKeys = append(device.OneTimeKeys, body.Keys...)
+	device.FallbackKey = body.FallbackKey
 	r.mu.Unlock()
 	writeRelayData(w, http.StatusOK, map[string]any{"accepted": len(body.Keys)})
 }
@@ -121,8 +125,11 @@ func (r *relay) keyBundle(w http.ResponseWriter, req *http.Request) {
 			bundle["one_time_key"] = key
 			break
 		}
-		if bundle["one_time_key"] == nil {
-			writeRelayError(w, http.StatusConflict, "DM_KEY_UNAVAILABLE", "no one-time key")
+		if bundle["one_time_key"] == nil && device.FallbackKey != nil {
+			bundle["fallback_key"] = device.FallbackKey
+		}
+		if bundle["one_time_key"] == nil && bundle["fallback_key"] == nil {
+			writeRelayError(w, http.StatusConflict, "DM_KEY_UNAVAILABLE", "no one-time or fallback key")
 			return
 		}
 	}
@@ -152,6 +159,11 @@ func (r *relay) sendMessage(w http.ResponseWriter, req *http.Request) {
 	}
 	if !found {
 		writeRelayError(w, http.StatusConflict, "DM_DEVICE_STALE", "sender device changed")
+		return
+	}
+	if r.failSendOnce {
+		r.failSendOnce = false
+		writeRelayError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "send failed")
 		return
 	}
 	messageID := uuid.NewString()
@@ -372,6 +384,148 @@ func TestEndToEndSendReceive(t *testing.T) {
 	}
 	if len(replies) != 1 || string(replies[0].Plaintext) != "balasan bob" {
 		t.Fatalf("unexpected replies %+v", replies)
+	}
+}
+
+func TestRetryResendsExactCiphertextFromOutbox(t *testing.T) {
+	relay := newRelay()
+	server := newTestServer(t, relay)
+	defer server.Close()
+	aliceUser := uuid.NewString()
+	bobUser := uuid.NewString()
+	alice, _ := setupPairedServices(t, server.URL, aliceUser, bobUser)
+	clientMessageID := uuid.NewString()
+
+	relay.mu.Lock()
+	relay.failSendOnce = true
+	relay.mu.Unlock()
+	if _, err := alice.Send(t.Context(), bobUser, "retry me", clientMessageID); err == nil {
+		t.Fatal("expected first send to fail")
+	}
+	st, err := alice.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := st.Outbox[clientMessageID]
+	if !ok || entry.Result != nil {
+		t.Fatalf("outbox entry = %+v, want pending entry", entry)
+	}
+	storedCiphertext := entry.Request.Ciphertext
+
+	result, err := alice.Send(t.Context(), bobUser, "retry me", clientMessageID)
+	if err != nil {
+		t.Fatalf("retry failed: %v", err)
+	}
+	message, err := relay.message(result.MessageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.Ciphertext != storedCiphertext {
+		t.Fatal("retry sent a different ciphertext")
+	}
+	if _, err := alice.Send(t.Context(), bobUser, "different plaintext", clientMessageID); !errors.Is(err, ErrOutboxConflict) {
+		t.Fatalf("changed-plaintext retry error = %v, want ErrOutboxConflict", err)
+	}
+}
+
+func TestReceiveQuarantinesBadCiphertextAndContinues(t *testing.T) {
+	relay := newRelay()
+	server := newTestServer(t, relay)
+	defer server.Close()
+	aliceUser := uuid.NewString()
+	bobUser := uuid.NewString()
+	alice, bob := setupPairedServices(t, server.URL, aliceUser, bobUser)
+	aliceState, err := alice.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobState, err := bob.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	badID := uuid.NewString()
+	relay.mu.Lock()
+	relay.messages[badID] = InboxMessage{
+		MessageID: badID, SenderUserID: aliceUser, SenderDeviceID: aliceState.DeviceID,
+		RecipientUserID: bobUser, RecipientDeviceID: bobState.DeviceID,
+		Sequence: 1, Protocol: "olm", ProtocolVersion: 1, MessageType: 0,
+		Ciphertext: "%%%not-base64%%%", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(168 * time.Hour),
+	}
+	relay.mu.Unlock()
+
+	if _, err := alice.Send(t.Context(), bobUser, "after bad message", ""); err != nil {
+		t.Fatal(err)
+	}
+	received, err := bob.Receive(t.Context(), 10)
+	if err != nil {
+		t.Fatalf("Receive stopped on bad message: %v", err)
+	}
+	if len(received) != 2 {
+		t.Fatalf("received %d messages, want 2: %+v", len(received), received)
+	}
+	if !received[0].Quarantined || received[0].QuarantineReason != quarantineInvalidEnvelope {
+		t.Fatalf("first message = %+v, want quarantined invalid envelope", received[0])
+	}
+	if received[1].Quarantined || string(received[1].Plaintext) != "after bad message" {
+		t.Fatalf("second message = %+v, want decrypted plaintext", received[1])
+	}
+	if relay.isAcked(badID) {
+		t.Fatal("quarantined ciphertext must not be acknowledged")
+	}
+	again, err := bob.Receive(t.Context(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again) != 0 {
+		t.Fatalf("quarantine cursor did not advance: %+v", again)
+	}
+}
+
+func TestSendUsesFallbackKeyWhenOneTimeKeysAreDrained(t *testing.T) {
+	relay := newRelay()
+	server := newTestServer(t, relay)
+	defer server.Close()
+	aliceUser := uuid.NewString()
+	bobUser := uuid.NewString()
+	charlieUser := uuid.NewString()
+	alice, _ := setupPairedServices(t, server.URL, aliceUser, bobUser)
+	charlie := newTestService(t, server.URL, charlieUser)
+	if _, _, err := charlie.Init(charlieUser); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := charlie.Register(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := charlie.UploadKeys(t.Context(), 2); err != nil {
+		t.Fatal(err)
+	}
+	charlieInfo, err := alice.PeerInfo(t.Context(), charlieUser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := alice.Verify(t.Context(), charlieUser, charlieInfo.DeviceID, charlieInfo.FormattedFingerprint); err != nil {
+		t.Fatal(err)
+	}
+	aliceInfo, err := charlie.PeerInfo(t.Context(), aliceUser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := charlie.Verify(t.Context(), aliceUser, aliceInfo.DeviceID, aliceInfo.FormattedFingerprint); err != nil {
+		t.Fatal(err)
+	}
+	relay.mu.Lock()
+	relay.devices[charlieUser].OneTimeKeys = nil
+	relay.mu.Unlock()
+
+	if _, err := alice.Send(t.Context(), charlieUser, "fallback works", ""); err != nil {
+		t.Fatalf("send with fallback key failed: %v", err)
+	}
+	received, err := charlie.Receive(t.Context(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(received) != 1 || string(received[0].Plaintext) != "fallback works" {
+		t.Fatalf("unexpected received messages %+v", received)
 	}
 }
 

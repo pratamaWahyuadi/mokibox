@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -191,6 +192,55 @@ func TestStateStore(t *testing.T) {
 	}
 	if _, err := UnpickleAccount(loaded.AccountPickle, key); err != nil {
 		t.Fatalf("unpickle account from state: %v", err)
+	}
+}
+
+func TestStateStoreMigratesV1(t *testing.T) {
+	acc, err := NewAccount()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := bytesOf(0x09, pickleKeyBytes)
+	pickled, err := PickleAccount(acc, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "state.json")
+	legacy, err := json.Marshal(map[string]any{
+		"version":        1,
+		"user_id":        uuid.NewString(),
+		"device_id":      uuid.NewString(),
+		"account_pickle": pickled,
+		"sessions":       map[string]string{"peer:device": "session"},
+		"pending_acks":   map[string]int64{"message": 3},
+		"inbox_after":    2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(path)
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Version != stateVersion || loaded.InboxAfter != 2 {
+		t.Fatalf("unexpected migrated state %+v", loaded)
+	}
+	if loaded.Outbox == nil || loaded.Quarantine == nil {
+		t.Fatal("migrated state is missing outbox or quarantine maps")
+	}
+	if err := store.Save(loaded); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(saved), `"version": 2`) {
+		t.Fatalf("saved state did not persist version 2: %s", saved)
 	}
 }
 

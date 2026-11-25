@@ -34,6 +34,7 @@ type dmStore interface {
 	GetDMTargetDevice(ctx context.Context, userID uuid.UUID) (db.DmDevice, error)
 	IsDMMutualFollow(ctx context.Context, arg db.IsDMMutualFollowParams) (bool, error)
 	InsertDMOneTimeKey(ctx context.Context, arg db.InsertDMOneTimeKeyParams) (int64, error)
+	GetDMFallbackKey(ctx context.Context, deviceID uuid.UUID) (db.DmFallbackKey, error)
 	ClaimDMOneTimeKey(ctx context.Context, deviceID uuid.UUID) (db.ClaimDMOneTimeKeyRow, error)
 	GetDMIdempotency(ctx context.Context, arg db.GetDMIdempotencyParams) (db.GetDMIdempotencyRow, error)
 	ListPendingDMInbox(ctx context.Context, arg db.ListPendingDMInboxParams) ([]db.ListPendingDMInboxRow, error)
@@ -48,6 +49,7 @@ type dmTxStore interface {
 	DeleteDMDevicesByUser(ctx context.Context, userID uuid.UUID) (int64, error)
 	CreateDMDevice(ctx context.Context, arg db.CreateDMDeviceParams) (db.DmDevice, error)
 	CreateDMIdempotency(ctx context.Context, arg db.CreateDMIdempotencyParams) (db.CreateDMIdempotencyRow, error)
+	UpsertDMFallbackKey(ctx context.Context, arg db.UpsertDMFallbackKeyParams) (db.DmFallbackKey, error)
 	CountPendingDMInbox(ctx context.Context, recipientDeviceID uuid.UUID) (int64, error)
 	AllocateDMSequence(ctx context.Context, deviceID uuid.UUID) (int64, error)
 	CreateDMInboxMessage(ctx context.Context, arg db.CreateDMInboxMessageParams) (db.CreateDMInboxMessageRow, error)
@@ -177,8 +179,9 @@ type dmOneTimeKeyInput struct {
 }
 
 type dmUploadKeysRequest struct {
-	DeviceID string              `json:"device_id"`
-	Keys     []dmOneTimeKeyInput `json:"keys"`
+	DeviceID    string              `json:"device_id"`
+	Keys        []dmOneTimeKeyInput `json:"keys"`
+	FallbackKey *dmOneTimeKeyInput  `json:"fallback_key"`
 }
 
 type dmUploadKeysResponse struct {
@@ -231,6 +234,21 @@ func (h *DMHandler) UploadOneTimeKeys(c echo.Context) error {
 		}
 		keys = append(keys, normalizedKey{keyID: key.KeyID, publicKey: publicKey, signature: signature})
 	}
+	var fallback *normalizedKey
+	if req.FallbackKey != nil {
+		if len(req.FallbackKey.KeyID) == 0 || len(req.FallbackKey.KeyID) > 128 {
+			return dmValidation(c, "fallback_key.key_id", "must contain 1 to 128 characters")
+		}
+		publicKey, err := decodeDMKey(req.FallbackKey.PublicKey, 32)
+		if err != nil {
+			return dmValidation(c, "fallback_key.public_key", "must be a base64-encoded 32-byte public key")
+		}
+		signature, err := decodeDMKey(req.FallbackKey.Signature, 64)
+		if err != nil {
+			return dmValidation(c, "fallback_key.signature", "must be a base64-encoded 64-byte signature")
+		}
+		fallback = &normalizedKey{keyID: req.FallbackKey.KeyID, publicKey: publicKey, signature: signature}
+	}
 
 	accepted := 0
 	err = h.Run.Run(c.Request().Context(), func(q dmTxStore) error {
@@ -251,6 +269,13 @@ func (h *DMHandler) UploadOneTimeKeys(c echo.Context) error {
 			}
 			accepted += int(rows)
 		}
+		if fallback != nil {
+			if _, err := q.UpsertDMFallbackKey(c.Request().Context(), db.UpsertDMFallbackKeyParams{
+				DeviceID: deviceID, KeyID: fallback.keyID, PublicKey: fallback.publicKey, Signature: fallback.signature,
+			}); err != nil {
+				return dmStoreError("store fallback key", err)
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -267,6 +292,7 @@ type dmKeyBundle struct {
 	IdentityCurve25519 string           `json:"identity_curve25519"`
 	IdentityEd25519    string           `json:"identity_ed25519"`
 	OneTimeKey         *dmOneTimeKeyOut `json:"one_time_key"`
+	FallbackKey        *dmOneTimeKeyOut `json:"fallback_key"`
 }
 
 type dmOneTimeKeyOut struct {
@@ -349,22 +375,40 @@ func (h *DMHandler) GetKeyBundle(c echo.Context) error {
 		}
 		if includeOneTimeKey {
 			key, err := q.ClaimDMOneTimeKey(c.Request().Context(), target.DeviceID)
-			if err != nil {
-				if errors.Is(err, sql.ErrNoRows) {
-					return shared.Wrap(shared.ErrDMKeyUnavailable, "target has no unclaimed one-time key")
-				}
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return dmStoreError("claim target one-time key", err)
 			}
-			publicKey, err := decodeDMKey(key.PublicKey, 32)
-			if err != nil {
-				return dmStoreError("normalize target one-time key", err)
-			}
-			signature, err := decodeDMKey(key.Signature, 64)
-			if err != nil {
-				return dmStoreError("normalize target one-time key signature", err)
-			}
-			bundle.OneTimeKey = &dmOneTimeKeyOut{
-				KeyID: key.KeyID, PublicKey: publicKey, Signature: signature,
+			if err == nil {
+				publicKey, err := decodeDMKey(key.PublicKey, 32)
+				if err != nil {
+					return dmStoreError("normalize target one-time key", err)
+				}
+				signature, err := decodeDMKey(key.Signature, 64)
+				if err != nil {
+					return dmStoreError("normalize target one-time key signature", err)
+				}
+				bundle.OneTimeKey = &dmOneTimeKeyOut{
+					KeyID: key.KeyID, PublicKey: publicKey, Signature: signature,
+				}
+			} else {
+				fallback, err := q.GetDMFallbackKey(c.Request().Context(), target.DeviceID)
+				if err != nil {
+					if errors.Is(err, sql.ErrNoRows) {
+						return shared.Wrap(shared.ErrDMKeyUnavailable, "target has no unclaimed one-time or fallback key")
+					}
+					return dmStoreError("read target fallback key", err)
+				}
+				publicKey, err := decodeDMKey(fallback.PublicKey, 32)
+				if err != nil {
+					return dmStoreError("normalize target fallback key", err)
+				}
+				signature, err := decodeDMKey(fallback.Signature, 64)
+				if err != nil {
+					return dmStoreError("normalize target fallback key signature", err)
+				}
+				bundle.FallbackKey = &dmOneTimeKeyOut{
+					KeyID: fallback.KeyID, PublicKey: publicKey, Signature: signature,
+				}
 			}
 		}
 		return nil

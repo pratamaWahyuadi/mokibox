@@ -13,19 +13,40 @@ import (
 )
 
 const (
-	stateVersion   = 1
-	trustVersion   = 1
-	pickleKeyBytes = 32
+	stateVersion    = 2
+	oldStateVersion = 1
+	trustVersion    = 1
+	pickleKeyBytes  = 32
+	outboxTTL       = 7 * 24 * time.Hour
+	quarantineTTL   = 7 * 24 * time.Hour
 )
 
+type OutboxEntry struct {
+	Request       SendRequest `json:"request"`
+	PlaintextHash string      `json:"plaintext_hash"`
+	ExpiresAt     time.Time   `json:"expires_at"`
+	Result        *SendResult `json:"result,omitempty"`
+}
+
+type QuarantineEntry struct {
+	Sequence       int64     `json:"sequence"`
+	SenderUserID   string    `json:"sender_user_id"`
+	SenderDeviceID string    `json:"sender_device_id"`
+	Reason         string    `json:"reason"`
+	Ciphertext     string    `json:"ciphertext"`
+	FailedAt       time.Time `json:"failed_at"`
+}
+
 type State struct {
-	Version       int               `json:"version"`
-	UserID        string            `json:"user_id"`
-	DeviceID      string            `json:"device_id"`
-	AccountPickle string            `json:"account_pickle"`
-	Sessions      map[string]string `json:"sessions"`
-	PendingAcks   map[string]int64  `json:"pending_acks"`
-	InboxAfter    int64             `json:"inbox_after"`
+	Version       int                         `json:"version"`
+	UserID        string                      `json:"user_id"`
+	DeviceID      string                      `json:"device_id"`
+	AccountPickle string                      `json:"account_pickle"`
+	Sessions      map[string]string           `json:"sessions"`
+	PendingAcks   map[string]int64            `json:"pending_acks"`
+	InboxAfter    int64                       `json:"inbox_after"`
+	Outbox        map[string]*OutboxEntry     `json:"outbox"`
+	Quarantine    map[string]*QuarantineEntry `json:"quarantine"`
 }
 
 type Store struct {
@@ -48,7 +69,7 @@ func (s *Store) Load() (*State, error) {
 	if err := json.Unmarshal(raw, &st); err != nil {
 		return nil, fmt.Errorf("decode state: %w", err)
 	}
-	if st.Version != stateVersion {
+	if st.Version != stateVersion && st.Version != oldStateVersion {
 		return nil, fmt.Errorf("unsupported state version %d", st.Version)
 	}
 	if st.UserID == "" || st.DeviceID == "" || st.AccountPickle == "" {
@@ -60,6 +81,13 @@ func (s *Store) Load() (*State, error) {
 	if st.PendingAcks == nil {
 		st.PendingAcks = make(map[string]int64)
 	}
+	if st.Outbox == nil {
+		st.Outbox = make(map[string]*OutboxEntry)
+	}
+	if st.Quarantine == nil {
+		st.Quarantine = make(map[string]*QuarantineEntry)
+	}
+	st.Version = stateVersion
 	if st.InboxAfter < 0 {
 		return nil, fmt.Errorf("state has invalid inbox cursor")
 	}
@@ -71,6 +99,23 @@ func (s *Store) Save(st *State) error {
 		return fmt.Errorf("state is nil")
 	}
 	st.Version = stateVersion
+	if st.Outbox == nil {
+		st.Outbox = make(map[string]*OutboxEntry)
+	}
+	if st.Quarantine == nil {
+		st.Quarantine = make(map[string]*QuarantineEntry)
+	}
+	now := time.Now()
+	for messageID, entry := range st.Outbox {
+		if entry != nil && !entry.ExpiresAt.After(now) {
+			delete(st.Outbox, messageID)
+		}
+	}
+	for messageID, entry := range st.Quarantine {
+		if entry != nil && !entry.FailedAt.Add(quarantineTTL).After(now) {
+			delete(st.Quarantine, messageID)
+		}
+	}
 	raw, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode state: %w", err)

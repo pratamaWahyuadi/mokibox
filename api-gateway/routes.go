@@ -11,10 +11,13 @@
 // group. Phase 6 issue A added the home feed behind
 // the auth group; issue B added the video detail /
 // status / playlist endpoints; issue C added the
-// follow endpoints. The current full route set is:
+// follow endpoints. E2EE DM delivery routes use a
+// separate auth-only group so polls and acks are not
+// capped by the generic 60/min API limiter.
+// The current full route set is:
 //   - GET  /healthz                          (no auth)
 //   - POST /api/webhooks/zitadel             (no JWT auth;
-//       signature verified inside the handler)
+//     signature verified inside the handler)
 //   - GET  /api/users/me                     (auth)
 //   - PUT  /api/users/me                     (auth)
 //   - POST /api/users/me/avatar/upload-intent (auth)
@@ -116,22 +119,22 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	e := echo.New()
 
 	// Central HTTPErrorHandler safety net for Echo
-// framework errors (404, 405, body-bind failure)
-// and any error that reaches Echo without going
-// through shared.RespondError. See error_handler.go
-// for the full contract. Phase 3-8 handlers continue
-// to use shared.RespondError; this only catches what
-// slips past that path.
+	// framework errors (404, 405, body-bind failure)
+	// and any error that reaches Echo without going
+	// through shared.RespondError. See error_handler.go
+	// for the full contract. Phase 3-8 handlers continue
+	// to use shared.RespondError; this only catches what
+	// slips past that path.
 	e.HTTPErrorHandler = HTTPErrorHandler
 
 	// Request body validator. Per LLD section 12
-// (Fase 9), wire go-playground/validator/v10 as the
-// Echo validator. Handlers that take a JSON body
-// call c.Validate(&req) after c.Bind(&req); failures
-// are translated by RequestValidator into the
-// canonical shared.APIError{CodeValidationError,
-// Details:[]FieldError} envelope. See
-// request_validator.go for the translation rules.
+	// (Fase 9), wire go-playground/validator/v10 as the
+	// Echo validator. Handlers that take a JSON body
+	// call c.Validate(&req) after c.Bind(&req); failures
+	// are translated by RequestValidator into the
+	// canonical shared.APIError{CodeValidationError,
+	// Details:[]FieldError} envelope. See
+	// request_validator.go for the translation rules.
 	e.Validator = NewRequestValidator()
 
 	// Health probe (no auth, no auth middleware). Kept
@@ -176,35 +179,44 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	if err != nil {
 		panic(fmt.Sprintf("api-gateway: NewRateLimitAuth: %v", err))
 	}
-	api := e.Group("/api",
-		middleware.Authenticate(middleware.AuthenticateConfig{
-			Verifier: d.AuthVerifier,
-			Queries:  d.Queries,
-		}),
-		authRateLimit,
-	)
+	authenticate := middleware.Authenticate(middleware.AuthenticateConfig{
+		Verifier: d.AuthVerifier,
+		Queries:  d.Queries,
+	})
+	api := e.Group("/api", authenticate, authRateLimit)
+	apiDelivery := e.Group("/api", authenticate)
 
 	if d.Cfg != nil && d.Cfg.DME2EEEnabled {
 		dmHandler, err := handlers.NewDMHandler(d.Queries, d.DB, d.Cfg.DMInboxTTL)
 		if err != nil {
 			panic(fmt.Sprintf("api-gateway: NewDMHandler: %v", err))
 		}
-		dmRateLimit, err := middleware.NewRateLimitAuth(middleware.RateLimitConfig{
+		dmControlLimit, err := middleware.NewRateLimitAuth(middleware.RateLimitConfig{
 			Rate:          rate.Limit(1.0 / 3.0),
 			Burst:         20,
 			TTL:           10 * time.Minute,
 			SweepInterval: 5 * time.Minute,
 		})
 		if err != nil {
-			panic(fmt.Sprintf("api-gateway: NewRateLimitAuth for DM: %v", err))
+			panic(fmt.Sprintf("api-gateway: NewRateLimitAuth for DM control: %v", err))
 		}
-		dm := api.Group("/dm", dmRateLimit)
-		dm.POST("/device", dmHandler.RegisterDevice)
-		dm.POST("/device/one-time-keys", dmHandler.UploadOneTimeKeys)
-		dm.GET("/users/:id/key-bundle", dmHandler.GetKeyBundle)
-		dm.POST("/messages", dmHandler.SendMessage)
-		dm.GET("/inbox", dmHandler.PollInbox)
-		dm.POST("/inbox/:message_id/ack", dmHandler.AcknowledgeMessage)
+		dmDeliveryLimit, err := middleware.NewRateLimitAuth(middleware.RateLimitConfig{
+			Rate:          rate.Limit(10),
+			Burst:         120,
+			TTL:           10 * time.Minute,
+			SweepInterval: 5 * time.Minute,
+		})
+		if err != nil {
+			panic(fmt.Sprintf("api-gateway: NewRateLimitAuth for DM delivery: %v", err))
+		}
+		dmControl := api.Group("/dm", dmControlLimit)
+		dmDelivery := apiDelivery.Group("/dm", dmDeliveryLimit)
+		dmControl.POST("/device", dmHandler.RegisterDevice)
+		dmControl.POST("/device/one-time-keys", dmHandler.UploadOneTimeKeys)
+		dmControl.GET("/users/:id/key-bundle", dmHandler.GetKeyBundle)
+		dmControl.POST("/messages", dmHandler.SendMessage)
+		dmDelivery.GET("/inbox", dmHandler.PollInbox)
+		dmDelivery.POST("/inbox/:message_id/ack", dmHandler.AcknowledgeMessage)
 	}
 
 	uh, err := handlers.NewUserHandler(d.Queries, d.R2, d.Queue, d.Cfg)

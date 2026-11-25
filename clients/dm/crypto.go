@@ -103,6 +103,36 @@ func GenerateOneTimeKeys(acc *account.Account, count uint) ([]OneTimeKey, error)
 	return out, nil
 }
 
+func GenerateFallbackKey(acc *account.Account) (*OneTimeKey, error) {
+	if acc == nil {
+		return nil, fmt.Errorf("olm account is nil")
+	}
+	if err := acc.GenFallbackKey(); err != nil {
+		return nil, fmt.Errorf("generate olm fallback key: %w", err)
+	}
+	keys := acc.FallbackKeyUnpublished()
+	if len(keys) != 1 {
+		return nil, fmt.Errorf("expected one unpublished fallback key, got %d", len(keys))
+	}
+	for keyID, publicKey := range keys {
+		public, err := normalizeBase64(string(publicKey), 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid generated fallback key: %w", err)
+		}
+		payload := []byte(oneTimeKeySignaturePrefix + "\n" + keyID + "\n" + public)
+		signature, err := acc.Sign(payload)
+		if err != nil {
+			return nil, fmt.Errorf("sign fallback key: %w", err)
+		}
+		signed, err := normalizeBase64(string(signature), ed25519.SignatureSize)
+		if err != nil {
+			return nil, fmt.Errorf("invalid fallback key signature: %w", err)
+		}
+		return &OneTimeKey{KeyID: keyID, PublicKey: public, Signature: signed}, nil
+	}
+	return nil, fmt.Errorf("no unpublished fallback key available")
+}
+
 func VerifyOneTimeKeySignature(identityEd25519 string, key OneTimeKey) error {
 	public, err := decodeBase64(identityEd25519, ed25519.PublicKeySize)
 	if err != nil {
@@ -158,7 +188,7 @@ func NewInboundSession(acc *account.Account, senderCurve25519, ciphertext string
 	identity := id.Curve25519(sender)
 	created, err := acc.NewInboundSessionFrom(&identity, ciphertext)
 	if err != nil {
-		return nil, fmt.Errorf("create inbound olm session: %w", err)
+		return nil, fmt.Errorf("%w: create inbound session: %v", ErrInvalidCiphertext, err)
 	}
 	result, ok := created.(*session.OlmSession)
 	if !ok {
@@ -200,7 +230,7 @@ func MatchesInboundSession(sess *session.OlmSession, senderCurve25519, ciphertex
 	}
 	matches, err := sess.MatchesInboundSessionFrom(sender, ciphertext)
 	if err != nil {
-		return false, fmt.Errorf("match inbound olm session: %w", err)
+		return false, fmt.Errorf("%w: match inbound session: %v", ErrInvalidCiphertext, err)
 	}
 	return matches, nil
 }
@@ -238,7 +268,7 @@ func Decrypt(sess *session.OlmSession, ciphertext string, msgType int16) ([]byte
 	}
 	plaintext, err := sess.Decrypt(ciphertext, olmType)
 	if err != nil {
-		return nil, fmt.Errorf("decrypt olm message: %w", err)
+		return nil, fmt.Errorf("%w: %v", ErrOlmDecrypt, err)
 	}
 	return plaintext, nil
 }

@@ -56,9 +56,10 @@ only its bounded ciphertext queue supports offline recipients.
   Olm session state must be stored using the selected crypto library's
   encrypted state format; its random pickle key must use OS-backed secure
   storage. Never log keys, pickles, plaintext, or ciphertext.
-- The client publishes its public identity keys and signed Olm one-time keys.
-  The server stores and returns their opaque encodings; the client verifies
-  each signature against the peer Ed25519 identity key before establishing a
+- The client publishes its public identity keys, signed Olm one-time keys, and
+  an optional signed fallback key. The server stores and returns their opaque
+  encodings; the client verifies each signature against the peer Ed25519
+  identity key before establishing a
   session. The signed UTF-8 string is
   `mokibox-dm-one-time-key-v1\n{key_id}\n{canonical_base64_public_key}`.
 - Fingerprint bytes are
@@ -72,6 +73,15 @@ only its bounded ciphertext queue supports offline recipients.
 - The client uses Olm sessions for message encryption and decryption. Message
   envelopes carry the protocol identifier/version and Olm message type; the
   server treats the ciphertext bytes as opaque.
+- Before the first network send, the client persists the exact request (including
+  ciphertext) in an outbox keyed by client message ID. A retry with the same ID
+  resends that exact request; a different plaintext or recipient is rejected
+  locally as an outbox conflict instead of creating an idempotency conflict.
+- A message that fails validation, Olm decryption, session lookup, or fingerprint
+  rotation is quarantined locally and skipped, not acknowledged and not
+  allowed to block later sequences. The inbox cursor advances past quarantined
+  messages; decrypt failures reload persisted state so a partially consumed
+  account/OTK mutation cannot corrupt the ratchet.
 - No custom cryptographic primitive or AES shared-room key is introduced.
 - Any client implementation must use disposable smoke identities and must not
   reuse production credentials or pickle keys.
@@ -88,7 +98,10 @@ only its bounded ciphertext queue supports offline recipients.
 - Device-sensitive requests include `device_id`; stale IDs return
   `409 DM_DEVICE_STALE`.
 - One-time-key claims are atomic. Sends allocate the recipient's per-device
-  sequence and enforce the queue cap in one transaction.
+  sequence and enforce the queue cap in one transaction. When one-time keys are
+  exhausted the bundle may return the device's current signed fallback key.
+- DM control endpoints and delivery endpoints use separate per-user buckets;
+  poll/ack are not capped by the generic 60/min API limiter.
 - A device may have at most 1,000 pending, unexpired messages. Queue-full and
   dedicated rate-limit failures are explicit responses.
 - Send idempotency is keyed by sender device + client message ID and stores only
@@ -97,8 +110,10 @@ only its bounded ciphertext queue supports offline recipients.
 - Poll requires an explicit `after` cursor. Sequence numbers can have gaps.
   Acknowledgement is idempotent and returns 204.
 - Expired inbox and idempotency records are removed by a janitor, not by poll.
-  Account deletion removes device keys, inbox rows, and idempotency records in
-  its existing transaction.
+  Account deletion removes device keys, inbox rows addressed to those devices,
+  and idempotency records in its existing transaction. Sent inbox rows reference
+  the sender user (not the short-lived device), so re-registering a device does
+  not delete delivery history.
 - The server may observe account/device IDs, routing, timestamps, sequence,
   envelope size, and delivery state. It cannot recall copies already decrypted
   or copied by a recipient.

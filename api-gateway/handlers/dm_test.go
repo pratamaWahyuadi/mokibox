@@ -25,6 +25,7 @@ type dmFakeStore struct {
 	devices      map[uuid.UUID]db.DmDevice
 	keys         map[uuid.UUID][]db.ClaimDMOneTimeKeyRow
 	keyIDs       map[uuid.UUID]map[string]bool
+	fallbackKeys map[uuid.UUID]db.DmFallbackKey
 	idempotency  map[dmFakeIdemKey]db.GetDMIdempotencyRow
 	inbox        map[uuid.UUID]db.ListPendingDMInboxRow
 	acknowledged map[uuid.UUID]bool
@@ -42,6 +43,7 @@ func newDMFakeStore() *dmFakeStore {
 		devices:      make(map[uuid.UUID]db.DmDevice),
 		keys:         make(map[uuid.UUID][]db.ClaimDMOneTimeKeyRow),
 		keyIDs:       make(map[uuid.UUID]map[string]bool),
+		fallbackKeys: make(map[uuid.UUID]db.DmFallbackKey),
 		idempotency:  make(map[dmFakeIdemKey]db.GetDMIdempotencyRow),
 		inbox:        make(map[uuid.UUID]db.ListPendingDMInboxRow),
 		acknowledged: make(map[uuid.UUID]bool),
@@ -84,6 +86,27 @@ func (s *dmFakeStore) InsertDMOneTimeKey(_ context.Context, arg db.InsertDMOneTi
 		KeyID: arg.KeyID, PublicKey: arg.PublicKey, Signature: arg.Signature,
 	})
 	return 1, nil
+}
+
+func (s *dmFakeStore) UpsertDMFallbackKey(_ context.Context, arg db.UpsertDMFallbackKeyParams) (db.DmFallbackKey, error) {
+	now := time.Now()
+	key := db.DmFallbackKey{
+		DeviceID: arg.DeviceID, KeyID: arg.KeyID, PublicKey: arg.PublicKey,
+		Signature: arg.Signature, CreatedAt: now, UpdatedAt: now,
+	}
+	if old, ok := s.fallbackKeys[arg.DeviceID]; ok {
+		key.CreatedAt = old.CreatedAt
+	}
+	s.fallbackKeys[arg.DeviceID] = key
+	return key, nil
+}
+
+func (s *dmFakeStore) GetDMFallbackKey(_ context.Context, deviceID uuid.UUID) (db.DmFallbackKey, error) {
+	key, ok := s.fallbackKeys[deviceID]
+	if !ok {
+		return db.DmFallbackKey{}, sql.ErrNoRows
+	}
+	return key, nil
 }
 
 func (s *dmFakeStore) ClaimDMOneTimeKey(_ context.Context, deviceID uuid.UUID) (db.ClaimDMOneTimeKeyRow, error) {
@@ -143,10 +166,25 @@ func (s *dmFakeStore) GetDMDeviceForUpdate(_ context.Context, arg db.GetDMDevice
 }
 
 func (s *dmFakeStore) DeleteDMDevicesByUser(_ context.Context, userID uuid.UUID) (int64, error) {
-	if _, ok := s.devices[userID]; !ok {
+	device, ok := s.devices[userID]
+	if !ok {
 		return 0, nil
 	}
 	delete(s.devices, userID)
+	delete(s.keys, device.DeviceID)
+	delete(s.keyIDs, device.DeviceID)
+	delete(s.fallbackKeys, device.DeviceID)
+	for messageID, row := range s.inbox {
+		if row.RecipientDeviceID == device.DeviceID {
+			delete(s.inbox, messageID)
+			delete(s.acknowledged, messageID)
+		}
+	}
+	for key := range s.idempotency {
+		if key.deviceID == device.DeviceID {
+			delete(s.idempotency, key)
+		}
+	}
 	return 1, nil
 }
 
@@ -410,6 +448,89 @@ func TestGetDMKeyBundleClaimsOneTimeKeyOnce(t *testing.T) {
 	}
 	second := doJSON(e, http.MethodGet, path, "")
 	assertErrCode(t, second, http.StatusConflict, shared.CodeDMKeyUnavailable)
+}
+
+func TestUploadFallbackKeyAndServeItWhenOneTimeKeysAreDrained(t *testing.T) {
+	user := viewerUser()
+	targetID := user.ID
+	targetDeviceID := uuid.New()
+	store := newDMFakeStore()
+	store.eligible = true
+	store.devices[targetID] = db.DmDevice{
+		DeviceID: targetDeviceID, UserID: targetID,
+		IdentityCurve25519: base64.StdEncoding.EncodeToString(bytesOf(1, 32)),
+		IdentityEd25519:    base64.StdEncoding.EncodeToString(bytesOf(2, 32)),
+	}
+	handler := newDMHandlerForTest(store, dmFakeRunner{store: store}, 168*time.Hour)
+	uploadEcho := newDMTestEcho(user, http.MethodPost, "/api/dm/device/one-time-keys", handler.UploadOneTimeKeys)
+	fallback := dmOneTimeKeyInput{
+		KeyID: "fallback", PublicKey: base64.StdEncoding.EncodeToString(bytesOf(3, 32)),
+		Signature: base64.StdEncoding.EncodeToString(bytesOf(4, 64)),
+	}
+	uploadBody, err := json.Marshal(dmUploadKeysRequest{
+		DeviceID: targetDeviceID.String(),
+		Keys: []dmOneTimeKeyInput{{
+			KeyID: "one", PublicKey: base64.StdEncoding.EncodeToString(bytesOf(5, 32)),
+			Signature: base64.StdEncoding.EncodeToString(bytesOf(6, 64)),
+		}},
+		FallbackKey: &fallback,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploaded := doJSON(uploadEcho, http.MethodPost, "/api/dm/device/one-time-keys", string(uploadBody))
+	if uploaded.Code != http.StatusOK {
+		t.Fatalf("upload status = %d, body=%s", uploaded.Code, uploaded.Body.String())
+	}
+	if _, err := store.GetDMFallbackKey(context.Background(), targetDeviceID); err != nil {
+		t.Fatalf("fallback key was not stored: %v", err)
+	}
+	store.keys[targetDeviceID] = nil
+
+	path := fmt.Sprintf("/api/dm/users/%s/key-bundle?device_id=%s&include_one_time_key=true", targetID, targetDeviceID)
+	bundleEcho := newDMTestEcho(user, http.MethodGet, "/api/dm/users/:id/key-bundle", handler.GetKeyBundle)
+	rec := doJSON(bundleEcho, http.MethodGet, path, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bundle status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var bundleResponse dmRequestEnvelope[dmKeyBundle]
+	if err := json.Unmarshal(rec.Body.Bytes(), &bundleResponse); err != nil {
+		t.Fatalf("decode bundle response: %v", err)
+	}
+	if bundleResponse.Data.OneTimeKey != nil || bundleResponse.Data.FallbackKey == nil ||
+		bundleResponse.Data.FallbackKey.KeyID != "fallback" {
+		t.Fatalf("expected fallback-only bundle, got %+v", bundleResponse.Data)
+	}
+}
+
+func TestReplacingSenderDevicePreservesSentInbox(t *testing.T) {
+	user := viewerUser()
+	recipientID := uuid.New()
+	oldDeviceID, newDeviceID, messageID := uuid.New(), uuid.New(), uuid.New()
+	store := newDMFakeStore()
+	store.devices[user.ID] = db.DmDevice{DeviceID: oldDeviceID, UserID: user.ID}
+	store.devices[recipientID] = db.DmDevice{DeviceID: uuid.New(), UserID: recipientID}
+	store.inbox[messageID] = db.ListPendingDMInboxRow{
+		MessageID: messageID, SenderUserID: user.ID, SenderDeviceID: oldDeviceID,
+		RecipientDeviceID: store.devices[recipientID].DeviceID, Sequence: 1,
+		Ciphertext: []byte("ciphertext"), Protocol: "olm", ProtocolVersion: 1,
+	}
+	handler := newDMHandlerForTest(store, dmFakeRunner{store: store}, 168*time.Hour)
+	e := newDMTestEcho(user, http.MethodPost, "/api/dm/device", handler.RegisterDevice)
+	curveKey := base64.StdEncoding.EncodeToString(bytesOf(1, 32))
+	edKey := base64.StdEncoding.EncodeToString(bytesOf(2, 32))
+	body := fmt.Sprintf(`{"device_id":%q,"identity_curve25519":%q,"identity_ed25519":%q}`, newDeviceID, curveKey, edKey)
+
+	rec := doJSON(e, http.MethodPost, "/api/dm/device", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("re-registration status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if _, ok := store.inbox[messageID]; !ok {
+		t.Fatal("sent inbox message was deleted when the sender replaced its device")
+	}
+	if store.devices[user.ID].DeviceID != newDeviceID {
+		t.Fatalf("active device = %s, want %s", store.devices[user.ID].DeviceID, newDeviceID)
+	}
 }
 
 func TestPollAndAcknowledgeDMMessage(t *testing.T) {

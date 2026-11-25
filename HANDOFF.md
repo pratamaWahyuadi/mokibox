@@ -31,9 +31,10 @@ Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
   `NewClient` menolak `http` ke host non-loopback (`clients/dm/client.go:36`),
   CLI bisa baca plaintext dari stdin, dan trust store hanya mutasi setelah write
   sukses (`clients/dm/store.go:144`).
-- Risiko residual: server tidak memverifikasi tanda tangan OTK (sesuai kontrak;
-  client yang memverifikasi), satu device aktif per user, metadata terlihat server,
-  rate limit DM 20 burst, Zitadel asli/pentest belum diuji.
+- Risiko residual: server tidak memverifikasi tanda tangan OTK/fallback (sesuai
+  kontrak; client yang memverifikasi), satu device aktif per user, metadata
+  terlihat server, rate limit masih in-process per gateway instance, Zitadel
+  asli/pentest belum diuji.
 - Verified: `go build ./...`, `go vet ./...`, `go test ./... -count=1`,
   `go test -race ./clients/... ./api-gateway/... -count=1`, `go mod verify`, dan
   secret scan; hanya placeholder/example + dummy `.smoke`, private key dan pickle
@@ -42,9 +43,30 @@ Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
   `api-gateway/handlers/dm_test.go`, `migrations/009_dm_e2ee.sql`, `README.md`, dan
   `HANDOFF.md`. Aktifkan flag di environment; jangan commit token/pickle key.
 
+## Review follow-up — lima temuan teman (2026-11-25)
+
+- `Receive` mengarantina pesan rusak/decrypt gagal/fingerprint berubah, tidak
+  meng-ack pesan tersebut, dan tetap memproses sequence berikutnya; state v1
+  dibaca dan dinormalisasi ke v2 tanpa kehilangan session/ack lama.
+- `Send` menyimpan request lengkap + hash plaintext ke outbox sebelum request
+  pertama. Retry dengan `-message-id` mengirim ulang ciphertext persis sama;
+  plaintext/recipient berubah ditolak lokal dengan `ErrOutboxConflict`.
+- Rate limit DM dipisah: kontrol (device, upload key, bundle, send) 20 burst,
+  delivery (poll/ack) 120 burst 10/detik dan tidak kena limiter auth 60/menit.
+- FK `dm_inbox.sender_device_id` diganti ke `sender_user_id ... ON DELETE
+  RESTRICT` di `migrations/010_dm_inbox_sender_fk.sql`, sehingga re-register
+  device tidak menghapus pesan yang sudah dikirim.
+- Fallback key didukung di `migrations/011_dm_fallback_keys.sql`, handler upload
+  (`fallback_key`), key bundle (`fallback_key`), SDK/CLI, dan sqlc. Chat baru
+  tetap bisa dimulai saat one-time key habis.
+- Tes baru: outbox retry identik, karantina + lanjut, fallback upload/bundle,
+  fallback encrypt/decrypt, dan re-register tidak menghapus inbox terkirim.
+  `make db-migrate-dm` menerapkan 009–011 berurutan.
+
 ## DM E2EE — backend relay only
 
-- Go gateway, migration `009_dm_e2ee.sql`, opaque ciphertext relay, key/device
+- Go gateway, migrasi `009_dm_e2ee.sql` + `010_dm_inbox_sender_fk.sql` +
+  `011_dm_fallback_keys.sql`, opaque ciphertext relay, key/device
   endpoints, inbox polling/ack, idempotency, TTL janitor, dan feature gate
   tersedia. Compose meneruskan `DM_E2EE_ENABLED` dan `DM_INBOX_TTL`; flag
   default tetap mati dan TTL v1 adalah 168 jam.

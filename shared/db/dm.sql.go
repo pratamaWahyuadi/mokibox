@@ -355,6 +355,26 @@ func (q *Queries) GetDMDeviceForUpdate(ctx context.Context, arg GetDMDeviceForUp
 	return i, err
 }
 
+const getDMFallbackKey = `-- name: GetDMFallbackKey :one
+SELECT device_id, key_id, public_key, signature, created_at, updated_at
+FROM dm_fallback_keys
+WHERE device_id = $1
+`
+
+func (q *Queries) GetDMFallbackKey(ctx context.Context, deviceID uuid.UUID) (DmFallbackKey, error) {
+	row := q.db.QueryRowContext(ctx, getDMFallbackKey, deviceID)
+	var i DmFallbackKey
+	err := row.Scan(
+		&i.DeviceID,
+		&i.KeyID,
+		&i.PublicKey,
+		&i.Signature,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getDMIdempotency = `-- name: GetDMIdempotency :one
 SELECT request_digest, message_id, response_sequence, expires_at
 FROM dm_idempotency
@@ -584,4 +604,41 @@ func (q *Queries) SetDMIdempotencySequence(ctx context.Context, arg SetDMIdempot
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const upsertDMFallbackKey = `-- name: UpsertDMFallbackKey :one
+INSERT INTO dm_fallback_keys (device_id, key_id, public_key, signature)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (device_id) DO UPDATE
+SET key_id = EXCLUDED.key_id,
+    public_key = EXCLUDED.public_key,
+    signature = EXCLUDED.signature,
+    updated_at = NOW()
+RETURNING device_id, key_id, public_key, signature, created_at, updated_at
+`
+
+type UpsertDMFallbackKeyParams struct {
+	DeviceID  uuid.UUID `json:"device_id"`
+	KeyID     string    `json:"key_id"`
+	PublicKey string    `json:"public_key"`
+	Signature string    `json:"signature"`
+}
+
+func (q *Queries) UpsertDMFallbackKey(ctx context.Context, arg UpsertDMFallbackKeyParams) (DmFallbackKey, error) {
+	row := q.db.QueryRowContext(ctx, upsertDMFallbackKey,
+		arg.DeviceID,
+		arg.KeyID,
+		arg.PublicKey,
+		arg.Signature,
+	)
+	var i DmFallbackKey
+	err := row.Scan(
+		&i.DeviceID,
+		&i.KeyID,
+		&i.PublicKey,
+		&i.Signature,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }

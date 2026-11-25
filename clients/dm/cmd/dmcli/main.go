@@ -295,6 +295,10 @@ func commandPoll(ctx context.Context, opts options, args []string) error {
 			fmt.Println("plaintext: <already delivered, awaiting acknowledgement>")
 			continue
 		}
+		if message.Quarantined {
+			fmt.Printf("plaintext: <quarantined: %s>\n", message.QuarantineReason)
+			continue
+		}
 		fmt.Printf("plaintext: %s\n", string(message.Plaintext))
 	}
 	return nil
