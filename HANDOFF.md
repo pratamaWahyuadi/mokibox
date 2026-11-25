@@ -51,8 +51,9 @@ Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
 - `Send` menyimpan request lengkap + hash plaintext ke outbox sebelum request
   pertama. Retry dengan `-message-id` mengirim ulang ciphertext persis sama;
   plaintext/recipient berubah ditolak lokal dengan `ErrOutboxConflict`.
-- Rate limit DM dipisah: kontrol (device, upload key, bundle, send) 20 burst,
-  delivery (poll/ack) 120 burst 10/detik dan tidak kena limiter auth 60/menit.
+- Rate limit DM dipisah: kontrol (device, upload key, bundle) 20 burst,
+  delivery (send/poll/ack) 120 burst 10/detik dan tidak kena limiter auth
+  60/menit.
 - FK `dm_inbox.sender_device_id` diganti ke `sender_user_id ... ON DELETE
   RESTRICT` di `migrations/010_dm_inbox_sender_fk.sql`, sehingga re-register
   device tidak menghapus pesan yang sudah dikirim.
@@ -63,6 +64,27 @@ Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
   fallback encrypt/decrypt, dan re-register tidak menghapus inbox terkirim.
   `make db-migrate-dm` menerapkan 009–011 berurutan.
 
+## Review follow-up — QA verdict (2026-11-25)
+
+- `DeleteUserData` sekarang menghapus semua inbox DM where user sebagai sender
+  atau recipient, lalu `DeleteDMDevicesByUser` menghapus device, one-time/fallback
+  key, dan idempotency dalam tx yang sama dengan tombstone. Ini berjalan walau
+  `DM_E2EE_ENABLED=false`; migrasi 009–011 wajib untuk semua deploy.
+- Tes `TestDeleteMe_HappyPathCascadeAndEnqueue` memverifikasi urutan pembersihan
+  DM; `TestDeleteMe_DMCleanupFailureIs500` memverifikasi rollback.
+- `scripts/smoketest/dm` menjalankan alur register, upload key, send, poll, ack
+  terhadap HTTP + PostgreSQL asli, termasuk schema 009–011, `FOR UPDATE SKIP
+  LOCKED`, `ON CONFLICT ... WHERE`, dan ciphertext-only storage. Bukti ada di
+  `scripts/smoketest/dm/README.md`.
+- `apiDelivery` hanya dibuat saat flag DM aktif; tes route memeriksa enam route
+  DM mengikuti flag dan tidak ada catch-all `/api/*` buatan.
+- Registrasi `device_id` milik user lain kini `409 DM_DEVICE_STALE`, termasuk
+  fallback untuk race `23505`. Send mengunci device pengirim dengan
+  `FOR UPDATE` agar re-register konkuren tidak menyisakan FK error 500.
+- Tes tambahan: non-mutual follow 404, stale device upload/poll/ack 409, ack
+  pesan device lain 404, validasi `after`/`limit`, user nonaktif 401, janitor,
+  dan state v1 → v2.
+
 ## DM E2EE — backend relay only
 
 - Go gateway, migrasi `009_dm_e2ee.sql` + `010_dm_inbox_sender_fk.sql` +
@@ -70,10 +92,9 @@ Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
   endpoints, inbox polling/ack, idempotency, TTL janitor, dan feature gate
   tersedia. Compose meneruskan `DM_E2EE_ENABLED` dan `DM_INBOX_TTL`; flag
   default tetap mati dan TTL v1 adalah 168 jam.
-- Pemilik menjalankan smoke lokal; bukti rinci ada di folder kerja asli
-  `mokibox-main/.smoke/REPORT.md` dan tidak ikut disalin ke sini. Laporan mencatat
-  Go build/vet/test/race, HTTP/PostgreSQL relay, ciphertext-only storage,
-  feature-flag-off, dan Olm encrypt→relay→decrypt. Zitadel asli dan production
+- Bukti smoke ada di `scripts/smoketest/dm/README.md`: Go build/vet/test/race,
+  HTTP/PostgreSQL relay, ciphertext-only storage, fitur flag on/off, dan Olm
+  encrypt→relay→decrypt via SDK integration test. Zitadel asli dan production
   tidak diuji; ini bukan audit keamanan independen.
 - Laporan smoke menemukan dua Critical yang kemudian diperbaiki: base64 DM
   kini dikembalikan tanpa padding secara kanonis, dan `make db-migrate`

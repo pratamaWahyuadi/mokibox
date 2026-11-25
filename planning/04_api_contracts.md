@@ -175,9 +175,10 @@ Semua endpoint berada di `/api/dm`, memerlukan JWT Zitadel dan hanya
 diregistrasikan saat `DM_E2EE_ENABLED=true`. API tidak pernah menerima
 plaintext atau private key. Semua binary key/ciphertext dikirim sebagai
 base64. User/device authorization tidak bergantung pada UUID rahasia.
-Rate limit dibagi dua bucket per user: kontrol (device, key upload, bundle,
-send) 20 burst 1/3 detik, dan pengiriman (poll/ack) 120 burst 10/detik;
-poll/ack sengaja tidak memakai limiter auth generik 60/menit.
+Rate limit dibagi dua bucket per user: kontrol (device, key upload, bundle)
+20 burst 1/3 detik, dan pengiriman (send/poll/ack) 120 burst 10/detik.
+Keduanya memakai group auth tersendiri, sehingga send/poll/ack tidak kena
+limiter auth generik 60/menit.
 
 ### `POST /api/dm/device`
 
@@ -304,7 +305,7 @@ ack berhasil dengan `204`; ciphertext dihapus dari penyimpanan inbox.
 | 400 | `VALIDATION_ERROR` | Body/cursor/encoding tidak valid |
 | 401 | `UNAUTHORIZED` | JWT hilang, invalid, atau user nonaktif |
 | 404 | `NOT_FOUND` | Target tak ada atau mutual-follow tidak terpenuhi |
-| 409 | `DM_DEVICE_STALE` | Device ID tidak lagi aktif untuk caller |
+| 409 | `DM_DEVICE_STALE` | Device ID tidak aktif untuk caller atau dimiliki user lain |
 | 409 | `DM_KEY_UNAVAILABLE` | Tidak ada one-time atau fallback key untuk target |
 | 409 | `DM_IDEMPOTENCY_CONFLICT` | ID client dipakai ulang dengan body berbeda |
 | 409 | `DM_INBOX_FULL` | Recipient memiliki 1,000 pesan pending |
@@ -314,6 +315,15 @@ ack berhasil dengan `204`; ciphertext dihapus dari penyimpanan inbox.
 Pengiriman diperiksa mutual-follow pada saat send. Jika follow relation berubah
 setelah enqueue, pesan yang sudah berada di inbox tetap dapat diambil sampai
 ack/expiry. Ini konsekuensi kontrak v1.
+
+`GET /api/dm/users/:id/key-bundle` dengan `include_one_time_key=true` mengonsumsi
+satu one-time key target. Klien harus memakai `include_one_time_key=false`
+saat hanya ingin memeriksa fingerprint; rate limit membatasi, tetapi tidak
+menghilangkan, kemungkinan pengurasan key oleh mutual follower.
+
+FK `fk_dm_inbox_sender_user` memakai `ON DELETE RESTRICT`. Deploy saat ini
+hanya tombstone user, sehingga aman. Alur hard-delete di masa depan harus
+menghapus baris inbox DM terlebih dahulu.
 
 ## 1. Daftar Endpoint
 

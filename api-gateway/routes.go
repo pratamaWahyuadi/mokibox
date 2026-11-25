@@ -11,9 +11,10 @@
 // group. Phase 6 issue A added the home feed behind
 // the auth group; issue B added the video detail /
 // status / playlist endpoints; issue C added the
-// follow endpoints. E2EE DM delivery routes use a
-// separate auth-only group so polls and acks are not
-// capped by the generic 60/min API limiter.
+// follow endpoints. E2EE DM send/poll/ack use a
+// separate auth-only group so delivery is not capped
+// by the generic 60/min API limiter or the 20-burst
+// device/key management bucket.
 // The current full route set is:
 //   - GET  /healthz                          (no auth)
 //   - POST /api/webhooks/zitadel             (no JWT auth;
@@ -184,9 +185,9 @@ func NewRouter(d RouterDeps) *echo.Echo {
 		Queries:  d.Queries,
 	})
 	api := e.Group("/api", authenticate, authRateLimit)
-	apiDelivery := e.Group("/api", authenticate)
 
 	if d.Cfg != nil && d.Cfg.DME2EEEnabled {
+		apiDelivery := e.Group("/api", authenticate)
 		dmHandler, err := handlers.NewDMHandler(d.Queries, d.DB, d.Cfg.DMInboxTTL)
 		if err != nil {
 			panic(fmt.Sprintf("api-gateway: NewDMHandler: %v", err))
@@ -214,7 +215,7 @@ func NewRouter(d RouterDeps) *echo.Echo {
 		dmControl.POST("/device", dmHandler.RegisterDevice)
 		dmControl.POST("/device/one-time-keys", dmHandler.UploadOneTimeKeys)
 		dmControl.GET("/users/:id/key-bundle", dmHandler.GetKeyBundle)
-		dmControl.POST("/messages", dmHandler.SendMessage)
+		dmDelivery.POST("/messages", dmHandler.SendMessage)
 		dmDelivery.GET("/inbox", dmHandler.PollInbox)
 		dmDelivery.POST("/inbox/:message_id/ack", dmHandler.AcknowledgeMessage)
 	}

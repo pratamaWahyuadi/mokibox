@@ -1,7 +1,8 @@
 # MokiBox Direct Messages — E2EE v1
 
-**Status:** Backend-only scope for `mokibox-main`. Client-side crypto and UI
-are outside this repository.
+**Status:** Backend relay plus a reference Go SDK/CLI are in scope for this
+repository. A production client UI, distribution/license decision for the
+Olm implementation, and an independent security audit remain out of scope.
 
 ## Goal and boundaries
 
@@ -13,8 +14,9 @@ encrypt and decrypt messages:
 - Clients outside this repository own Olm accounts, sessions, key verification,
   message encryption/decryption, and encrypted local state.
 - No server component receives private keys or plaintext.
-- Client implementation and chat UI are both out of scope for this backend
-  repository.
+- `clients/dm` is the reference Go SDK/CLI in this repository. It is not a
+  production chat UI; a client UI and its distribution license still need a
+  product decision.
 
 The supplied `chat-e2ee-master.zip` is a behavior/architecture reference only.
 Its shared invitation-secret + HKDF/AES-GCM protocol is not mixed with Olm, and
@@ -33,7 +35,7 @@ its source is not copied. This design uses account-bound device keys instead.
 - Per-device message ordering, idempotent retry, account-deletion cleanup,
   device binding, rate limits, and a feature flag that defaults off.
 
-### Client requirements, not implemented here
+### Reference Go SDK/CLI included
 
 - A client must compare a peer fingerprint out of band before sending. A
   changed identity key must block sends and require re-verification.
@@ -49,9 +51,11 @@ only its bounded ciphertext queue supports offline recipients.
 
 ## Client cryptographic contract
 
-- Olm v1 is the intended client protocol. Client library, platform, and
-  distribution license selection are outside this backend repository and must
-  be decided before implementing or distributing a client.
+- Olm v1 is the intended client protocol. The reference SDK uses
+  `maunium.net/go/mautrix` (MPL-2.0) and its pure-Go `crypto/goolm`. Upstream
+  has stated that goolm still needs an audit; no independent goolm audit
+  report was found during this review. Production client distribution requires
+  a license/audit decision before enablement.
 - Each device has Curve25519 and Ed25519 identity keys. Private account and
   Olm session state must be stored using the selected crypto library's
   encrypted state format; its random pickle key must use OS-backed secure
@@ -100,8 +104,9 @@ only its bounded ciphertext queue supports offline recipients.
 - One-time-key claims are atomic. Sends allocate the recipient's per-device
   sequence and enforce the queue cap in one transaction. When one-time keys are
   exhausted the bundle may return the device's current signed fallback key.
-- DM control endpoints and delivery endpoints use separate per-user buckets;
-  poll/ack are not capped by the generic 60/min API limiter.
+- DM control endpoints (device, key upload, key bundle) and delivery endpoints
+  (send, poll, ack) use separate per-user buckets. Delivery is not capped by
+  the generic 60/min API limiter.
 - A device may have at most 1,000 pending, unexpired messages. Queue-full and
   dedicated rate-limit failures are explicit responses.
 - Send idempotency is keyed by sender device + client message ID and stores only
@@ -110,10 +115,19 @@ only its bounded ciphertext queue supports offline recipients.
 - Poll requires an explicit `after` cursor. Sequence numbers can have gaps.
   Acknowledgement is idempotent and returns 204.
 - Expired inbox and idempotency records are removed by a janitor, not by poll.
-  Account deletion removes device keys, inbox rows addressed to those devices,
-  and idempotency records in its existing transaction. Sent inbox rows reference
-  the sender user (not the short-lived device), so re-registering a device does
-  not delete delivery history.
+  Account deletion removes all DM inbox rows where the user is sender or
+  recipient, plus device keys, fallback keys and idempotency records, in its
+  existing transaction. This runs even when the DM feature flag is off, so the
+  009-011 migrations are mandatory for every deployment. Sent inbox rows
+  reference the sender user (not the short-lived device), so re-registering a
+  device does not delete delivery history.
+- `GET /api/dm/users/:id/key-bundle` with `include_one_time_key=true` claims a
+  one-time key and advances that device's key pool. Clients should use
+  `include_one_time_key=false` for fingerprint inspection; rate limits bound
+  but do not eliminate one-time-key draining by mutual followers.
+- `fk_dm_inbox_sender_user` uses `ON DELETE RESTRICT`. The deployment only
+  tombstones users, so this is safe. A future hard-delete flow must purge DM
+  inbox rows first.
 - The server may observe account/device IDs, routing, timestamps, sequence,
   envelope size, and delivery state. It cannot recall copies already decrypted
   or copied by a recipient.
@@ -122,11 +136,12 @@ only its bounded ciphertext queue supports offline recipients.
 
 1. Go handler tests exercise the public HTTP contract with a test verifier and
    consumer-side store doubles.
-2. HTTP/PostgreSQL smoke verifies the backend relay contract and ciphertext-only
-   storage; E2EE interoperability requires a separately maintained client.
-3. The owner-run evidence in `.smoke/REPORT.md` records a local Olm end-to-end
-   run using temporary Flutter test helpers. Those client helpers are not part
-   of this backend repository.
+2. `scripts/smoketest/dm` runs against real HTTP + PostgreSQL and covers the
+   009-011 schema, `FOR UPDATE SKIP LOCKED`, idempotency upsert, register,
+   upload, send, poll and ack. Its recorded results are in
+   `scripts/smoketest/dm/README.md`.
+3. The Go SDK integration tests in `clients/dm` cover a local Olm end-to-end run
+   with an in-memory relay; those tests are not a network interoperability test.
 
 Smoke evidence is not a security audit. Production enablement still requires
 an independently reviewed, interoperable client and an independent security
