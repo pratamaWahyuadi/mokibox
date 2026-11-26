@@ -115,4 +115,4 @@ jobs:
       - name: Integration tests
         env:
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/mokibox_dm_ci?sslmode=disable
-        run: go test -tags=integration ./shared/db -count=1
+        run: go test -tags=integration ./... -count=1
