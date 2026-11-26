@@ -62,47 +62,29 @@ Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
   tetap bisa dimulai saat one-time key habis.
 - Tes baru: outbox retry identik, karantina + lanjut, fallback upload/bundle,
   fallback encrypt/decrypt, dan re-register tidak menghapus inbox terkirim.
-  `make db-migrate-dm` menerapkan 009–011 + 015; `make db-migrate-marketplace`
-  menerapkan 012–014 + 016.
+   `make db-migrate-dm` menerapkan 009–011 + 015 dan 015 berurutan.
 
 ## Security follow-up — DM authorization hardening
 
 - `migrations/015_dm_authorization_hardening.sql` menambah `dm_blocks`; blok
   bersifat dua arah untuk eligibility DM dan wajib diapply sebelum binary baru.
-- `IsDMRecipientAllowed` menolak pasangan yang salah satu memblokir user lain,
-  termasuk saat kontak Marketplace masih aktif; key bundle tidak mengonsumsi
-  one-time key kecuali `include_one_time_key=true`.
+- `IsDMMutualFollow` menolak pasangan yang salah satu memblokir user lain; key
+  bundle tidak mengonsumsi one-time key kecuali `include_one_time_key=true`.
 - Endpoint baru `POST`/`DELETE /api/dm/blocks/:id` menghapus inbox dan
   idempotency pasangan saat blok dipasang. Limiter key bundle dihitung per
   `(caller, target)` agar satu klien tidak menguras one-time key korban.
 
-## Review follow-up — Marketplace extensions
-
-- `migrations/016_marketplace_extensions.sql` menambah `expires_at` pada listing
-  (default 30 hari), `size_bytes`/`is_cover` pada foto, dan kolom audit review
-  pada laporan. Migrasi ini wajib sebelum binary baru melayani traffic.
-- Upload intent meminta `size_bytes`; R2 tidak mendukung `content-length-range`
-  pada presigned PUT, jadi ukuran divalidasi ulang lewat `HeadObject` di
-  `/confirm`. `ConfirmImage` sekarang idempoten untuk foto yang sudah aktif.
-- Endpoint baru: `GET /api/marketplace/users/:seller_user_id/listings`,
-  `POST /api/marketplace/listings/:id/images/:image_id/cover`,
-  `GET /api/marketplace/moderation/reports`, dan
-  `POST /api/marketplace/moderation/reports/:id/review`. Moderasi hanya untuk
-  UUID di `MARKETPLACE_MODERATOR_USER_IDS`.
-- Janitor menyapu listing kedaluwarsa ke `archived`, menghapus objek R2-nya lewat
-  cleanup outbox, dan filter browse/favorit/laporan/kontak mengabaikan listing
-  yang sudah kedaluwarsa.
-
 ## Review follow-up — QA verdict (2026-11-25)
+
 
 - `DeleteUserData` sekarang menghapus semua inbox DM where user sebagai sender
   atau recipient, lalu `DeleteDMDevicesByUser` menghapus device, one-time/fallback
   key, dan idempotency dalam tx yang sama dengan tombstone. Ini berjalan walau
-  `DM_E2EE_ENABLED=false`; migrasi 001–016 wajib untuk semua deploy.
+  `DM_E2EE_ENABLED=false`; migrasi 009–011 + 015 wajib untuk semua deploy.
 - Tes `TestDeleteMe_HappyPathCascadeAndEnqueue` memverifikasi urutan pembersihan
   DM; `TestDeleteMe_DMCleanupFailureIs500` memverifikasi rollback.
 - `scripts/smoketest/dm` menjalankan alur register, upload key, send, poll, ack
-  terhadap HTTP + PostgreSQL asli, termasuk schema 009–011 + 015 + 016, `FOR UPDATE SKIP
+  terhadap HTTP + PostgreSQL asli, termasuk schema 009–011 + 015, `FOR UPDATE SKIP
   LOCKED`, `ON CONFLICT ... WHERE`, dan ciphertext-only storage. Bukti ada di
   `scripts/smoketest/dm/README.md`.
 - `apiDelivery` hanya dibuat saat flag DM aktif; tes route memeriksa enam route
@@ -119,12 +101,11 @@ Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
 - Smoke concurrent claim diperkuat: transaksi pertama menahan lock, transaksi
   kedua harus mengambil key berbeda dalam 3 detik; cleanup dipindah ke `defer`
   agar gagal di tengah tidak menyisakan data.
-- Deploy gate didokumentasikan: migrasi 001–016 wajib sebelum binary baru
+- Deploy gate didokumentasikan: migrasi 009–011 + 015 wajib sebelum binary baru
   melayani traffic. Keputusan v1 penghapusan sepihak dan drift index 010 lama
   juga dicatat.
 - CI ditambahkan di `.github/workflows/ci.yml`: build/vet/test/race/mod verify
-  dengan Go dari `go.mod` (1.25.5), job migrasi 001–016 pada PostgreSQL 16, dan
-  integration test bertanda `integration`.
+  dengan Go dari `go.mod` (1.25.5) dan job migrasi 009–011 + 015 pada PostgreSQL 16.
 - Gate rilis DM, template keputusan produk, dan template persetujuan
   lisensi/audit dirangkum di
   `planning/14_dm_e2ee_release_gate.md`.
@@ -732,89 +713,6 @@ HANDOFF.md                               MODIFIED — this section
 - `go vet ./...` — 0 warnings
 - `go test ./...` — all green
 - `scripts/smoketest/phase11_search` — PASS 2x back-to-back
-
-## Marketplace v1 — local backend
-
-- Implemented the backend-only Marketplace scope in
-  `planning/15_marketplace_v1.md`: listing CRUD/browse, private R2 photo
-  uploads, favorites, reports, and persistent buyer/seller contact grants
-  integrated with existing E2EE DM authorization.
-- Migrations `012_marketplace.sql`, `013_marketplace_cleanup_outbox.sql`, and
-  `014_marketplace_location.sql` are required by this gateway version,
-  including account deletion, DM grant queries, durable cleanup retry, and
-  location-radius browse. Apply them only to a local disposable database that
-  already has migrations `001`-`011`; do not rerun after successful application.
-- Local HTTP/PostgreSQL smoke instructions are in
-  `scripts/smoketest/marketplace/README.md`. The script requires two active
-  local test accounts/tokens and deletes its uniquely marked listing afterward.
-- Verification completed: `make sqlc-gen`, `go test ./... -count=1`,
-  `go test -tags=integration ./... -count=1`, `go vet ./...`,
-  `go vet -tags=integration ./...`, `git diff --check`, and OpenAPI JSON parse.
-- Verification also completed against a disposable local PostgreSQL and
-  gateway: migrations `001`-`014` applied, tagged SQL integration tests passed,
-  `make smoke-marketplace-local` passed including radius browse, idempotent
-  report, contact revocation, and outbox cleanup, and `make smoke-marketplace-live`
-  passed against the local stub gateway with an explicit
-  `local-simulation` warning. R2 calls are stubbed in tests; no real R2
-  operations were performed. No commit, PR, deployment, or production migration
-  was made.
-- Cleanup enqueue failures are now recorded in `marketplace_cleanup_outbox`
-  inside the same transaction as the row/object deletion. The api-gateway
-  janitor retries with capped exponential backoff, quarantines rows after 10
-  attempts, and sweeps expired pending image intents on the same interval
-  (`MARKETPLACE_SWEEP_INTERVAL`, `MARKETPLACE_SWEEP_BATCH`).
-- Routes are gated by `MARKETPLACE_ENABLED` (defaults to false in config,
-  `.env.example`, and docker-compose; enable only for local smoke or after
-  security review). Marketplace
-  request bodies now use the central validator while keeping explicit
-  cross-field checks for `reason=other`.
-
-## Smoke test gates before PR/merge
-
-- Local smoke (PR gate, rerun after the janitor/outbox and location changes):
-  apply migrations `001`-`014` to a disposable PostgreSQL, then run
-  `make smoke-marketplace-local DATABASE_URL=...`. It verifies radius browse,
-  expired image-intent deletion, and their keys reaching
-  `marketplace_cleanup_outbox`.
-- Live/staging smoke (required before production): repeat the same HTTP flow on
-  a disposable staging database with real R2 and Redis, confirm
-  `cleanup:objects` actually deletes the temporary/final object keys, and
-  confirm failed enqueues back off instead of leaking objects. Keep
-  `MARKETPLACE_ENABLED=false` until this smoke and the security review pass.
-
-## Marketplace anti-abuse review follow-up
-
-- Marketplace contact grants expire after 30 days and carry `revoked_at`.
-  Eligibility requires an active, unrevoked, unexpired grant; revoked grants
-  stay sticky for that listing, while contacting again renews an expired
-  non-revoked grant. `DELETE /api/marketplace/listings/:id/contact` lets either
-  party revoke. Queued ciphertext and matching DM idempotency rows are purged
-  only when no other active grant or mutual-follow still authorizes the pair.
-- Daily quotas cap listings, reports, and contacts at 20 per user per rolling
-  24 hours. Count-plus-insert runs in one transaction under a Postgres advisory
-  lock, so concurrent replicas cannot race past the quota. Marketplace writes
-  also use a dedicated 12/minute burst-10 limiter on top of the generic
-  authenticated-user limiter. Reports require details when `reason=other`, and
-  duplicate reports stay idempotent.
-- Uploaded image bytes are validated and promoted from the temporary presigned
-  key to a unique immutable final key that the client never received a
-  presigned URL for; the temporary object and any losing retry key are queued
-  for cleanup, so a failed concurrent confirm cannot delete the winning object.
-- DM fake grants are pair-keyed in tests. Coverage proves strangers are denied,
-  revocation denies both directions, quota violations return
-  `429 RATE_LIMITED`, expired grants renew, revoked grants stay denied, and
-  revocation only purges when no other authorization remains.
-- CI now applies migrations 012-014 and 016, asserts the new contact, cleanup outbox,
-  and coordinate columns, and runs the tagged SQL integration tests against the service
-  PostgreSQL, including a concurrent 21-request quota test that must commit
-  exactly 20 listings.
-- Unit tests now cover the handler ownership/visibility matrix, viewer/owner
-  identity in query parameters, janitor retry/backoff/quarantine paths, and
-  config/route feature-flag parsing.
-- Remaining before production: run the live/staging smoke with real R2+Redis,
-  expand the SQL keyset/unique-constraint matrix, and complete independent
-  security review. The local PR gate is complete. UI, checkout, payments,
-  shipping, and production rollout remain out of scope.
 
 
 

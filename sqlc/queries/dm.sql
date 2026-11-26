@@ -43,15 +43,18 @@ WHERE sender_user_id = sqlc.arg(user_id) OR recipient_user_id = sqlc.arg(user_id
 
 -- name: DeleteDMInboxForPair :execrows
 DELETE FROM dm_inbox
-WHERE (sender_user_id = sqlc.arg(sender_id) AND recipient_user_id = sqlc.arg(recipient_id))
-   OR (sender_user_id = sqlc.arg(recipient_id) AND recipient_user_id = sqlc.arg(sender_id));
+WHERE sender_user_id = sqlc.arg(sender_id) AND recipient_user_id = sqlc.arg(recipient_id);
 
 -- name: DeleteDMIdempotencyForPairMessages :execrows
-DELETE FROM dm_idempotency i
-USING dm_inbox m
-WHERE i.message_id = m.message_id
-  AND ((m.sender_user_id = sqlc.arg(sender_id) AND m.recipient_user_id = sqlc.arg(recipient_id))
-    OR (m.sender_user_id = sqlc.arg(recipient_id) AND m.recipient_user_id = sqlc.arg(sender_id)));
+DELETE FROM dm_idempotency
+WHERE sender_device_id IN (
+    SELECT device_id FROM dm_devices WHERE user_id = sqlc.arg(sender_id)
+)
+AND EXISTS (
+    SELECT 1 FROM dm_inbox
+    WHERE dm_inbox.message_id = dm_idempotency.message_id
+      AND dm_inbox.recipient_user_id = sqlc.arg(recipient_id)
+);
 
 -- name: InsertDMBlock :execrows
 INSERT INTO dm_blocks (blocker_id, blocked_id)
@@ -74,7 +77,7 @@ VALUES ($1, $2, $3, $4)
 RETURNING device_id, user_id, identity_curve25519, identity_ed25519,
           next_inbox_sequence, created_at;
 
--- name: IsDMRecipientAllowed :one
+-- name: IsDMMutualFollow :one
 SELECT EXISTS (
     SELECT 1
     FROM users sender
@@ -87,26 +90,14 @@ SELECT EXISTS (
           WHERE (blocker_id = sender.id AND blocked_id = recipient.id)
              OR (blocker_id = recipient.id AND blocked_id = sender.id)
       )
-      AND (
-          (
-              EXISTS (
-                  SELECT 1 FROM follows
-                  WHERE follower_id = sender.id AND followee_id = recipient.id
-              )
-              AND EXISTS (
-                  SELECT 1 FROM follows
-                  WHERE follower_id = recipient.id AND followee_id = sender.id
-              )
-          )
-          OR EXISTS (
-              SELECT 1 FROM marketplace_contacts c
-              WHERE ((c.buyer_user_id = sender.id AND c.seller_user_id = recipient.id)
-                     OR (c.buyer_user_id = recipient.id AND c.seller_user_id = sender.id))
-                 AND c.revoked_at IS NULL
-                 AND c.expires_at > NOW()
-          )
+      AND EXISTS (
+          SELECT 1 FROM follows
+          WHERE follower_id = sender.id AND followee_id = recipient.id
       )
-
+      AND EXISTS (
+          SELECT 1 FROM follows
+          WHERE follower_id = recipient.id AND followee_id = sender.id
+      )
 );
 
 -- name: GetDMTargetDevice :one

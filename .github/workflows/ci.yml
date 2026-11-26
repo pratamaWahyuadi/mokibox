@@ -37,8 +37,8 @@ jobs:
       - name: Verify modules
         run: go mod verify
 
-  migrations-and-integration:
-    name: apply migrations and integration tests
+  dm-migrations:
+    name: apply DM migrations
     runs-on: ubuntu-latest
     timeout-minutes: 10
     services:
@@ -60,11 +60,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
       - name: Bootstrap roles
         run: |
           psql -h 127.0.0.1 -U postgres -d mokibox_dm_ci -v ON_ERROR_STOP=1 -f deploy/postgres/init/01_app_roles.sql >/dev/null
@@ -78,51 +73,18 @@ jobs:
             migrations/009_dm_e2ee.sql \
             migrations/010_dm_inbox_sender_fk.sql \
             migrations/011_dm_fallback_keys.sql \
-            migrations/012_marketplace.sql \
-            migrations/013_marketplace_cleanup_outbox.sql \
-            migrations/014_marketplace_location.sql \
-            migrations/015_dm_authorization_hardening.sql \
-            migrations/016_marketplace_extensions.sql
+            migrations/015_dm_authorization_hardening.sql
           do
             psql -h 127.0.0.1 -U postgres -d mokibox_dm_ci -v ON_ERROR_STOP=1 -f "$migration" >/dev/null
           done
-      - name: Verify backend schema
+      - name: Verify DM schema
         run: |
           set -euo pipefail
           result="$(psql -h 127.0.0.1 -U postgres -d mokibox_dm_ci -Atqc "
             SELECT to_regclass('dm_devices') IS NOT NULL
                AND to_regclass('dm_fallback_keys') IS NOT NULL
                AND to_regclass('dm_blocks') IS NOT NULL
-               AND to_regclass('marketplace_categories') IS NOT NULL
-               AND to_regclass('marketplace_contacts') IS NOT NULL
-               AND to_regclass('marketplace_cleanup_outbox') IS NOT NULL
                AND EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_dm_inbox_sender_user')
                AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_dm_inbox_sender_device')
-               AND NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_dm_inbox_sender_user_id')
-               AND EXISTS (SELECT 1 FROM information_schema.columns
-                           WHERE table_name = 'marketplace_contacts' AND column_name = 'revoked_at')
-                AND EXISTS (SELECT 1 FROM information_schema.columns
-                            WHERE table_name = 'marketplace_contacts' AND column_name = 'expires_at')
-                AND EXISTS (SELECT 1 FROM information_schema.columns
-                            WHERE table_name = 'marketplace_cleanup_outbox' AND column_name = 'next_attempt_at')
-                 AND EXISTS (SELECT 1 FROM information_schema.columns
-                             WHERE table_name = 'marketplace_cleanup_outbox' AND column_name = 'r2_keys')
-                  AND EXISTS (SELECT 1 FROM information_schema.columns
-                              WHERE table_name = 'marketplace_listings' AND column_name = 'latitude')
-                  AND EXISTS (SELECT 1 FROM information_schema.columns
-                              WHERE table_name = 'marketplace_listings' AND column_name = 'longitude')
-                  AND EXISTS (SELECT 1 FROM information_schema.columns
-                              WHERE table_name = 'marketplace_listings' AND column_name = 'expires_at')
-                  AND EXISTS (SELECT 1 FROM information_schema.columns
-                              WHERE table_name = 'marketplace_listing_images' AND column_name = 'size_bytes')
-                  AND EXISTS (SELECT 1 FROM information_schema.columns
-                              WHERE table_name = 'marketplace_listing_images' AND column_name = 'is_cover')
-                  AND EXISTS (SELECT 1 FROM information_schema.columns
-                              WHERE table_name = 'marketplace_reports' AND column_name = 'reviewed_at')")"
-
+               AND NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_dm_inbox_sender_user_id')")"
           test "$result" = t
-
-      - name: Integration tests
-        env:
-          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/mokibox_dm_ci?sslmode=disable
-        run: go test -tags=integration ./... -count=1

@@ -34,8 +34,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"reflect"
-	"strings"
 
 	"github.com/go-playground/validator/v10"
 
@@ -62,16 +60,7 @@ type RequestValidator struct {
 // site stays consistent and a custom translator can
 // be added later without changing NewRouter.
 func NewRequestValidator() *RequestValidator {
-	v := validator.New()
-	v.RegisterTagNameFunc(func(field reflect.StructField) string {
-		jsonTag := field.Tag.Get("json")
-		name, _, _ := strings.Cut(jsonTag, ",")
-		if name == "" || name == "-" {
-			return field.Name
-		}
-		return name
-	})
-	return &RequestValidator{Validator: v}
+	return &RequestValidator{Validator: validator.New()}
 }
 
 // Validate satisfies echo.Validator. It returns nil
@@ -179,8 +168,6 @@ func fieldMessage(fe validator.FieldError) string {
 		return fmt.Sprintf("%s must be at least %s", name, fe.Param())
 	case "max":
 		return fmt.Sprintf("%s must be at most %s", name, fe.Param())
-	case "gt":
-		return fmt.Sprintf("%s must be greater than %s", name, fe.Param())
 	case "oneof":
 		return fmt.Sprintf("%s must be one of: %s", name, fe.Param())
 	case "uuid":

@@ -13,7 +13,6 @@
 package shared
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -55,9 +54,9 @@ type R2Config struct {
 // to mock it can declare a small interface in their
 // own package.
 type R2Client struct {
-	client    *s3.Client
+	client *s3.Client
 	presigner *s3.PresignClient
-	bucket    string
+	bucket string
 }
 
 // NewR2Client builds an R2Client from a validated
@@ -146,33 +145,6 @@ func (c *R2Client) PresignPut(ctx context.Context, key, contentType string, expi
 		return "", fmt.Errorf("PresignPut: presign: %w", err)
 	}
 	return req.URL, nil
-}
-
-// PutObject uploads a server-validated byte slice to R2 with a
-// fixed key. It is used after a presigned upload intent is
-// validated: the bytes are promoted to an immutable key that
-// the client never received a presigned URL for, so the
-// original upload URL cannot overwrite the active object.
-func (c *R2Client) PutObject(ctx context.Context, key, contentType string, body []byte) error {
-	if key == "" {
-		return fmt.Errorf("PutObject: key is empty")
-	}
-	if contentType == "" {
-		return fmt.Errorf("PutObject: contentType is empty")
-	}
-	if body == nil {
-		return fmt.Errorf("PutObject: body is nil")
-	}
-	_, err := c.client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:      aws.String(c.bucket),
-		Key:         aws.String(key),
-		ContentType: aws.String(contentType),
-		Body:        bytes.NewReader(body),
-	})
-	if err != nil {
-		return fmt.Errorf("PutObject: upload: %w", err)
-	}
-	return nil
 }
 
 // PresignGet returns a presigned URL the client can use
@@ -348,7 +320,6 @@ func (c *R2Client) ListObjectsByPrefix(ctx context.Context, prefix string, maxKe
 //   - prefix MUST contain at least one non-slash
 //     character (so "" is impossible even if a caller
 //     concatenates badly).
-//
 // These three checks make bucket-wipe impossible
 // from this helper regardless of what the caller
 // passes.

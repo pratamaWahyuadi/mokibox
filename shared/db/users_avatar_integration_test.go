@@ -305,7 +305,7 @@ func TestDMBlocksDenyMutualFollowIntegration(t *testing.T) {
 	if err := q.FollowUser(ctx, FollowUserParams{FollowerID: second.ID, FolloweeID: first.ID}); err != nil {
 		t.Fatalf("second follow: %v", err)
 	}
-	eligible, err := q.IsDMRecipientAllowed(ctx, IsDMRecipientAllowedParams{ID: first.ID, ID_2: second.ID})
+	eligible, err := q.IsDMMutualFollow(ctx, IsDMMutualFollowParams{ID: first.ID, ID_2: second.ID})
 	if err != nil || !eligible {
 		t.Fatalf("mutual follow eligible = %t, err = %v", eligible, err)
 	}
@@ -314,7 +314,7 @@ func TestDMBlocksDenyMutualFollowIntegration(t *testing.T) {
 	if err != nil || blocked != 1 {
 		t.Fatalf("insert block rows = %d, err = %v", blocked, err)
 	}
-	eligible, err = q.IsDMRecipientAllowed(ctx, IsDMRecipientAllowedParams{ID: first.ID, ID_2: second.ID})
+	eligible, err = q.IsDMMutualFollow(ctx, IsDMMutualFollowParams{ID: first.ID, ID_2: second.ID})
 	if err != nil || eligible {
 		t.Fatalf("blocked pair eligible = %t, err = %v", eligible, err)
 	}
@@ -323,7 +323,7 @@ func TestDMBlocksDenyMutualFollowIntegration(t *testing.T) {
 	if err != nil || unblocked != 1 {
 		t.Fatalf("delete block rows = %d, err = %v", unblocked, err)
 	}
-	eligible, err = q.IsDMRecipientAllowed(ctx, IsDMRecipientAllowedParams{ID: first.ID, ID_2: second.ID})
+	eligible, err = q.IsDMMutualFollow(ctx, IsDMMutualFollowParams{ID: first.ID, ID_2: second.ID})
 	if err != nil || !eligible {
 		t.Fatalf("unblocked pair eligible = %t, err = %v", eligible, err)
 	}
