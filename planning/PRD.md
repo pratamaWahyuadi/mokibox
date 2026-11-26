@@ -114,20 +114,6 @@ Masalah yang dibereskan PRD ini:
 | FR-AUTHZ-03 | Like/comment/follow/unfollow hanya valid kalau target benar-benar ada dan visibility mengizinkan. |
 | FR-AUTHZ-04 | **UUID bukan mekanisme keamanan.** Semua authorization dicek di handler, tidak cukup mengandalkan ID acak. |
 
-### 4.5 Marketplace v1
-
-Scope rinci dan kontrak lokal ada di [planning/15_marketplace_v1.md](./15_marketplace_v1.md).
-
-| Kode | Requirement |
-|---|---|
-| FR-MKT-01 | User aktif dapat membuat dan mengelola listing barang dengan kategori, harga integer IDR, kota, koordinat opsional, kondisi, dan status active/sold/archived. |
-| FR-MKT-02 | User dapat menjelajah dan mencari listing aktif, memfilter kategori/kota/rentang harga serta radius lokasi (`latitude`/`longitude`/`radius_km`, maksimal 200 km), dan melihat `distance_km`; detail listing sold tetap dapat dibuka, archived hanya oleh seller. |
-| FR-MKT-03 | Foto listing diupload ke R2 privat menggunakan presigned PUT; hanya JPEG/PNG/WebP ≤10 MiB dan maksimal 8 foto per listing yang dapat dipublikasikan setelah verifikasi konten server. |
-| FR-MKT-04 | User dapat menyimpan/menghapus favorit secara idempotent dan melihat daftar favorit miliknya sendiri. |
-| FR-MKT-05 | User dapat melaporkan listing; laporan unik per user/listing dicatat untuk moderasi manual dan tidak otomatis menyembunyikan listing. |
-| FR-MKT-06 | Seller tidak mengekspos nomor kontak. Buyer dapat menghubungi seller melalui DM Olm yang sudah ada; kontak pada listing aktif memberi izin DM dua arah untuk pasangan buyer/seller meski tidak mutual-follow. Izin bertahan setelah listing sold/archived, tetapi kedaluwarsa setelah 30 hari dan dapat dicabut oleh salah satu pihak; expired grant dapat diperbarui dengan menghubungi seller lagi. |
-| FR-MKT-07 | Marketplace v1 tidak mencakup checkout, pesanan, pembayaran, shipping, chat plaintext, atau UI. |
-
 ---
 
 ## 5. Non-Functional Requirements

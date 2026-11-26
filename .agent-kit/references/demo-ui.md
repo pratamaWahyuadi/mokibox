@@ -1,5 +1,11 @@
 # Single-page browser demo UI untuk manual E2E (MokiBox phase-10)
 
+> **[USANG — 2026-11-24]** Demo web (`deploy/demo/index.html`) sudah
+> DIHAPUS dan digantikan Swagger UI di `/api/docs` (Authorization Code
+> + PKCE, login Zitadel). Dokumen ini disimpan sebagai referensi pola
+> (HLS `?token=`, PKCE SPA, error handling UI); semua instruksi
+> deploy `/demo/` di bawah tidak lagi berlaku.
+
 Pattern: static HTML + CDN-only deps. Local: di-mount ke nginx MokiBox
 lewat `docker-compose.override.yml` di path `/demo/`. Production VPS:
 dilayani aaPanel vhost sebagai static alias `/demo/` (file sama di

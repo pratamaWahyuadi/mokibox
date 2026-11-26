@@ -32,14 +32,7 @@ type dmFakeStore struct {
 	blocks       map[uuid.UUID]map[uuid.UUID]bool
 	pairPurges   int
 	eligible     bool
-	contactGrant bool
-	contactPairs map[dmFakePair]bool
 	pending      int64
-}
-
-type dmFakePair struct {
-	first  uuid.UUID
-	second uuid.UUID
 }
 
 type dmFakeIdemKey struct {
@@ -56,7 +49,6 @@ func newDMFakeStore() *dmFakeStore {
 		idempotency:  make(map[dmFakeIdemKey]db.GetDMIdempotencyRow),
 		inbox:        make(map[uuid.UUID]db.ListPendingDMInboxRow),
 		acknowledged: make(map[uuid.UUID]bool),
-		contactPairs: make(map[dmFakePair]bool),
 		blocks:       make(map[uuid.UUID]map[uuid.UUID]bool),
 	}
 }
@@ -90,11 +82,8 @@ func (s *dmFakeStore) GetDMTargetDevice(_ context.Context, userID uuid.UUID) (db
 	return s.GetDMDeviceByUser(context.Background(), userID)
 }
 
-func (s *dmFakeStore) IsDMRecipientAllowed(_ context.Context, arg db.IsDMRecipientAllowedParams) (bool, error) {
-	if s.contactPairs[dmFakePair{first: arg.ID, second: arg.ID_2}] || s.contactPairs[dmFakePair{first: arg.ID_2, second: arg.ID}] {
-		return true, nil
-	}
-	return s.eligible || s.contactGrant, nil
+func (s *dmFakeStore) IsDMMutualFollow(_ context.Context, _ db.IsDMMutualFollowParams) (bool, error) {
+	return s.eligible, nil
 }
 
 func (s *dmFakeStore) InsertDMOneTimeKey(_ context.Context, arg db.InsertDMOneTimeKeyParams) (int64, error) {
@@ -770,103 +759,6 @@ func TestDMEndpointsHideNonMutualFollow(t *testing.T) {
 	sendEcho := newDMTestEcho(user, http.MethodPost, "/api/dm/messages", handler.SendMessage)
 	body := makeBodyWithClientID(t, senderDeviceID, targetID, targetDeviceID, uuid.New(), "non-mutual")
 	assertErrCode(t, doJSON(sendEcho, http.MethodPost, "/api/dm/messages", body), http.StatusNotFound, shared.CodeNotFound)
-}
-
-func TestMarketplaceContactGrantAllowsDMInBothDirections(t *testing.T) {
-	userA, userB := viewerUser(), viewerUser()
-	userB.ID = uuid.New()
-	deviceA, deviceB := uuid.New(), uuid.New()
-	store := newDMFakeStore()
-	store.contactPairs[dmFakePair{first: userA.ID, second: userB.ID}] = true
-	store.devices[userA.ID] = db.DmDevice{
-		DeviceID: deviceA, UserID: userA.ID,
-		IdentityCurve25519: base64.StdEncoding.EncodeToString(bytesOf(1, 32)),
-		IdentityEd25519:    base64.StdEncoding.EncodeToString(bytesOf(2, 32)),
-	}
-	store.devices[userB.ID] = db.DmDevice{
-		DeviceID: deviceB, UserID: userB.ID,
-		IdentityCurve25519: base64.StdEncoding.EncodeToString(bytesOf(3, 32)),
-		IdentityEd25519:    base64.StdEncoding.EncodeToString(bytesOf(4, 32)),
-	}
-	handler := newDMHandlerForTest(store, dmFakeRunner{store: store}, 168*time.Hour)
-
-	for _, pair := range []struct {
-		sender    db.User
-		senderDev uuid.UUID
-		target    uuid.UUID
-		targetDev uuid.UUID
-	}{
-		{sender: userA, senderDev: deviceA, target: userB.ID, targetDev: deviceB},
-		{sender: userB, senderDev: deviceB, target: userA.ID, targetDev: deviceA},
-	} {
-		bundlePath := fmt.Sprintf("/api/dm/users/%s/key-bundle?device_id=%s&include_one_time_key=false", pair.target, pair.senderDev)
-		bundleEcho := newDMTestEcho(pair.sender, http.MethodGet, "/api/dm/users/:id/key-bundle", handler.GetKeyBundle)
-		if rec := doJSON(bundleEcho, http.MethodGet, bundlePath, ""); rec.Code != http.StatusOK {
-			t.Fatalf("key bundle %s -> %s status = %d, body=%s", pair.sender.ID, pair.target, rec.Code, rec.Body.String())
-		}
-
-		sendEcho := newDMTestEcho(pair.sender, http.MethodPost, "/api/dm/messages", handler.SendMessage)
-		body := makeBodyWithClientID(t, pair.senderDev, pair.target, pair.targetDev, uuid.New(), "contact grant")
-		if rec := doJSON(sendEcho, http.MethodPost, "/api/dm/messages", body); rec.Code != http.StatusCreated {
-			t.Fatalf("send %s -> %s status = %d, body=%s", pair.sender.ID, pair.target, rec.Code, rec.Body.String())
-		}
-	}
-}
-
-func TestDMContactGrantIsPairScopedAndRevocationDeniesBothDirections(t *testing.T) {
-	userA, userB, stranger := viewerUser(), viewerUser(), viewerUser()
-	userB.ID, stranger.ID = uuid.New(), uuid.New()
-	deviceA, deviceB, deviceStranger := uuid.New(), uuid.New(), uuid.New()
-	store := newDMFakeStore()
-	store.contactPairs[dmFakePair{first: userA.ID, second: userB.ID}] = true
-	for _, item := range []struct {
-		user   db.User
-		device uuid.UUID
-		seed   byte
-	}{
-		{user: userA, device: deviceA, seed: 1},
-		{user: userB, device: deviceB, seed: 2},
-		{user: stranger, device: deviceStranger, seed: 3},
-	} {
-		store.devices[item.user.ID] = db.DmDevice{
-			DeviceID: item.device, UserID: item.user.ID,
-			IdentityCurve25519: base64.StdEncoding.EncodeToString(bytesOf(item.seed, 32)),
-			IdentityEd25519:    base64.StdEncoding.EncodeToString(bytesOf(item.seed+10, 32)),
-		}
-	}
-	handler := newDMHandlerForTest(store, dmFakeRunner{store: store}, 168*time.Hour)
-
-	for _, pair := range []struct {
-		name      string
-		sender    db.User
-		senderDev uuid.UUID
-		target    uuid.UUID
-		targetDev uuid.UUID
-	}{
-		{name: "stranger to seller", sender: stranger, senderDev: deviceStranger, target: userB.ID, targetDev: deviceB},
-		{name: "stranger to buyer", sender: stranger, senderDev: deviceStranger, target: userA.ID, targetDev: deviceA},
-	} {
-		echoCtx := newDMTestEcho(pair.sender, http.MethodPost, "/api/dm/messages", handler.SendMessage)
-		body := makeBodyWithClientID(t, pair.senderDev, pair.target, pair.targetDev, uuid.New(), pair.name)
-		rec := doJSON(echoCtx, http.MethodPost, "/api/dm/messages", body)
-		assertErrCode(t, rec, http.StatusNotFound, shared.CodeNotFound)
-	}
-
-	delete(store.contactPairs, dmFakePair{first: userA.ID, second: userB.ID})
-	for _, pair := range []struct {
-		sender    db.User
-		senderDev uuid.UUID
-		target    uuid.UUID
-		targetDev uuid.UUID
-	}{
-		{sender: userA, senderDev: deviceA, target: userB.ID, targetDev: deviceB},
-		{sender: userB, senderDev: deviceB, target: userA.ID, targetDev: deviceA},
-	} {
-		echoCtx := newDMTestEcho(pair.sender, http.MethodPost, "/api/dm/messages", handler.SendMessage)
-		body := makeBodyWithClientID(t, pair.senderDev, pair.target, pair.targetDev, uuid.New(), "revoked pair")
-		rec := doJSON(echoCtx, http.MethodPost, "/api/dm/messages", body)
-		assertErrCode(t, rec, http.StatusNotFound, shared.CodeNotFound)
-	}
 }
 
 func TestDMDeviceSpecificEndpointsRejectStaleDevice(t *testing.T) {

@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "MokiBox API",
-    "description": "Backend video-sharing MVP with local Marketplace v1, served by api-gateway. All endpoints below are proxied by Nginx (port 80/443) under /api/. Responses use the shared envelope: {\"data\": <resource>} for single resources, {\"data\": [...], \"pagination\": {\"next_cursor\": ...|null}} for lists, and {\"error\": {\"code\", \"message\", \"details?\"}} for errors. Errors collapse unauthorized reads to 404 (anti-enumeration); see shared/errors.go for the stable code list.",
+    "description": "Backend video-sharing MVP (TikTok-clone), served by api-gateway. All endpoints below are proxied by Nginx (port 80/443) under /api/. Responses use the shared envelope: {\"data\": <resource>} for single resources, {\"data\": [...], \"pagination\": {\"next_cursor\": ...|null}} for lists, and {\"error\": {\"code\", \"message\", \"details?\"}} for errors. Errors collapse unauthorized reads to 404 (anti-enumeration); see shared/errors.go for the stable code list.",
     "version": "1.0.0"
   },
   "servers": [
@@ -22,8 +22,7 @@
     {"name": "Social", "description": "Like, view tracking, comments, replies."},
     {"name": "Notifications", "description": "Notification inbox."},
     {"name": "Account", "description": "Self-service account deletion."},
-    {"name": "Direct Messages", "description": "E2EE DM relay (enabled by DM_E2EE_ENABLED). Opaque ciphertext only; the server never decrypts messages."},
-    {"name": "Marketplace", "description": "Local Marketplace listings, private photos, favorites, reports, and E2EE DM contact grants."}
+    {"name": "Direct Messages", "description": "E2EE DM relay (enabled by DM_E2EE_ENABLED). Opaque ciphertext only; the server never decrypts messages."}
   ],
   "security": [
     {"zitadelOAuth": ["openid","profile","email","urn:zitadel:iam:org:project:id:392147270604222467:aud"]}
@@ -673,53 +672,6 @@
         }
       }
     },
-    "/api/marketplace/categories": {
-      "get": {
-        "tags": ["Marketplace"],
-        "operationId": "listMarketplaceCategories",
-        "summary": "List the fixed Marketplace categories.",
-        "responses": {
-          "200": {"description": "Category list in the standard data envelope."},
-          "401": {"$ref": "#/components/responses/Unauthorized"}
-        }
-      }
-    },
-    "/api/marketplace/listings": {
-      "get": {
-        "tags": ["Marketplace"],
-        "operationId": "browseMarketplaceListings",
-        "summary": "Browse active listings with filters and keyset pagination.",
-        "parameters": [
-          {"name": "q", "in": "query", "schema": {"type": "string", "maxLength": 200}},
-          {"name": "category", "in": "query", "schema": {"type": "string", "enum": ["electronics", "vehicles", "home_living", "fashion", "sports_hobbies", "baby_kids", "books_media", "other"]}},
-          {"name": "city", "in": "query", "description": "Case-insensitive exact city match.", "schema": {"type": "string", "maxLength": 100}},
-          {"name": "latitude", "in": "query", "description": "Required together with longitude and radius_km.", "schema": {"type": "number", "format": "double", "minimum": -90, "maximum": 90}},
-          {"name": "longitude", "in": "query", "description": "Required together with latitude and radius_km.", "schema": {"type": "number", "format": "double", "minimum": -180, "maximum": 180}},
-          {"name": "radius_km", "in": "query", "description": "Location radius in km; required together with latitude and longitude.", "schema": {"type": "number", "format": "double", "exclusiveMinimum": 0, "maximum": 200}},
-          {"name": "min_price_idr", "in": "query", "schema": {"type": "integer", "format": "int64", "minimum": 0}},
-          {"name": "max_price_idr", "in": "query", "schema": {"type": "integer", "format": "int64", "minimum": 0}},
-          {"$ref": "#/components/parameters/Limit"},
-          {"$ref": "#/components/parameters/Cursor"}
-        ],
-        "responses": {
-          "200": {"description": "Active listing page with presigned image URLs."},
-          "400": {"$ref": "#/components/responses/Validation"},
-          "401": {"$ref": "#/components/responses/Unauthorized"}
-        }
-      },
-      "post": {
-        "tags": ["Marketplace"],
-        "operationId": "createMarketplaceListing",
-        "summary": "Create an active listing.",
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MarketplaceListingRequest"}}}},
-        "responses": {
-          "201": {"description": "Created listing in the standard data envelope."},
-          "400": {"$ref": "#/components/responses/Validation"},
-          "401": {"$ref": "#/components/responses/Unauthorized"},
-          "429": {"$ref": "#/components/responses/RateLimited"}
-        }
-      }
-    },
     "/api/dm/device": {
       "post": {
         "tags": ["Direct Messages"],
@@ -738,41 +690,6 @@
           "400": {"$ref": "#/components/responses/Validation"},
           "401": {"$ref": "#/components/responses/Unauthorized"},
           "409": {"description": "Stale device or conflicting registration (DM_DEVICE_STALE).", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
-          "429": {"$ref": "#/components/responses/RateLimited"}
-        }
-      }
-    },
-    "/api/marketplace/listings/{id}": {
-      "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
-      "get": {
-        "tags": ["Marketplace"],
-        "operationId": "getMarketplaceListing",
-        "summary": "Read an active or sold listing; archived listings are seller-only.",
-        "responses": {
-          "200": {"description": "Listing detail and active photo URLs."},
-          "401": {"$ref": "#/components/responses/Unauthorized"},
-          "404": {"$ref": "#/components/responses/NotFound"}
-        }
-      },
-      "put": {
-        "tags": ["Marketplace"],
-        "operationId": "updateMarketplaceListing",
-        "summary": "Replace editable fields on the seller's listing.",
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MarketplaceListingRequest"}}}},
-        "responses": {
-          "200": {"description": "Updated listing."},
-          "400": {"$ref": "#/components/responses/Validation"},
-          "404": {"$ref": "#/components/responses/NotFound"},
-          "429": {"$ref": "#/components/responses/RateLimited"}
-        }
-      },
-      "delete": {
-        "tags": ["Marketplace"],
-        "operationId": "archiveMarketplaceListing",
-        "summary": "Archive the seller's listing.",
-        "responses": {
-          "204": {"description": "Listing archived; no response body."},
-          "404": {"$ref": "#/components/responses/NotFound"},
           "429": {"$ref": "#/components/responses/RateLimited"}
         }
       }
@@ -821,171 +738,6 @@
           "409": {"description": "Caller device is stale (DM_DEVICE_STALE).", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
           "429": {"$ref": "#/components/responses/RateLimited"}
         }
-      }
-    },
-    "/api/marketplace/listings/{id}/status": {
-      "patch": {
-        "tags": ["Marketplace"],
-        "operationId": "updateMarketplaceListingStatus",
-        "summary": "Set a seller-owned listing to active, sold, or archived.",
-        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["status"], "properties": {"status": {"type": "string", "enum": ["active", "sold", "archived"]}}}}}},
-        "responses": {"200": {"description": "Updated listing."}, "400": {"$ref": "#/components/responses/Validation"}, "404": {"$ref": "#/components/responses/NotFound"}, "429": {"$ref": "#/components/responses/RateLimited"}}
-      }
-    },
-    "/api/marketplace/me/listings": {
-      "get": {
-        "tags": ["Marketplace"],
-        "operationId": "listMyMarketplaceListings",
-        "summary": "List the authenticated seller's listings.",
-        "parameters": [
-          {"name": "status", "in": "query", "schema": {"type": "string", "enum": ["active", "sold", "archived"]}},
-          {"$ref": "#/components/parameters/Limit"},
-          {"$ref": "#/components/parameters/Cursor"}
-        ],
-        "responses": {"200": {"description": "Seller listing page."}, "401": {"$ref": "#/components/responses/Unauthorized"}}
-      }
-    },
-    "/api/marketplace/users/{seller_user_id}/listings": {
-      "get": {
-        "tags": ["Marketplace"],
-        "operationId": "listMarketplaceSellerListings",
-        "summary": "List another seller's active, unexpired listings.",
-        "description": "Listings expire 30 days after creation and are removed from browse, favorites, seller pages, reports, and contact grants.",
-        "parameters": [
-          {"name": "seller_user_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
-          {"$ref": "#/components/parameters/Limit"},
-          {"$ref": "#/components/parameters/Cursor"}
-        ],
-        "responses": {"200": {"description": "Seller listing page."}, "400": {"$ref": "#/components/responses/Validation"}, "401": {"$ref": "#/components/responses/Unauthorized"}}
-      }
-    },
-    "/api/marketplace/listings/{id}/images/upload-intent": {
-      "post": {
-        "tags": ["Marketplace"],
-        "operationId": "createMarketplaceImageUploadIntent",
-        "summary": "Create a seller-scoped presigned R2 image upload intent.",
-        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
-         "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["content_type", "size_bytes"], "properties": {"content_type": {"type": "string", "enum": ["image/jpeg", "image/png", "image/webp"]}, "size_bytes": {"type": "integer", "format": "int64", "exclusiveMinimum": 0, "maximum": 10485760}}}}}},
-
-        "responses": {"201": {"description": "Upload URL, required headers, image_id, 10 MiB size cap, and expiry."}, "400": {"$ref": "#/components/responses/Validation"}, "404": {"$ref": "#/components/responses/NotFound"}, "409": {"description": "MARKETPLACE_CONFLICT: maximum of 8 photos reached."}, "429": {"$ref": "#/components/responses/RateLimited"}}
-      }
-    },
-    "/api/marketplace/listings/{id}/images/{image_id}/confirm": {
-      "post": {
-        "tags": ["Marketplace"],
-        "operationId": "confirmMarketplaceImage",
-        "summary": "Validate image size and bytes before publishing the photo.",
-        "parameters": [
-          {"name": "id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
-          {"name": "image_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
-        ],
-        "responses": {"200": {"description": "Published photo with a short-lived presigned GET URL."}, "400": {"$ref": "#/components/responses/Validation"}, "404": {"$ref": "#/components/responses/NotFound"}, "409": {"description": "Upload intent expired or object is missing/invalid."}, "429": {"$ref": "#/components/responses/RateLimited"}}
-      }
-    },
-    "/api/marketplace/listings/{id}/images/{image_id}": {
-      "delete": {
-        "tags": ["Marketplace"],
-        "operationId": "deleteMarketplaceImage",
-        "summary": "Remove a seller-owned photo and enqueue its R2 object for cleanup.",
-        "parameters": [
-          {"name": "id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
-          {"name": "image_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
-        ],
-        "responses": {"204": {"description": "Photo removed."}, "404": {"$ref": "#/components/responses/NotFound"}, "429": {"$ref": "#/components/responses/RateLimited"}}
-      }
-    },
-    "/api/marketplace/listings/{id}/images/{image_id}/cover": {
-      "post": {
-        "tags": ["Marketplace"],
-        "operationId": "setMarketplaceListingCoverImage",
-        "summary": "Set a published photo as the listing cover.",
-        "description": "Only the seller may set the cover. Replacing the cover clears the previous flag in the same transaction; each listing has at most one cover.",
-        "parameters": [
-          {"name": "id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
-          {"name": "image_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
-        ],
-        "responses": {"200": {"description": "Cover state."}, "404": {"$ref": "#/components/responses/NotFound"}, "429": {"$ref": "#/components/responses/RateLimited"}}
-      }
-    },
-    "/api/marketplace/listings/{id}/favorite": {
-      "post": {
-        "tags": ["Marketplace"],
-        "operationId": "favoriteMarketplaceListing",
-        "summary": "Save an active listing; idempotent.",
-        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
-        "responses": {"200": {"description": "Favorite state."}, "404": {"$ref": "#/components/responses/NotFound"}, "429": {"$ref": "#/components/responses/RateLimited"}}
-      },
-      "delete": {
-        "tags": ["Marketplace"],
-        "operationId": "unfavoriteMarketplaceListing",
-        "summary": "Remove a saved listing; idempotent.",
-        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
-        "responses": {"204": {"description": "Favorite removed."}, "429": {"$ref": "#/components/responses/RateLimited"}}
-      }
-    },
-    "/api/marketplace/me/favorites": {
-      "get": {
-        "tags": ["Marketplace"],
-        "operationId": "listMyMarketplaceFavorites",
-        "summary": "List active listings saved by the authenticated user.",
-        "parameters": [{"$ref": "#/components/parameters/Limit"}, {"$ref": "#/components/parameters/Cursor"}],
-        "responses": {"200": {"description": "Favorite listing page."}, "401": {"$ref": "#/components/responses/Unauthorized"}}
-      }
-    },
-    "/api/marketplace/listings/{id}/report": {
-      "post": {
-        "tags": ["Marketplace"],
-        "operationId": "reportMarketplaceListing",
-        "summary": "Submit one manual-moderation report per user and listing.",
-        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"oneOf": [{"type": "object", "required": ["reason"], "properties": {"reason": {"type": "string", "enum": ["scam", "prohibited", "misleading"]}, "details": {"type": "string", "maxLength": 1000}}}, {"type": "object", "required": ["reason", "details"], "properties": {"reason": {"type": "string", "enum": ["other"]}, "details": {"type": "string", "minLength": 1, "maxLength": 1000}}}]}}}},
-        "responses": {"201": {"description": "Report recorded."}, "200": {"description": "Report already recorded."}, "400": {"$ref": "#/components/responses/Validation"}, "404": {"$ref": "#/components/responses/NotFound"}, "429": {"$ref": "#/components/responses/RateLimited"}}
-      }
-    },
-    "/api/marketplace/listings/{id}/contact": {
-      "post": {
-        "tags": ["Marketplace"],
-        "operationId": "contactMarketplaceSeller",
-        "summary": "Create, reuse, or renew a buyer/seller DM permission for an active listing.",
-        "description": "The grant permits both users to use existing E2EE DM endpoints without mutual follows while it is active. It expires after 30 days and can be revoked by either party; contacting again renews an expired, non-revoked grant. It does not create plaintext messages.",
-        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
-        "responses": {"200": {"description": "listing_id, seller_user_id, and whether the grant was created or renewed."}, "404": {"$ref": "#/components/responses/NotFound"}, "429": {"$ref": "#/components/responses/RateLimited"}}
-      },
-      "delete": {
-        "tags": ["Marketplace"],
-        "operationId": "revokeMarketplaceContact",
-        "summary": "Revoke an active contact grant and purge queued ciphertext if no other grant or mutual-follow still permits the pair.",
-        "description": "Buyers omit buyer_id; sellers must send buyer_id because revoking without it would affect every buyer on the listing.",
-        "parameters": [
-          {"name": "id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
-          {"name": "buyer_id", "in": "query", "required": false, "description": "Target buyer UUID; required when the seller revokes.", "schema": {"type": "string", "format": "uuid"}}
-        ],
-        "responses": {"200": {"description": "listing_id and whether the grant was revoked."}, "400": {"$ref": "#/components/responses/Validation"}, "403": {"description": "Caller is not a participant of the targeted contact grant.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}}, "404": {"$ref": "#/components/responses/NotFound"}, "429": {"$ref": "#/components/responses/RateLimited"}}
-      }
-    },
-    "/api/marketplace/moderation/reports": {
-      "get": {
-        "tags": ["Marketplace"],
-        "operationId": "listMarketplaceReports",
-        "summary": "List manual-moderation reports (moderator allowlist only).",
-        "description": "Requires the caller's UUID in MARKETPLACE_MODERATOR_USER_IDS. Filters: open, dismissed, resolved.",
-        "parameters": [
-          {"name": "status", "in": "query", "schema": {"type": "string", "enum": ["open", "dismissed", "resolved"]}},
-          {"$ref": "#/components/parameters/Limit"},
-          {"$ref": "#/components/parameters/Cursor"}
-        ],
-        "responses": {"200": {"description": "Report page with reviewer audit metadata."}, "400": {"$ref": "#/components/responses/Validation"}, "401": {"$ref": "#/components/responses/Unauthorized"}, "403": {"description": "Caller is not a Marketplace moderator (FORBIDDEN).", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}}}
-      }
-    },
-    "/api/marketplace/moderation/reports/{id}/review": {
-      "post": {
-        "tags": ["Marketplace"],
-        "operationId": "reviewMarketplaceReport",
-        "summary": "Dismiss or resolve an open report (moderator allowlist only).",
-        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["resolution"], "properties": {"resolution": {"type": "string", "enum": ["dismissed", "resolved"]}, "note": {"type": "string", "maxLength": 1000}}}}}},
-        "responses": {"200": {"description": "Reviewed report."}, "400": {"$ref": "#/components/responses/Validation"}, "401": {"$ref": "#/components/responses/Unauthorized"}, "403": {"description": "Caller is not a Marketplace moderator (FORBIDDEN).", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}}, "404": {"$ref": "#/components/responses/NotFound"}, "429": {"$ref": "#/components/responses/RateLimited"}}
       }
     },
     "/api/dm/messages": {
@@ -1666,21 +1418,6 @@
         },
         "required": ["data", "pagination"]
       },
-      "MarketplaceListingRequest": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "category": {"type": "string", "enum": ["electronics", "vehicles", "home_living", "fashion", "sports_hobbies", "baby_kids", "books_media", "other"]},
-          "title": {"type": "string", "minLength": 1, "maxLength": 120},
-          "description": {"type": "string", "minLength": 1, "maxLength": 5000},
-          "price_idr": {"type": "integer", "format": "int64", "minimum": 1},
-          "city": {"type": "string", "minLength": 1, "maxLength": 100},
-          "latitude": {"type": "number", "format": "double", "minimum": -90, "maximum": 90},
-          "longitude": {"type": "number", "format": "double", "minimum": -180, "maximum": 180},
-          "condition": {"type": "string", "enum": ["new", "like_new", "good", "fair"]}
-        },
-        "required": ["category", "title", "description", "price_idr", "city", "condition"]
-      },
       "NotificationPage": {
         "type": "object",
         "description": "GET /api/notifications — shared.RespondList shape: {\"data\": [NotificationObject...], \"pagination\": {\"next_cursor\": \"<opaque>\"|null}}.",
@@ -1833,10 +1570,6 @@
       },
       "Validation": {
         "description": "400 — malformed body / bad parameters (VALIDATION_ERROR).",
-        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}
-      },
-      "RateLimited": {
-        "description": "429 — per-user daily quota or per-IP write limiter exceeded (RATE_LIMITED).",
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}
       },
       "Internal": {

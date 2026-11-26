@@ -24,7 +24,7 @@ import (
 // option plumbing; the adapter applies the same option
 // values the previous direct calls used, so queue behaviour
 // is unchanged on the wire.
-type TaskEnqueuer interface {
+type taskEnqueuer interface {
 	// EnqueueTranscode enqueues transcode:video with
 	// asynq.MaxRetry(1) - the queue-level safety net only;
 	// the application-level 3x retry lives in the worker.
@@ -37,20 +37,11 @@ type TaskEnqueuer interface {
 	EnqueueCleanupVideo(payload shared.CleanupVideoPayload, delay time.Duration) (*asynq.TaskInfo, error)
 }
 
-// taskEnqueuer keeps the existing handler-side name as an alias.
-type taskEnqueuer = TaskEnqueuer
-
 // asynqEnqueuer adapts the production *asynq.Client to
 // taskEnqueuer. Constructed once per handler by the
 // constructors in this package; tests provide their own
 // implementation instead.
 type asynqEnqueuer struct{ client *asynq.Client }
-
-// NewTaskEnqueuer returns the production adapter used by both handlers and
-// the marketplace cleanup janitor.
-func NewTaskEnqueuer(client *asynq.Client) TaskEnqueuer {
-	return asynqEnqueuer{client: client}
-}
 
 // EnqueueTranscode implements taskEnqueuer. MaxRetry(1) is a
 // queue-level safety net for transient Redis/network blips
