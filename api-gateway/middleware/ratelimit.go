@@ -37,7 +37,6 @@
 package middleware
 
 import (
-	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -234,34 +233,19 @@ func (e errRateLimit) Error() string { return string(e) }
 //   - On throttle: respond with the canonical
 //     {error:{code:RATE_LIMITED,message:...}} envelope
 //     and HTTP 429 (mapping in shared.ClassifyError).
-type rateLimitKeyFunc func(echo.Context) (string, error)
-
 func NewRateLimitAuth(cfg RateLimitConfig) (echo.MiddlewareFunc, error) {
-	return NewRateLimitAuthWithKey(cfg, func(c echo.Context) (string, error) {
-		userID, ok := UserIDFromContext(c)
-		if !ok || userID == uuid.Nil {
-			return "", shared.Wrap(shared.ErrUnauthorized, "rate limit requires authenticated user")
-		}
-		return userID.String(), nil
-	})
-}
-
-func NewRateLimitAuthWithKey(cfg RateLimitConfig, keyFunc rateLimitKeyFunc) (echo.MiddlewareFunc, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
-	}
-	if keyFunc == nil {
-		return nil, errors.New("rate limit key function is nil")
 	}
 	store := newStore(cfg)
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
-			key, err := keyFunc(c)
-			if err != nil {
-				return shared.RespondError(c, err)
+			userID, ok := UserIDFromContext(c)
+			if !ok || userID == uuid.Nil {
+				return shared.RespondError(c, shared.Wrap(shared.ErrUnauthorized, "rate limit requires authenticated user"))
 			}
-			if !store.allow(key) {
-				return shared.RespondError(c, shared.Wrap(shared.ErrRateLimited, "rate limit exceeded"))
+			if !store.allow(userID.String()) {
+				return shared.RespondError(c, shared.Wrap(shared.ErrRateLimited, "per-user rate limit exceeded"))
 			}
 			return next(c)
 		}
