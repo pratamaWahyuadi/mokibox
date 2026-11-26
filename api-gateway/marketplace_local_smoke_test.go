@@ -47,10 +47,24 @@ func TestMarketplaceLocalHTTPSmoke(t *testing.T) {
 	q := db.New(sqlDB)
 
 	var sellerIDText, sellerToken, buyerIDText, buyerToken string
-	if err := sqlDB.QueryRowContext(ctx, `SELECT id::text, zitadel_id FROM users WHERE is_active = TRUE ORDER BY created_at, id OFFSET 0 LIMIT 1`).Scan(&sellerIDText, &sellerToken); err != nil {
+	err = sqlDB.QueryRowContext(ctx, `SELECT id::text, zitadel_id FROM users WHERE is_active = TRUE ORDER BY created_at, id OFFSET 0 LIMIT 1`).Scan(&sellerIDText, &sellerToken)
+	if err == sql.ErrNoRows {
+		sellerID := uuid.New()
+		sellerToken = "smoke-seller-" + sellerID.String()
+		if err := sqlDB.QueryRowContext(ctx, `INSERT INTO users (id, zitadel_id, username, is_active) VALUES ($1, $2, $3, TRUE) RETURNING id::text, zitadel_id`, sellerID, sellerToken, "smoke_seller_"+sellerID.String()[:8]).Scan(&sellerIDText, &sellerToken); err != nil {
+			t.Fatalf("seed seller: %v", err)
+		}
+	} else if err != nil {
 		t.Fatalf("seller: %v", err)
 	}
-	if err := sqlDB.QueryRowContext(ctx, `SELECT id::text, zitadel_id FROM users WHERE is_active = TRUE ORDER BY created_at, id OFFSET 1 LIMIT 1`).Scan(&buyerIDText, &buyerToken); err != nil {
+	err = sqlDB.QueryRowContext(ctx, `SELECT id::text, zitadel_id FROM users WHERE is_active = TRUE ORDER BY created_at, id OFFSET 1 LIMIT 1`).Scan(&buyerIDText, &buyerToken)
+	if err == sql.ErrNoRows {
+		buyerID := uuid.New()
+		buyerToken = "smoke-buyer-" + buyerID.String()
+		if err := sqlDB.QueryRowContext(ctx, `INSERT INTO users (id, zitadel_id, username, is_active) VALUES ($1, $2, $3, TRUE) RETURNING id::text, zitadel_id`, buyerID, buyerToken, "smoke_buyer_"+buyerID.String()[:8]).Scan(&buyerIDText, &buyerToken); err != nil {
+			t.Fatalf("seed buyer: %v", err)
+		}
+	} else if err != nil {
 		t.Fatalf("buyer: %v", err)
 	}
 	sellerID, err := uuid.Parse(sellerIDText)
