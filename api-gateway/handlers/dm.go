@@ -56,6 +56,10 @@ type dmTxStore interface {
 	AllocateDMSequence(ctx context.Context, deviceID uuid.UUID) (int64, error)
 	CreateDMInboxMessage(ctx context.Context, arg db.CreateDMInboxMessageParams) (db.CreateDMInboxMessageRow, error)
 	SetDMIdempotencySequence(ctx context.Context, arg db.SetDMIdempotencySequenceParams) (int64, error)
+	InsertDMBlock(ctx context.Context, arg db.InsertDMBlockParams) (int64, error)
+	DeleteDMBlock(ctx context.Context, arg db.DeleteDMBlockParams) (int64, error)
+	DeleteDMInboxForPair(ctx context.Context, arg db.DeleteDMInboxForPairParams) (int64, error)
+	DeleteDMIdempotencyForPairMessages(ctx context.Context, arg db.DeleteDMIdempotencyForPairMessagesParams) (int64, error)
 }
 
 type DMHandler struct {
@@ -332,7 +336,7 @@ func (h *DMHandler) GetKeyBundle(c echo.Context) error {
 	if err != nil {
 		return dmValidation(c, "device_id", "must be a valid UUID")
 	}
-	includeOneTimeKey := true
+	includeOneTimeKey := false
 	if raw := c.QueryParam("include_one_time_key"); raw != "" {
 		includeOneTimeKey, err = strconv.ParseBool(raw)
 		if err != nil {
@@ -752,6 +756,97 @@ func (h *DMHandler) AcknowledgeMessage(c echo.Context) error {
 		}
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+type dmBlockResponse struct {
+	UserID  uuid.UUID `json:"user_id"`
+	Blocked bool      `json:"blocked"`
+}
+
+func (h *DMHandler) BlockUser(c echo.Context) error {
+	if err := h.ready(c); err != nil {
+		return err
+	}
+	user, ok := middleware.UserFromContext(c)
+	if !ok || user == nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrUnauthorized, "no authenticated user"))
+	}
+	targetID, err := parseDMUUID(c.Param("id"), "id")
+	if err != nil {
+		return dmValidation(c, "id", "must be a valid UUID")
+	}
+	if targetID == user.ID {
+		return dmValidation(c, "id", "cannot block yourself")
+	}
+	ctx := c.Request().Context()
+	err = h.Run.Run(ctx, func(q dmTxStore) error {
+		if _, err := q.LockActiveDMUser(ctx, targetID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return shared.Wrap(shared.ErrNotFound, "DM user not found")
+			}
+			return dmStoreError("read user to block", err)
+		}
+		if _, err := q.InsertDMBlock(ctx, db.InsertDMBlockParams{
+			BlockerID: user.ID, BlockedID: targetID,
+		}); err != nil {
+			return dmStoreError("block DM user", err)
+		}
+		pairs := []db.DeleteDMInboxForPairParams{
+			{SenderID: user.ID, RecipientID: targetID},
+			{SenderID: targetID, RecipientID: user.ID},
+		}
+		for _, pair := range pairs {
+			if _, err := q.DeleteDMIdempotencyForPairMessages(ctx, db.DeleteDMIdempotencyForPairMessagesParams{
+				SenderID: pair.SenderID, RecipientID: pair.RecipientID,
+			}); err != nil {
+				return dmStoreError("purge blocked DM idempotency", err)
+			}
+			if _, err := q.DeleteDMInboxForPair(ctx, pair); err != nil {
+				return dmStoreError("purge blocked DM inbox", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, shared.ErrNotFound) || errors.Is(err, sql.ErrNoRows) {
+			return shared.RespondError(c, err)
+		}
+		return dmInternal(c, "block DM user", err)
+	}
+	return c.JSON(http.StatusOK, dmRequestEnvelope[dmBlockResponse]{
+		Data: dmBlockResponse{UserID: targetID, Blocked: true},
+	})
+}
+
+func (h *DMHandler) UnblockUser(c echo.Context) error {
+	if err := h.ready(c); err != nil {
+		return err
+	}
+	user, ok := middleware.UserFromContext(c)
+	if !ok || user == nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrUnauthorized, "no authenticated user"))
+	}
+	targetID, err := parseDMUUID(c.Param("id"), "id")
+	if err != nil {
+		return dmValidation(c, "id", "must be a valid UUID")
+	}
+	var rows int64
+	err = h.Run.Run(c.Request().Context(), func(q dmTxStore) error {
+		var err error
+		rows, err = q.DeleteDMBlock(c.Request().Context(), db.DeleteDMBlockParams{
+			BlockerID: user.ID, BlockedID: targetID,
+		})
+		return err
+	})
+	if err != nil {
+		return dmInternal(c, "unblock DM user", err)
+	}
+	if rows == 0 {
+		return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "DM block not found"))
+	}
+	return c.JSON(http.StatusOK, dmRequestEnvelope[dmBlockResponse]{
+		Data: dmBlockResponse{UserID: targetID, Blocked: false},
+	})
 }
 
 func (h *DMHandler) ready(c echo.Context) error {

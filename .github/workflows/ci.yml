@@ -72,7 +72,8 @@ jobs:
             migrations/008_user_avatar_upload.sql \
             migrations/009_dm_e2ee.sql \
             migrations/010_dm_inbox_sender_fk.sql \
-            migrations/011_dm_fallback_keys.sql
+            migrations/011_dm_fallback_keys.sql \
+            migrations/015_dm_authorization_hardening.sql
           do
             psql -h 127.0.0.1 -U postgres -d mokibox_dm_ci -v ON_ERROR_STOP=1 -f "$migration" >/dev/null
           done
@@ -82,6 +83,7 @@ jobs:
           result="$(psql -h 127.0.0.1 -U postgres -d mokibox_dm_ci -Atqc "
             SELECT to_regclass('dm_devices') IS NOT NULL
                AND to_regclass('dm_fallback_keys') IS NOT NULL
+               AND to_regclass('dm_blocks') IS NOT NULL
                AND EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_dm_inbox_sender_user')
                AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_dm_inbox_sender_device')
                AND NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_dm_inbox_sender_user_id')")"

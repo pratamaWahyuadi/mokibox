@@ -52,6 +52,8 @@
 //   - POST /api/dm/messages                  (auth + feature flag)
 //   - GET  /api/dm/inbox                     (auth + feature flag)
 //   - POST /api/dm/inbox/:message_id/ack     (auth + feature flag)
+//   - POST /api/dm/blocks/:id                 (auth + feature flag)
+//   - DELETE /api/dm/blocks/:id               (auth + feature flag)
 //   - GET  /api/docs/swagger.json             (no auth; raw OpenAPI spec)
 //   - GET  /api/docs/                         (no auth; minimal Swagger UI index)
 //   - GET  /api/docs                          (no auth; same as above)
@@ -66,6 +68,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"golang.org/x/time/rate"
 
@@ -210,11 +213,28 @@ func NewRouter(d RouterDeps) *echo.Echo {
 		if err != nil {
 			panic(fmt.Sprintf("api-gateway: NewRateLimitAuth for DM delivery: %v", err))
 		}
+		dmKeyBundleLimit, err := middleware.NewRateLimitAuthWithKey(middleware.RateLimitConfig{
+			Rate:          rate.Limit(0.2),
+			Burst:         5,
+			TTL:           10 * time.Minute,
+			SweepInterval: 5 * time.Minute,
+		}, func(c echo.Context) (string, error) {
+			userID, ok := middleware.UserIDFromContext(c)
+			if !ok || userID == uuid.Nil {
+				return "", shared.Wrap(shared.ErrUnauthorized, "rate limit requires authenticated user")
+			}
+			return "dm:key:" + userID.String() + ":" + c.Param("id"), nil
+		})
+		if err != nil {
+			panic(fmt.Sprintf("api-gateway: NewRateLimitAuthWithKey for DM key bundle: %v", err))
+		}
 		dmControl := api.Group("/dm", dmControlLimit)
 		dmDelivery := apiDelivery.Group("/dm", dmDeliveryLimit)
 		dmControl.POST("/device", dmHandler.RegisterDevice)
 		dmControl.POST("/device/one-time-keys", dmHandler.UploadOneTimeKeys)
-		dmControl.GET("/users/:id/key-bundle", dmHandler.GetKeyBundle)
+		dmControl.GET("/users/:id/key-bundle", dmHandler.GetKeyBundle, dmKeyBundleLimit)
+		dmControl.POST("/blocks/:id", dmHandler.BlockUser)
+		dmControl.DELETE("/blocks/:id", dmHandler.UnblockUser)
 		dmDelivery.POST("/messages", dmHandler.SendMessage)
 		dmDelivery.GET("/inbox", dmHandler.PollInbox)
 		dmDelivery.POST("/inbox/:message_id/ack", dmHandler.AcknowledgeMessage)
