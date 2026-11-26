@@ -5,19 +5,27 @@
 #   login-client PAT (bootstrap volume) -> ONLY for session
 #   create + auth_requests. Management API requires the
 #   FIRST-INSTANCE ADMIN session: create session with
-#   loginName zitadel-admin@zitadel.auth.binery.my.id +
+#   loginName zitadel-admin@zitadel.<ZITADEL_DOMAIN> +
 #   password, then use sessionToken as Bearer (same
 #   mechanism as integration_test.sh step 10/12).
+# Zitadel produksi sekarang: https://auth.mokibox.my.id
+# (migrasi dari auth.binery.my.id 2026-09-24; domain API
+# produksi sekarang: https://api.mokibox.my.id).
 # Idempotent: search-before-create for everything.
 # =====================================================
 set -euo pipefail
 
-ZITADEL_INTERNAL="http://127.0.0.1:8181"
-H_HOST="Host: auth.binery.my.id"
+# Env-driven: override via env vars saat menjalankan ulang.
+# Default = infra produksi saat ini. H_HOST wajib match
+# external domain instance Zitadel yang aktif.
+ZITADEL_DOMAIN="${ZITADEL_DOMAIN:-auth.mokibox.my.id}"
+ZITADEL_INTERNAL="${ZITADEL_INTERNAL:-http://127.0.0.1:8181}"
+API_BASE="${API_BASE:-https://api.mokibox.my.id}"
+H_HOST="Host: $ZITADEL_DOMAIN"
 SECDIR=/root/mokibox-secrets
 mkdir -p "$SECDIR" && chmod 700 "$SECDIR"
 IDS="$SECDIR/zitadel-ids.env"
-ADMIN_LOGIN="zitadel-admin@zitadel.auth.binery.my.id"
+ADMIN_LOGIN="zitadel-admin@zitadel.$ZITADEL_DOMAIN"
 ADMIN_PASS="${ADMIN_PASS:-Password1!}"
 TMPD=$(mktemp -d); trap 'rm -rf "$TMPD"' EXIT
 
@@ -69,7 +77,7 @@ app_clientid() { api GET "/management/v1/projects/$PROJ_ID/apps/$1" | jqr "d['ap
 echo "[4] app mokibox_web (Web/confidential, BASIC secret)"
 WEB_ID=$(app_id mokibox_web)
 if [ -z "${WEB_ID:-}" ] || [ "$WEB_ID" = "None" ]; then
-  WEB=$(api POST "/management/v1/projects/$PROJ_ID/apps/oidc" "$(wjson '{"name":"mokibox_web","redirectUris":["https://mokiboxapi.binery.my.id/callback"],"grantTypesList":[0],"responseTypesList":[0],"appType":0,"authMethodType":0,"accessTokenType":1,"devMode":false}')")
+  WEB=$(api POST "/management/v1/projects/$PROJ_ID/apps/oidc" "$(wjson "{\"name\":\"mokibox_web\",\"redirectUris\":[\"$API_BASE/callback\"],\"grantTypesList\":[0],\"responseTypesList\":[0],\"appType\":0,\"authMethodType\":0,\"accessTokenType\":1,\"devMode\":false}")")
   WEB_ID=$(echo "$WEB" | jqr "d['appId']")
   WEB_CID=$(echo "$WEB" | jqr "d['clientId']")
   WEB_SEC=$(echo "$WEB" | jqr "d.get('clientSecret','')")
@@ -88,7 +96,7 @@ echo "$WEB_SEC" > "$SECDIR/zitadel-web-client-secret"; chmod 600 "$SECDIR/zitade
 echo "[5] app mokibox_spa (UserAgent/SPA, PKCE public)"
 SPA_ID=$(app_id mokibox_spa)
 if [ -z "${SPA_ID:-}" ] || [ "$SPA_ID" = "None" ]; then
-  SPA=$(api POST "/management/v1/projects/$PROJ_ID/apps/oidc" "$(wjson '{"name":"mokibox_spa","redirectUris":["https://mokiboxapi.binery.my.id/callback"],"grantTypesList":[0],"responseTypesList":[0],"appType":1,"authMethodType":2,"accessTokenType":1,"devMode":false}')")
+  SPA=$(api POST "/management/v1/projects/$PROJ_ID/apps/oidc" "$(wjson "{\"name\":\"mokibox_spa\",\"redirectUris\":[\"$API_BASE/callback\"],\"grantTypesList\":[0],\"responseTypesList\":[0],\"appType\":1,\"authMethodType\":2,\"accessTokenType\":1,\"devMode\":false}")")
   SPA_ID=$(echo "$SPA" | jqr "d['appId']")
   SPA_CID=$(echo "$SPA" | jqr "d['clientId']")
   if [ -z "${SPA_ID:-}" ] || [ "$SPA_ID" = "None" ]; then
@@ -118,7 +126,7 @@ fi
 printf 'API_APP_ID=%s\nAPI_CLIENT_ID=%s\n' "$APIA_ID" "$APIA_CID" >> "$IDS"
 
 echo "[7] Actions V2 target (Opsi W: public https URL)"
-TGT=$(api POST /v2/actions/targets "$(wjson '{"name":"mokibox-webhook","restWebhook":{"interruptOnError":false},"endpoint":"https://mokiboxapi.binery.my.id/api/webhooks/zitadel","timeout":"10s"}')")
+TGT=$(api POST /v2/actions/targets "$(wjson "{\"name\":\"mokibox-webhook\",\"restWebhook\":{\"interruptOnError\":false},\"endpoint\":\"$API_BASE/api/webhooks/zitadel\",\"timeout\":\"10s\"}")")
 TGT_ID=$(echo "$TGT" | jqr "d['id']")
 if [ -z "${TGT_ID:-}" ] || [ "$TGT_ID" = "None" ]; then
   echo "FATAL target create:"; echo "$TGT" | head -c 300; echo; exit 1
