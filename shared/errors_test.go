@@ -23,7 +23,6 @@ func TestErrorMapping(t *testing.T) {
 		{ErrNotFound, http.StatusNotFound, CodeNotFound},
 		{ErrVideoStatusConflict, http.StatusConflict, CodeVideoStatusConflict},
 		{ErrAvatarUploadConflict, http.StatusConflict, CodeAvatarUploadConflict},
-		{ErrMarketplaceConflict, http.StatusConflict, CodeMarketplaceConflict},
 		{ErrVideoNotReady, http.StatusConflict, CodeVideoNotReady},
 		{ErrUploadMissing, http.StatusConflict, CodeUploadMissing},
 		{ErrUploadSizeInvalid, http.StatusBadRequest, CodeUploadSizeInvalid},
@@ -31,10 +30,6 @@ func TestErrorMapping(t *testing.T) {
 		{ErrWebhookSignature, http.StatusUnauthorized, CodeWebhookInvalidSignature},
 		{ErrWebhookEvent, http.StatusBadRequest, CodeWebhookEventUnsupported},
 		{ErrRateLimited, http.StatusTooManyRequests, CodeRateLimited},
-		{ErrDMDeviceStale, http.StatusConflict, CodeDMDeviceStale},
-		{ErrDMKeyUnavailable, http.StatusConflict, CodeDMKeyUnavailable},
-		{ErrDMIdempotencyConflict, http.StatusConflict, CodeDMIdempotencyConflict},
-		{ErrDMInboxFull, http.StatusConflict, CodeDMInboxFull},
 		{ErrInternal, http.StatusInternalServerError, CodeInternalError},
 	}
 	for _, c := range cases {
@@ -73,25 +68,20 @@ func TestErrorMapping(t *testing.T) {
 // exact bug class the testability-refactor ClassifyError fix
 // closed for the 10 call sites that existed then.
 var allErrorCodes = map[ErrorCode]int{
-	CodeValidationError:         http.StatusBadRequest,
-	CodeUnauthorized:            http.StatusUnauthorized,
-	CodeForbidden:               http.StatusForbidden,
-	CodeNotFound:                http.StatusNotFound,
-	CodeVideoStatusConflict:     http.StatusConflict,
-	CodeAvatarUploadConflict:    http.StatusConflict,
-	CodeMarketplaceConflict:     http.StatusConflict,
-	CodeVideoNotReady:           http.StatusConflict,
-	CodeUploadMissing:           http.StatusConflict,
-	CodeUploadSizeInvalid:       http.StatusBadRequest,
-	CodeSelfFollowNotAllowed:    http.StatusBadRequest,
+	CodeValidationError:        http.StatusBadRequest,
+	CodeUnauthorized:           http.StatusUnauthorized,
+	CodeForbidden:              http.StatusForbidden,
+	CodeNotFound:               http.StatusNotFound,
+	CodeVideoStatusConflict:    http.StatusConflict,
+	CodeAvatarUploadConflict:   http.StatusConflict,
+	CodeVideoNotReady:         http.StatusConflict,
+	CodeUploadMissing:          http.StatusConflict,
+	CodeUploadSizeInvalid:      http.StatusBadRequest,
+	CodeSelfFollowNotAllowed:   http.StatusBadRequest,
 	CodeWebhookInvalidSignature: http.StatusUnauthorized,
 	CodeWebhookEventUnsupported: http.StatusBadRequest,
-	CodeRateLimited:             http.StatusTooManyRequests,
-	CodeDMDeviceStale:           http.StatusConflict,
-	CodeDMKeyUnavailable:        http.StatusConflict,
-	CodeDMIdempotencyConflict:   http.StatusConflict,
-	CodeDMInboxFull:             http.StatusConflict,
-	CodeInternalError:           http.StatusInternalServerError,
+	CodeRateLimited:            http.StatusTooManyRequests,
+	CodeInternalError:          http.StatusInternalServerError,
 }
 
 func TestErrorMapping_CodeStatusCoverage(t *testing.T) {

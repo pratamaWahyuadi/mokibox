@@ -7,10 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // PoolSize is the maximum number of pgxpool connections.
@@ -36,9 +33,9 @@ type APIConfig struct {
 	RedisPassword string
 
 	// Zitadel (OIDC resource server)
-	ZitadelIssuerURL   string
-	ZitadelClientID    string // Web/OIDC client (used by login UI)
-	ZitadelAPIClientID string // API client (audience for access tokens)
+	ZitadelIssuerURL    string
+	ZitadelClientID     string // Web/OIDC client (used by login UI)
+	ZitadelAPIClientID  string // API client (audience for access tokens)
 	// ZitadelTargetSigningKey is the signingKey returned
 	// by Zitadel when an Actions V2 Target was created.
 	// The api-gateway webhook uses it to verify the
@@ -62,20 +59,6 @@ type APIConfig struct {
 
 	// Upload intent (presigned PUT expiry)
 	PresignUploadExpiry time.Duration
-
-	// Direct messages remain disabled unless explicitly enabled.
-	DME2EEEnabled bool
-	DMInboxTTL    time.Duration
-
-	// Marketplace routes and its cleanup janitor stay disabled unless
-	// MARKETPLACE_ENABLED=true. They must remain unregistered until the
-	// independent security review is done.
-	MarketplaceEnabled bool
-
-	// Marketplace cleanup janitor cadence and maximum rows swept per tick.
-	MarketplaceSweepInterval time.Duration
-	MarketplaceSweepBatch    int
-	MarketplaceModeratorIDs  []uuid.UUID
 }
 
 // WorkerConfig is the configuration consumed by transcoder-worker.
@@ -116,20 +99,20 @@ type WorkerConfig struct {
 // required is absent; never panics.
 func LoadAPI() (*APIConfig, error) {
 	c := &APIConfig{
-		APIBaseURL:              os.Getenv("API_BASE_URL"),
-		DatabaseURL:             os.Getenv("DATABASE_URL"),
-		RedisAddr:               os.Getenv("REDIS_ADDR"),
-		RedisPassword:           os.Getenv("REDIS_PASSWORD"),
-		ZitadelIssuerURL:        os.Getenv("ZITADEL_ISSUER_URL"),
-		ZitadelClientID:         os.Getenv("ZITADEL_CLIENT_ID"),
-		ZitadelAPIClientID:      os.Getenv("ZITADEL_API_CLIENT_ID"),
+		APIBaseURL:          os.Getenv("API_BASE_URL"),
+		DatabaseURL:         os.Getenv("DATABASE_URL"),
+		RedisAddr:           os.Getenv("REDIS_ADDR"),
+		RedisPassword:       os.Getenv("REDIS_PASSWORD"),
+		ZitadelIssuerURL:    os.Getenv("ZITADEL_ISSUER_URL"),
+		ZitadelClientID:     os.Getenv("ZITADEL_CLIENT_ID"),
+		ZitadelAPIClientID:  os.Getenv("ZITADEL_API_CLIENT_ID"),
 		ZitadelTargetSigningKey: os.Getenv("ZITADEL_TARGET_SIGNING_KEY"),
-		R2AccountID:             os.Getenv("R2_ACCOUNT_ID"),
-		R2AccessKeyID:           os.Getenv("R2_ACCESS_KEY_ID"),
-		R2SecretAccessKey:       os.Getenv("R2_SECRET_ACCESS_KEY"),
-		R2Bucket:                os.Getenv("R2_BUCKET"),
-		R2Endpoint:              os.Getenv("R2_ENDPOINT"),
-		MediaTokenSecret:        os.Getenv("MEDIA_TOKEN_SECRET"),
+		R2AccountID:         os.Getenv("R2_ACCOUNT_ID"),
+		R2AccessKeyID:       os.Getenv("R2_ACCESS_KEY_ID"),
+		R2SecretAccessKey:   os.Getenv("R2_SECRET_ACCESS_KEY"),
+		R2Bucket:            os.Getenv("R2_BUCKET"),
+		R2Endpoint:          os.Getenv("R2_ENDPOINT"),
+		MediaTokenSecret:    os.Getenv("MEDIA_TOKEN_SECRET"),
 	}
 
 	ttl, err := envDuration("MEDIA_TOKEN_TTL", 15*time.Minute)
@@ -143,45 +126,6 @@ func LoadAPI() (*APIConfig, error) {
 		return nil, err
 	}
 	c.PresignUploadExpiry = expiry
-
-	dmEnabled := false
-	if raw := os.Getenv("DM_E2EE_ENABLED"); raw != "" {
-		dmEnabled, err = strconv.ParseBool(raw)
-		if err != nil {
-			return nil, fmt.Errorf("invalid boolean for DM_E2EE_ENABLED=%q: %w", raw, err)
-		}
-	}
-	c.DME2EEEnabled = dmEnabled
-
-	c.DMInboxTTL, err = envDuration("DM_INBOX_TTL", 168*time.Hour)
-	if err != nil {
-		return nil, err
-	}
-	if c.DME2EEEnabled && c.DMInboxTTL != 168*time.Hour {
-		return nil, fmt.Errorf("DM_INBOX_TTL must be 168h when DM_E2EE_ENABLED=true")
-	}
-
-	marketplaceEnabled := false
-	if raw := os.Getenv("MARKETPLACE_ENABLED"); raw != "" {
-		marketplaceEnabled, err = strconv.ParseBool(raw)
-		if err != nil {
-			return nil, fmt.Errorf("invalid boolean for MARKETPLACE_ENABLED=%q: %w", raw, err)
-		}
-	}
-	c.MarketplaceEnabled = marketplaceEnabled
-
-	c.MarketplaceSweepInterval, err = envDuration("MARKETPLACE_SWEEP_INTERVAL", time.Minute)
-	if err != nil {
-		return nil, err
-	}
-	c.MarketplaceSweepBatch, err = envInt("MARKETPLACE_SWEEP_BATCH", 100)
-	if err != nil {
-		return nil, err
-	}
-	c.MarketplaceModeratorIDs, err = envUUIDs("MARKETPLACE_MODERATOR_USER_IDS")
-	if err != nil {
-		return nil, err
-	}
 
 	if err := requireFields(
 		"API_BASE_URL", c.APIBaseURL,
@@ -209,14 +153,14 @@ func LoadAPI() (*APIConfig, error) {
 // transcoder-worker.
 func LoadWorker() (*WorkerConfig, error) {
 	c := &WorkerConfig{
-		WorkerDatabaseURL: os.Getenv("WORKER_DATABASE_URL"),
-		RedisAddr:         os.Getenv("REDIS_ADDR"),
-		RedisPassword:     os.Getenv("REDIS_PASSWORD"),
-		R2AccountID:       os.Getenv("R2_ACCOUNT_ID"),
-		R2AccessKeyID:     os.Getenv("R2_ACCESS_KEY_ID"),
-		R2SecretAccessKey: os.Getenv("R2_SECRET_ACCESS_KEY"),
-		R2Bucket:          os.Getenv("R2_BUCKET"),
-		R2Endpoint:        os.Getenv("R2_ENDPOINT"),
+		WorkerDatabaseURL:  os.Getenv("WORKER_DATABASE_URL"),
+		RedisAddr:          os.Getenv("REDIS_ADDR"),
+		RedisPassword:      os.Getenv("REDIS_PASSWORD"),
+		R2AccountID:        os.Getenv("R2_ACCOUNT_ID"),
+		R2AccessKeyID:      os.Getenv("R2_ACCESS_KEY_ID"),
+		R2SecretAccessKey:  os.Getenv("R2_SECRET_ACCESS_KEY"),
+		R2Bucket:           os.Getenv("R2_BUCKET"),
+		R2Endpoint:         os.Getenv("R2_ENDPOINT"),
 	}
 
 	timeout, err := envDuration("TRANSCODE_TIMEOUT", 5*time.Minute)
@@ -288,27 +232,6 @@ func envInt(name string, def int) (int, error) {
 		return 0, fmt.Errorf("invalid int for %s=%q: must be > 0", name, v)
 	}
 	return n, nil
-}
-
-func envUUIDs(name string) ([]uuid.UUID, error) {
-	raw := os.Getenv(name)
-	if raw == "" {
-		return nil, nil
-	}
-	parts := strings.Split(raw, ",")
-	ids := make([]uuid.UUID, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		id, err := uuid.Parse(part)
-		if err != nil {
-			return nil, fmt.Errorf("invalid UUID in %s=%q: %w", name, part, err)
-		}
-		ids = append(ids, id)
-	}
-	return ids, nil
 }
 
 // requireFields returns the first missing field as a wrapped

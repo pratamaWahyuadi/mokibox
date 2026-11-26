@@ -55,11 +55,6 @@ const (
 	// 409.
 	CodeAvatarUploadConflict ErrorCode = "AVATAR_UPLOAD_CONFLICT"
 
-	// CodeMarketplaceConflict is returned when a listing
-	// mutation conflicts with its current state or image limit.
-	// 409.
-	CodeMarketplaceConflict ErrorCode = "MARKETPLACE_CONFLICT"
-
 	// CodeVideoNotReady is returned when a client tries to
 	// consume a video (play, like, comment) that has not
 	// finished processing. 409.
@@ -102,11 +97,6 @@ const (
 	// mapping table is the natural home for it and
 	// avoiding it now would force a later edit.
 	CodeRateLimited ErrorCode = "RATE_LIMITED"
-
-	CodeDMDeviceStale         ErrorCode = "DM_DEVICE_STALE"
-	CodeDMKeyUnavailable      ErrorCode = "DM_KEY_UNAVAILABLE"
-	CodeDMIdempotencyConflict ErrorCode = "DM_IDEMPOTENCY_CONFLICT"
-	CodeDMInboxFull           ErrorCode = "DM_INBOX_FULL"
 )
 
 // knownErrorCodes lists every ErrorCode constant declared
@@ -130,7 +120,6 @@ var knownErrorCodes = []ErrorCode{
 	CodeNotFound,
 	CodeVideoStatusConflict,
 	CodeAvatarUploadConflict,
-	CodeMarketplaceConflict,
 	CodeVideoNotReady,
 	CodeUploadMissing,
 	CodeUploadSizeInvalid,
@@ -138,10 +127,6 @@ var knownErrorCodes = []ErrorCode{
 	CodeWebhookInvalidSignature,
 	CodeWebhookEventUnsupported,
 	CodeRateLimited,
-	CodeDMDeviceStale,
-	CodeDMKeyUnavailable,
-	CodeDMIdempotencyConflict,
-	CodeDMInboxFull,
 	CodeInternalError,
 }
 
@@ -149,25 +134,20 @@ var knownErrorCodes = []ErrorCode{
 // ErrXxx) so the central error handler can match with
 // errors.Is.
 var (
-	ErrValidation            = errors.New("validation error")
-	ErrUnauthorized          = errors.New("unauthorized")
-	ErrForbidden             = errors.New("forbidden")
-	ErrNotFound              = errors.New("not found")
-	ErrVideoStatusConflict   = errors.New("video status conflict")
-	ErrAvatarUploadConflict  = errors.New("avatar upload conflict")
-	ErrMarketplaceConflict   = errors.New("marketplace conflict")
-	ErrVideoNotReady         = errors.New("video not ready")
-	ErrUploadMissing         = errors.New("upload missing")
-	ErrUploadSizeInvalid     = errors.New("upload size invalid")
-	ErrSelfFollow            = errors.New("self follow not allowed")
-	ErrWebhookSignature      = errors.New("webhook invalid signature")
-	ErrWebhookEvent          = errors.New("webhook event unsupported")
-	ErrInternal              = errors.New("internal error")
-	ErrRateLimited           = errors.New("rate limited")
-	ErrDMDeviceStale         = errors.New("dm device stale")
-	ErrDMKeyUnavailable      = errors.New("dm key unavailable")
-	ErrDMIdempotencyConflict = errors.New("dm idempotency conflict")
-	ErrDMInboxFull           = errors.New("dm inbox full")
+	ErrValidation           = errors.New("validation error")
+	ErrUnauthorized         = errors.New("unauthorized")
+	ErrForbidden            = errors.New("forbidden")
+	ErrNotFound             = errors.New("not found")
+	ErrVideoStatusConflict  = errors.New("video status conflict")
+	ErrAvatarUploadConflict = errors.New("avatar upload conflict")
+	ErrVideoNotReady        = errors.New("video not ready")
+	ErrUploadMissing        = errors.New("upload missing")
+	ErrUploadSizeInvalid    = errors.New("upload size invalid")
+	ErrSelfFollow           = errors.New("self follow not allowed")
+	ErrWebhookSignature     = errors.New("webhook invalid signature")
+	ErrWebhookEvent         = errors.New("webhook event unsupported")
+	ErrInternal             = errors.New("internal error")
+	ErrRateLimited          = errors.New("rate limited")
 )
 
 // httpStatusFor maps a sentinel error to the HTTP status
@@ -188,8 +168,6 @@ func httpStatusFor(err error) int {
 		return http.StatusConflict
 	case errors.Is(err, ErrAvatarUploadConflict):
 		return http.StatusConflict
-	case errors.Is(err, ErrMarketplaceConflict):
-		return http.StatusConflict
 	case errors.Is(err, ErrVideoNotReady):
 		return http.StatusConflict
 	case errors.Is(err, ErrUploadMissing):
@@ -204,11 +182,6 @@ func httpStatusFor(err error) int {
 		return http.StatusBadRequest
 	case errors.Is(err, ErrRateLimited):
 		return http.StatusTooManyRequests
-	case errors.Is(err, ErrDMDeviceStale),
-		errors.Is(err, ErrDMKeyUnavailable),
-		errors.Is(err, ErrDMIdempotencyConflict),
-		errors.Is(err, ErrDMInboxFull):
-		return http.StatusConflict
 	case errors.Is(err, ErrInternal):
 		return http.StatusInternalServerError
 	default:
@@ -236,8 +209,7 @@ func httpStatusForCode(code ErrorCode) int {
 		return http.StatusForbidden
 	case CodeNotFound:
 		return http.StatusNotFound
-	case CodeVideoStatusConflict, CodeAvatarUploadConflict, CodeMarketplaceConflict, CodeVideoNotReady, CodeUploadMissing,
-		CodeDMDeviceStale, CodeDMKeyUnavailable, CodeDMIdempotencyConflict, CodeDMInboxFull:
+	case CodeVideoStatusConflict, CodeAvatarUploadConflict, CodeVideoNotReady, CodeUploadMissing:
 		return http.StatusConflict
 	case CodeRateLimited:
 		return http.StatusTooManyRequests
@@ -263,8 +235,6 @@ func codeFor(err error) ErrorCode {
 		return CodeVideoStatusConflict
 	case errors.Is(err, ErrAvatarUploadConflict):
 		return CodeAvatarUploadConflict
-	case errors.Is(err, ErrMarketplaceConflict):
-		return CodeMarketplaceConflict
 	case errors.Is(err, ErrVideoNotReady):
 		return CodeVideoNotReady
 	case errors.Is(err, ErrUploadMissing):
@@ -279,14 +249,6 @@ func codeFor(err error) ErrorCode {
 		return CodeWebhookEventUnsupported
 	case errors.Is(err, ErrRateLimited):
 		return CodeRateLimited
-	case errors.Is(err, ErrDMDeviceStale):
-		return CodeDMDeviceStale
-	case errors.Is(err, ErrDMKeyUnavailable):
-		return CodeDMKeyUnavailable
-	case errors.Is(err, ErrDMIdempotencyConflict):
-		return CodeDMIdempotencyConflict
-	case errors.Is(err, ErrDMInboxFull):
-		return CodeDMInboxFull
 	default:
 		return CodeInternalError
 	}

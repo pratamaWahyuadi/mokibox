@@ -6,10 +6,10 @@ Modul Go: `github.com/pratamaWahyuadi/mokibox`.
 
 Dokumen acuan:
 - `planning/PRD.md` — Product Requirements + Technical Blueprint
-- `planning/03_schema.md` — ERD & database schema
-- `planning/04_api_contracts.md` — API contract (request/response)
-- `planning/LLD_PLAN.md` — Low-Level Design (fase per fase)
-- `planning/ISSUES.json` — daftar issue per fase
+- `docs/03_schema.md` — ERD & database schema
+- `docs/04_api_contracts.md` — API contract (request/response)
+- `docs/LLD_PLAN.md` — Low-Level Design (fase per fase)
+- `docs/ISSUES.json` — daftar issue per fase
 
 ---
 
@@ -57,100 +57,6 @@ Client ──HTTPS──> Nginx (80/443)
 
 `transcoder-worker` tidak pernah expose port. Ia cuma konsumsi job dari
 Redis (Asynq).
-
-## Direct-message E2EE relay
-
-Go gateway menyediakan key/device endpoints dan relay ciphertext opaque
-(`DM_E2EE_ENABLED=false` secara default). Terapkan migrasi DM dengan
-`make db-migrate-dm` (009–011: relay, sender FK, fallback key, plus 015: block)
-dan migrasi Marketplace dengan `make db-migrate-marketplace` (012–014: kontak DM,
-expiry, revocation, cleanup outbox, radius lokasi, plus 016: expiry listing,
-cover photo, dan audit moderasi). Untuk DB yang sudah punya 009,
-pakai `make db-migrate-dm-existing` (010–011 dan 015). Migrasi 009–016 harus diterapkan di semua
-deploy walaupun flag DM mati, karena penghapusan akun selalu membersihkan data
-DM/Marketplace dan eligibility DM membaca tabel kontak. Ini adalah gate deploy:
-jalankan migrasi sebelum binary baru melayani traffic; kalau tidak,
-`DELETE /api/users/me` akan 500 saat tx cleanup menyentuh tabel yang belum ada.
-
-DB yang sudah menerapkan revisi lama migrasi 010 mungkin masih memiliki index
-`idx_dm_inbox_sender_user_id` yang duplikat. Ini hanya drift, tidak merusak;
-hapus manual dengan `DROP INDEX IF EXISTS idx_dm_inbox_sender_user_id;` jika
-ingin rapi. Lihat [desain backend DM E2EE](./planning/13_dm_e2ee_design.md),
-[gate rilis DM](./planning/14_dm_e2ee_release_gate.md), dan
-[smoke DM](./scripts/smoketest/dm/README.md).
-
-CI menjalankan build, vet, test, race test, verifikasi modul, migrasi 009–016
-pada PostgreSQL 16, dan integration test bertanda `integration` untuk setiap
-PR; definisinya ada di `.github/workflows/ci.yml`.
-
-### Marketplace v1 (lokal)
-
-Backend Marketplace v1 menyediakan listing, pencarian/filter termasuk radius
-lokasi ala Facebook Marketplace, foto lewat presigned R2, favorit, laporan
-manual dengan endpoint tinjau moderator, dan izin kontak ke DM E2EE yang ada.
-Transaksi/pembayaran disepakati pembeli dan penjual di luar backend. Checkout,
-shipping, dan UI belum termasuk. Lihat [scope Marketplace](./planning/15_marketplace_v1.md).
-Sebelum menjalankan gateway versi ini, terapkan migration 012–014 dan 016 satu kali
-pada database lokal yang sudah memiliki schema 001–011 dengan
-`make db-migrate-marketplace`; semuanya forward-only dan diperlukan juga oleh
-account deletion serta izin DM.
-Route Marketplace dikontrol `MARKETPLACE_ENABLED` (default false di config,
-`.env.example`, dan docker-compose; aktifkan hanya untuk smoke lokal/setelah
-review selesai), dengan janitor
-`MARKETPLACE_SWEEP_INTERVAL=1m` dan `MARKETPLACE_SWEEP_BATCH=100` untuk
-menyapu image intent dan listing kedaluwarsa serta retry cleanup R2 dari outbox.
-Endpoint `/api/marketplace/moderation/*` hanya untuk UUID di
-`MARKETPLACE_MODERATOR_USER_IDS` (daftar kosong berarti tidak ada moderator).
-Jangan terapkan pada production dalam scope lokal ini. Semua write Marketplace
-memakai limiter 12/minute burst 10; pembuatan listing, laporan, dan kontak
-juga dibatasi 20 per user per 24 jam dengan kunci advisory lock di database.
-Izin kontak berlaku dua arah selama 30 hari, dapat dicabut, dan diperbarui
-saat buyer menghubungi seller lagi setelah kedaluwarsa.
-
-Gate sebelum PR: jalankan `make smoke-marketplace-local DATABASE_URL=...`.
-Gate sebelum production: ulangi smoke live/staging dengan R2+Redis nyata untuk
-memastikan objek cleanup terhapus dan enqueue gagal melakukan backoff. Lihat
-[HANDOFF.md](./HANDOFF.md#smoke-test-gates-before-prmerge).
-
-### Go client SDK + CLI
-
-`clients/dm` berisi SDK Go untuk Olm v1 (pure Go via `mautrix/crypto/goolm`),
-dan `clients/dm/cmd/dmcli` adalah CLI referensi. Client melakukan key
-verification, encrypt/decrypt, dan menyimpan private state dalam account/session
-pickle terenkripsi; server tetap hanya melihat ciphertext opaque. `upload-keys`
-juga mempublikasikan signed fallback key, `send -message-id <uuid>` mengirim
-ulang ciphertext persis sama dari outbox lokal, dan `poll` menampilkan pesan
-yang dikarantina tanpa menghentikan pesan berikutnya.
-
-Sebelum memakai CLI, aktifkan `DM_E2EE_ENABLED=true` di backend dan siapkan:
-
-- `MOKIBOX_DM_TOKEN` atau `MOKIBOX_DM_TOKEN_FILE` (JWT Zitadel)
-- `MOKIBOX_DM_PICKLE_KEY` atau `MOKIBOX_DM_PICKLE_KEY_FILE` (base64 32 byte;
-  bisa dibuat dengan `init -generate-pickle-key`, lalu simpan di secure storage)
-- `MOKIBOX_DM_BASE_URL` (opsional, default `http://localhost:8080`)
-
-Contoh alur untuk dua akun yang sudah saling follow:
-
-```sh
-go run ./clients/dm/cmd/dmcli init -user-id <user-a-uuid> -generate-pickle-key
-go run ./clients/dm/cmd/dmcli register
-go run ./clients/dm/cmd/dmcli upload-keys -count 50
-
-go run ./clients/dm/cmd/dmcli -state b-state.json -trust b-trust.json init -user-id <user-b-uuid> -generate-pickle-key
-go run ./clients/dm/cmd/dmcli -state b-state.json -trust b-trust.json register
-go run ./clients/dm/cmd/dmcli -state b-state.json -trust b-trust.json upload-keys -count 50
-
-go run ./clients/dm/cmd/dmcli fingerprint -user-id <user-b-uuid>
-go run ./clients/dm/cmd/dmcli verify -user-id <user-b-uuid> -device-id <device-b-uuid> -fingerprint "<fingerprint>"
-go run ./clients/dm/cmd/dmcli send -to <user-b-uuid> -text "halo"
-
-go run ./clients/dm/cmd/dmcli -state b-state.json -trust b-trust.json poll
-```
-
-`init` menulis state file dengan mode `0600`; pickle key sengaja tidak ditulis
-ke file. `send` menolak peer yang belum diverifikasi dan memblokir jika
-fingerprint berubah. Tes `go test ./clients/...` memakai relay in-memory, bukan
-PostgreSQL/Zitadel; ini bukan security review produksi.
 
 ---
 

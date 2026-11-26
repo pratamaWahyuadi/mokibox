@@ -19,7 +19,10 @@
      "event_payload": { }
    }
    ```
-   User ID terdampak diambil dari field `userID`. `event_type` yang relevan: `user.removed` (user dihapus) dan `user.deactivated` (user dinonaktifkan) — nilai ini konstanta resmi Zitadel, bukan skema custom.
+   User ID terdampak diambil dari field `aggregateID` (user yang terdampak
+  event; `userID` hanya fallback bila `aggregateID` kosong — `userID`
+  biasanya adalah AKTOR/admin).
+  `event_type` yang relevan: `user.removed` (user dihapus) dan `user.deactivated` (user dinonaktifkan) — nilai ini konstanta resmi Zitadel, bukan skema custom.
 
    Signature diletakkan di header `ZITADEL-Signature`, formatnya `t=<timestamp>,v1=<hmac_hex>`. HMAC dihitung dari `timestamp + "." + raw_body` menggunakan `signingKey` yang didapat sekali dari response `CreateTarget` (disimpan sebagai `ZITADEL_TARGET_SIGNING_KEY`), **bukan** secret statis yang dibuat sendiri. Verifikasi memakai helper resmi `actions.ValidateRequestPayload` dari `github.com/zitadel/zitadel-go/v3/pkg/actions`.
 
@@ -166,199 +169,6 @@ Contoh per status:
 
 ---
 
-## Direct Messages — E2EE v1
-
-Semua endpoint berada di `/api/dm`, memerlukan JWT Zitadel dan hanya
-diregistrasikan saat `DM_E2EE_ENABLED=true`. API tidak pernah menerima
-plaintext atau private key. Semua binary key/ciphertext dikirim sebagai
-base64. User/device authorization tidak bergantung pada UUID rahasia.
-Rate limit dibagi dua bucket per user: kontrol (device, key upload, bundle)
-20 burst 1/3 detik, dan pengiriman (send/poll/ack) 120 burst 10/detik.
-Keduanya memakai group auth tersendiri, sehingga send/poll/ack tidak kena
-limiter auth generik 60/menit.
-
-### `POST /api/dm/device`
-
-Register atau re-register caller's DM device.
-
-```json
-{
-  "device_id": "uuid",
-  "identity_curve25519": "base64-public-key",
-  "identity_ed25519": "base64-public-key"
-}
-```
-
-Response `200`:
-
-```json
-{
-  "data": {
-    "device_id": "uuid",
-    "replaced_device": false
-  }
-}
-```
-
-Registration dengan device ID dan public keys yang sama bersifat idempotent.
-Mengganti device ID atau identity key membatalkan device lama, one-time keys,
-dan inbox-nya; kontak akan melihat fingerprint baru dan wajib memverifikasinya
-lagi.
-
-### `POST /api/dm/device/one-time-keys`
-
-Upload batch maksimum 100 signed Olm one-time keys. Device harus device aktif
-milik caller. Field `fallback_key` opsional dan formatnya sama seperti satu
-one-time key; server menyimpan satu fallback key per device untuk dipakai saat
-one-time key habis.
-
-```json
-{
-  "device_id": "uuid",
-  "keys": [
-    {
-      "key_id": "key-id",
-      "public_key": "base64-public-key",
-      "signature": "base64-ed25519-signature"
-    }
-  ],
-  "fallback_key": {
-    "key_id": "fallback-key-id",
-    "public_key": "base64-public-key",
-    "signature": "base64-ed25519-signature"
-  }
-}
-```
-
-Response `200`: `{ "data": { "accepted": 1 } }` (`accepted` hanya menghitung
-one-time key). Server menyimpan signatures secara opaque; peer client wajib
-memverifikasinya dengan identity key.
-
-### `GET /api/dm/users/:id/key-bundle?device_id=uuid&include_one_time_key=true`
-
-Caller harus memiliki device aktif. Target harus aktif dan pasangan harus
-mutual-follow, kecuali sudah ada grant kontak Marketplace untuk pasangan itu.
-Response `200` berisi target `user_id`, `device_id`, kedua identity public
-keys, dan default-nya satu one-time key yang diklaim secara atomik. Jika tidak
-ada one-time key, server mengembalikan `fallback_key` yang tersimpan (tidak
-dikonsumsi per sesi). Dengan `include_one_time_key=false`, response hanya berisi
-identity keys dan `one_time_key: null`; client memakai opsi ini untuk
-fingerprint checking agar tidak membakar key. Jika key diminta tetapi neither
-one-time nor fallback key tersedia, response `409 DM_KEY_UNAVAILABLE`. Target
-yang tidak ditemukan, tidak memenuhi mutual-follow, atau hanya memiliki grant
-kontak yang dicabut/kedaluwarsa sama-sama `404 NOT_FOUND`.
-
-### `POST /api/dm/messages`
-
-Mengirim satu Olm envelope opaque ke target device yang termasuk dalam key bundle yang sudah
-diambil. Caller harus memiliki device aktif dan pasangan harus mutual-follow
-atau memiliki grant kontak Marketplace.
-Jika target sudah mengganti device, pengiriman gagal dengan
-`409 DM_DEVICE_STALE`; client harus mengambil bundle dan memverifikasi ulang.
-
-```json
-{
-  "device_id": "uuid",
-  "recipient_user_id": "uuid",
-  "recipient_device_id": "uuid",
-  "client_message_id": "uuid",
-  "protocol": "olm",
-  "protocol_version": 1,
-  "message_type": 0,
-  "ciphertext": "base64"
-}
-```
-
-`message_type` mengikuti binding Olm; server tidak menafsirkan ciphertext.
-Digest idempotensi memakai encoding canonical dari seluruh request body.
-Retry dengan ID dan digest sama mengembalikan ID/sequence pesan awal; ID sama
-dengan digest berbeda mengembalikan `409 DM_IDEMPOTENCY_CONFLICT`. Maksimum
-1,000 pesan pending per recipient device; jika penuh `409 DM_INBOX_FULL`.
-Response pertama `201` berisi `message_id`, `sequence`, dan `expires_at`.
-Retry yang cocok mengembalikan body yang sama dengan status `200`.
-
-### `GET /api/dm/inbox?device_id=uuid&after=0&limit=100`
-
-`after` wajib berupa integer non-negatif; `limit` default 100, maksimum 100.
-Hanya pesan pending untuk device aktif caller dengan `sequence > after` yang
-dikembalikan, urut sequence menaik. Response berisi IDs/routing metadata,
-Olm envelope, ciphertext, dan timestamps. Poll tidak memperpanjang TTL dan
-tidak acknowledge pesan. Client memajukan cursor setelah ack sukses. Pesan
-dengan envelope/ciphertext rusak, decrypt gagal, session hilang, atau
-fingerprint berubah dikarantina lokal (tidak di-ack, tidak menghentikan
-sequence berikutnya); cursor tetap maju melewati pesan tersebut.
-
-### `POST /api/dm/inbox/:message_id/ack`
-
-```json
-{ "device_id": "uuid" }
-```
-
-Acknowledge hanya pesan yang dialamatkan ke device aktif caller. Pengulangan
-ack berhasil dengan `204`; ciphertext dihapus dari penyimpanan inbox.
-
-### Error contract
-
-| HTTP | Code | Kondisi |
-|---|---|---|
-| 400 | `VALIDATION_ERROR` | Body/cursor/encoding tidak valid |
-| 401 | `UNAUTHORIZED` | JWT hilang, invalid, atau user nonaktif |
-| 404 | `NOT_FOUND` | Target tak ada atau tidak ada mutual-follow/grant kontak Marketplace |
-| 409 | `DM_DEVICE_STALE` | Device ID tidak aktif untuk caller atau dimiliki user lain |
-| 409 | `DM_KEY_UNAVAILABLE` | Tidak ada one-time atau fallback key untuk target |
-| 409 | `DM_IDEMPOTENCY_CONFLICT` | ID client dipakai ulang dengan body berbeda |
-| 409 | `DM_INBOX_FULL` | Recipient memiliki 1,000 pesan pending |
-| 429 | `RATE_LIMITED` | Per-user DM control (20 burst) atau delivery (120 burst) limiter menolak request |
-| 500 | `INTERNAL_ERROR` | Kegagalan DB/internal; detail hanya di log |
-
-Pengiriman memeriksa mutual-follow atau grant kontak Marketplace yang masih
-aktif pada saat send. Grant Marketplace tetap berlaku setelah listing berubah
-status, tetapi berhenti saat dicabut atau kedaluwarsa; expired grant dapat
-diperbarui dengan memanggil ulang endpoint contact. Pencabutan menghapus
-antrean ciphertext dan idempotency pasangan hanya jika tidak ada grant lain
-atau mutual-follow yang masih mengizinkan pasangan itu. Jika akses hanya
-berasal dari mutual-follow, perubahan follow setelah enqueue tidak mencabut
-pesan yang sudah berada di inbox sebelum ack/expiry.
-
-`GET /api/dm/users/:id/key-bundle` dengan `include_one_time_key=true` mengonsumsi
-satu one-time key target. Klien harus memakai `include_one_time_key=false`
-saat hanya ingin memeriksa fingerprint; rate limit membatasi, tetapi tidak
-menghilangkan, kemungkinan pengurasan key oleh mutual follower atau pasangan
-dengan grant kontak Marketplace.
-
-FK `fk_dm_inbox_sender_user` memakai `ON DELETE RESTRICT`. Deploy saat ini
-hanya tombstone user, sehingga aman. Alur hard-delete di masa depan harus
-menghapus baris inbox DM terlebih dahulu.
-
-## Marketplace — v1 lokal
-
-Kontrak lengkap routes dan payload ada di
-[planning/15_marketplace_v1.md](./15_marketplace_v1.md). Semua endpoint di
-bawah `/api/marketplace` memerlukan JWT dan memakai envelope, pagination,
-serta error format standar.
-
-`GET /api/marketplace/listings` menerima `q`, `category`, `city` (exact,
-case-insensitive), `min_price_idr`, `max_price_idr`, `limit`, `cursor`, serta
-triplet opsional `latitude`, `longitude`, `radius_km` (wajib bersamaan,
-0 < radius ≤ 200 km) yang memfilter listing dengan koordinat valid dan
-mengembalikan `distance_km`. Browse hanya mengembalikan listing `active` milik
-user aktif.
-Harga integer IDR. Detail
-listing `sold` tetap dapat dibaca; `archived` hanya dapat dibaca seller.
-
-Foto diupload ke R2 privat dengan presigned PUT ke kunci sementara. Saat
-konfirmasi, server memvalidasi byte lalu menyalin byte tersebut ke kunci final
-unik per percobaan konfirmasi yang tidak pernah mendapat presigned URL, sehingga
-URL upload tidak dapat menimpa foto aktif dan retry yang kalah tidak dapat
-menghapus objek pemenang. Listing kontak menggunakan
-`POST /api/marketplace/listings/:id/contact`; endpoint ini membuat izin DM
-untuk pasangan buyer/seller setelah memeriksa listing aktif. Izin ini menjadi
-pengecualian eksplisit atas syarat mutual-follow untuk DM, berlaku dua arah
-selama aktif, dan tetap berlaku sesudah status listing berubah. Izin
-kedaluwarsa setelah 30 hari dan bisa dicabut oleh salah satu pihak lewat
-`DELETE /api/marketplace/listings/:id/contact`. Pesan tetap wajib mengikuti
-kontrak Olm opaque ciphertext pada bagian Direct Messages.
-
 ## 1. Daftar Endpoint
 
 | Method | Path | Deskripsi | Auth |
@@ -368,23 +178,6 @@ kontrak Olm opaque ciphertext pada bagian Direct Messages.
 | POST | `/api/users/me/avatar/upload-intent` | Minta presigned URL foto profil | JWT |
 | POST | `/api/users/me/avatar/confirm` | Validasi dan aktifkan foto profil | JWT |
 | DELETE | `/api/users/me` | Hapus akun sendiri + data lokal | JWT |
-| GET | `/api/marketplace/categories` | Daftar kategori barang | JWT |
-| POST | `/api/marketplace/listings` | Buat listing | JWT |
-| GET | `/api/marketplace/listings` | Jelajah/cari/filter listing | JWT |
-| GET | `/api/marketplace/listings/:id` | Detail listing | JWT |
-| PUT | `/api/marketplace/listings/:id` | Edit listing sendiri | JWT |
-| PATCH | `/api/marketplace/listings/:id/status` | Ubah status listing sendiri | JWT |
-| DELETE | `/api/marketplace/listings/:id` | Arsipkan listing sendiri | JWT |
-| GET | `/api/marketplace/me/listings` | Listing milik sendiri | JWT |
-| POST | `/api/marketplace/listings/:id/images/upload-intent` | Minta URL upload foto | JWT |
-| POST | `/api/marketplace/listings/:id/images/:image_id/confirm` | Konfirmasi foto | JWT |
-| DELETE | `/api/marketplace/listings/:id/images/:image_id` | Hapus foto sendiri | JWT |
-| POST | `/api/marketplace/listings/:id/favorite` | Simpan favorit | JWT |
-| DELETE | `/api/marketplace/listings/:id/favorite` | Hapus favorit | JWT |
-| GET | `/api/marketplace/me/favorites` | Favorit milik sendiri | JWT |
-| POST | `/api/marketplace/listings/:id/report` | Laporkan listing | JWT |
-| POST | `/api/marketplace/listings/:id/contact` | Mulai kontak E2EE dengan seller | JWT |
-| DELETE | `/api/marketplace/listings/:id/contact` | Cabut izin kontak dan bersihkan antrean pasangan | JWT |
 | GET | `/api/users/:id` | Profil user lain | JWT |
 | GET | `/api/users/:id/videos` | List video milik user | JWT |
 | POST | `/api/users/:id/follow` | Follow user | JWT |
@@ -407,12 +200,6 @@ kontrak Olm opaque ciphertext pada bagian Direct Messages.
 | POST | `/api/videos/:id/view` | Track view | JWT |
 | GET | `/api/notifications` | List notifikasi | JWT |
 | PUT | `/api/notifications/read-all` | Tandai semua notifikasi dibaca | JWT |
-| POST | `/api/dm/device` | Register/re-register DM device | JWT + feature flag |
-| POST | `/api/dm/device/one-time-keys` | Upload signed Olm one-time keys | JWT + feature flag |
-| GET | `/api/dm/users/:id/key-bundle` | Claim peer key bundle | JWT + feature flag |
-| POST | `/api/dm/messages` | Kirim Olm ciphertext | JWT + feature flag |
-| GET | `/api/dm/inbox` | Poll inbox ciphertext | JWT + feature flag |
-| POST | `/api/dm/inbox/:message_id/ack` | Acknowledge dan hapus ciphertext | JWT + feature flag |
 | POST | `/api/webhooks/zitadel` | Actions V2 target — notifikasi lifecycle user | HMAC signature (`ZITADEL-Signature`) |
 
 ---
@@ -772,17 +559,10 @@ Response `200 OK`:
       "views_count": 120,
       "comments_count": 2,
       "created_at": "2025-01-01T12:00:00Z",
-      "thumbnail_url": "https://r2.example.com/thumb/...",
-      "hls_playlist_url": "https://api.example.com/api/videos/d3f4.../playlist.m3u8?token=...",
-      "liked_by_me": false,
-      "is_owner": false,
-      "user": {
-        "id": "9f7d3c86-....",
-        "username": "bob",
-        "display_name": "Bob",
-        "avatar_url": "https://r2.example.com/avatars/bob.jpg",
-        "is_private": true
-      }
+      "thumbnail_url": null,
+      "hls_playlist_url": null,
+      "liked_by_me": null,
+      "is_owner": false
     }
   ],
   "pagination": {
@@ -790,6 +570,8 @@ Response `200 OK`:
   }
 }
 ```
+
+Catatan: pada list ini `thumbnail_url`, `hls_playlist_url`, dan `liked_by_me` selalu `null` (pointer tidak pernah diisi di handler), dan TIDAK ada objek `user` embedded (beda dengan detail video / feed).
 
 Error: `400`, `401`, `404`, `500`.
 
@@ -817,7 +599,7 @@ Request body:
 }
 ```
 
-`title` dan `description` opsional.
+`title` WAJIB (1–200 karakter setelah trim; whitespace-only ditolak dengan `400 VALIDATION_ERROR`), `description` opsional (maks 5000).
 
 Response `201 Created` jika record `PENDING_UPLOAD` baru dibuat.  
 Response `200 OK` jika user sudah punya record `PENDING_UPLOAD` dan presigned URL baru diterbitkan.
@@ -988,6 +770,8 @@ Mengembalikan HLS playlist yang sudah di-rewrite. Setiap URL segmen di dalam pla
 
 Auth: bisa menggunakan header Bearer JWT, atau query parameter `?token=` jika client media player tidak bisa mengirim header.
 
+Query parameter opsional: `?variant=480p|720p` untuk variant playlist (tanpa parameter → master playlist; nilai lain → `400 VALIDATION_ERROR`).
+
 Headers:
 
 ```
@@ -1010,7 +794,7 @@ https://r2.example.com/hls/<user_id>/<video_id>/segment1.ts?X-Amz-...
 #EXT-X-ENDLIST
 ```
 
-Error: `401`, `403`, `404`, `500`.
+Error: `401`, `404` (bukan owner / video tidak ditemukan — anti-enumerasi, bukan 403), `500`.
 
 ---
 
@@ -1028,7 +812,7 @@ Authorization: Bearer <access_token>
 
 Response `204 No Content`.
 
-Error: `401`, `403`, `404`, `500`.
+Error: `401`, `404` (bukan owner / tidak ditemukan — anti-enumerasi, bukan 403), `500`.
 
 ---
 
@@ -1142,14 +926,15 @@ Authorization: Bearer <access_token>
 
 Tidak ada request body.
 
-Response `200 OK`:
+Response `200 OK` (`created_at` kosong `""` — tidak ada row untuk diambil timestamp-nya):
 
 ```json
 {
   "data": {
     "follower_id": "3f7d3c86-a1b2-4e5f-9c0d-1234567890ab",
     "followee_id": "9f7d3c86-....",
-    "is_following": false
+    "is_following": false,
+    "created_at": ""
   }
 }
 ```
@@ -1274,8 +1059,7 @@ Response `200 OK`:
 
 Error:
 - `401`
-- `404` — video tidak ditemukan / tidak bisa diakses.
-- `409 VIDEO_NOT_READY` — video belum siap (khusus owner).
+- `404` — video tidak ditemukan / tidak bisa diakses. (Catatan: video non-READY untuk non-owner juga 404 via anti-enumerasi; kode tidak lagi mengembalikan `409 VIDEO_NOT_READY`.)
 - `500`
 
 ---
@@ -1354,8 +1138,7 @@ Response `201 Created`:
 Error:
 - `400 VALIDATION_ERROR` — content kosong / lebih dari 1000 karakter.
 - `401`
-- `404` — video tidak ditemukan / tidak bisa diakses.
-- `409 VIDEO_NOT_READY`
+- `404` — video tidak ditemukan / tidak bisa diakses (video non-READY juga 404, anti-enumerasi).
 - `500`
 
 ---
@@ -1420,7 +1203,7 @@ Authorization: Bearer <access_token>
 
 Response `204 No Content`.
 
-Error: `401`, `403`, `404`, `500`.
+Error: `401`, `404` (bukan owner / tidak ditemukan — anti-enumerasi, bukan 403), `500`.
 
 ---
 
@@ -1468,8 +1251,7 @@ Response `201 Created`:
 Error:
 - `400 VALIDATION_ERROR`
 - `401`
-- `404` — parent comment tidak ditemukan / video tidak bisa diakses.
-- `409 VIDEO_NOT_READY`
+- `404` — parent comment tidak ditemukan / video tidak bisa diakses (video non-READY juga 404, anti-enumerasi).
 - `500`
 
 ---
@@ -1503,8 +1285,7 @@ Response `200 OK`:
 
 Error:
 - `401`
-- `404` — video tidak ditemukan / tidak bisa diakses.
-- `409 VIDEO_NOT_READY`
+- `404` — video tidak ditemukan / tidak bisa diakses (video non-READY juga 404, anti-enumerasi).
 - `500`
 
 ---
@@ -1612,17 +1393,18 @@ Request body (format bawaan Actions V2, bukan skema custom):
 ```
 
 Behavior:
-- `event_type == "user.removed"` → tombstone user lokal (`userID`), nonaktifkan `is_active = false`, set `deleted_at`, hapus data relasional, enqueue cleanup R2.
-- `event_type == "user.deactivated"` → set `is_active = false` untuk `userID`.
+- `event_type == "user.removed"` → tombstone user lokal (`aggregateID`, fallback `userID`), nonaktifkan `is_active = false`, set `deleted_at`, hapus data relasional, enqueue cleanup R2.
+- `event_type == "user.deactivated"` → set `is_active = false` untuk user terdampak.
 - `event_type` lain yang ke-trigger tak sengaja → `400 WEBHOOK_EVENT_UNSUPPORTED`.
 
-Response `200 OK`:
+Verifikasi signature: HMAC-SHA256 atas string `"<unix-seconds>.<raw_body>"`, header `ZITADEL-Signature: t=<unix-seconds>,v1=<hex>`, toleransi timestamp 300 detik.
+
+Response `200 OK` (tanpa field `event`; `sequence` bertipe number):
 
 ```json
 {
   "data": {
-    "status": "processed",
-    "event": "user.removed"
+    "status": "processed"
   }
 }
 ```
@@ -1634,3 +1416,46 @@ Error:
 - `500`
 
 ---
+
+---
+
+## 99. Utilitas & Dokumentasi
+
+### `GET /healthz`
+
+Health check gateway. Tanpa auth, di luar grup `/api`.
+
+Response `200 OK`: `{"data":{"status":"ok"}}` (tanpa cek dependensi — verifier-retry safe).
+
+Error: `500` (gateway internal).
+
+---
+
+### `GET /api/search`
+
+Search users + videos. Query Parameters:
+
+| Nama | Tipe | Keterangan |
+|---|---|---|
+| `q` | string | Wajib, 1–100 karakter (rune count) |
+| `type` | string | `all` (default) / `users` / `videos` |
+| `limit` | integer | Default 20, max 50 |
+| `cursor` | string | Opsional, offset-based (`offset:<n>` base64) |
+
+Rules:
+- Hanya akun aktif & video `READY` + `deleted_at IS NULL`.
+- Video privat hanya muncul untuk owner.
+- Exact-match username (case-insensitive) diberi ranking lebih tinggi.
+- `%`/`_` di-escape (bukan wildcard).
+
+Auth: JWT (dalam grup `/api`).
+
+Error: `400 VALIDATION_ERROR`, `401`, `500`.
+
+---
+
+### `GET /api/docs` (dan `/api/docs/swagger.json`, `/api/docs/oauth2-redirect.html`)
+
+Swagger UI + spec + OAuth2 redirect helper. Tanpa auth (di-root Echo, luar grup `/api`), di-serve gateway via `go:embed` — perubahan docs butuh rebuild image.
+
+Response `200 OK`: HTML / JSON / JS statis.
