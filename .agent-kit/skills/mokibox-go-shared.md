@@ -426,21 +426,22 @@ Deploy ke VPS `43.157.227.130` multi-tenant (9 container tenant lain + aaPanel +
 - Internet → aaPanel nginx host (:80/:443, TLS di sini)
   - `mokiboxapi.binery.my.id` → `proxy_pass http://127.0.0.1:8180` (mokibox-api-gateway publish host loopback)
   - `auth.mokibox.my.id` → `proxy_pass http://127.0.0.1:8181` (Zitadel Traefik publish host loopback)
-  - `mokibox-nginx` container TIDAK jalan (service nginx dinonaktifkan — lihat tiga-file compose di bawah)
+  - `mokibox-nginx` container TIDAK jalan (nginx `profiles:[disabled]` di `docker-compose.prod.yml`)
 
-**Compose production (diverifikasi dari label container `docker inspect`):
-TIGA file, TANPA `docker-compose.prod.yml` (file itu tidak ada di repo):**
-```bash
-docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.ports.yml up -d
+**Compose production override** (`docker-compose.prod.yml`):
+```yaml
+services:
+  nginx:
+    profiles: ["disabled"]
+  api-gateway:
+    ports:
+      - "127.0.0.1:8180:8080"  # loopback only
 ```
-- `docker-compose.override.yml`: attach network zitadel + alias + local.conf (dev lokal; di VPS isinya sudah disesuaikan state live)
-- `docker-compose.ports.yml`: gateway publish `127.0.0.1:8180:8080` (loopback only)
-- nginx container tidak jalan di VPS (tidak di-up / disabled via state live)
 
 **Jalankan di VPS:**
 ```bash
 cd /www/wwwroot/mokibox
-docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.ports.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
 
 **aaPanel vhost untuk Zitadel OIDC discovery (KRITIS):**
@@ -466,7 +467,7 @@ location /.well-known/ {
 
 **Container env frozen**: setelah update `.env` (R2 credentials, Zitadel client IDs/secrets), WAJIB:
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.ports.yml up -d --force-recreate api-gateway transcoder-worker
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --force-recreate api-gateway transcoder-worker
 ```
 Restart saja (`docker restart`) TIDAK reload env — root cause integration test 403 massal run-2.
 
@@ -478,8 +479,8 @@ Restart saja (`docker restart`) TIDAK reload env — root cause integration test
 3. Update `.env` Zitadel: `ZITADEL_DOMAIN=auth.mokibox.my.id`, `ZITADEL_EXTERNALDOMAIN=auth.mokibox.my.id`, `ZITADEL_EXTERNALSECURE=true`, `ZITADEL_EXTERNALPORT=443`, `ZITADEL_PUBLIC_SCHEME=https`
 4. `docker compose -f zitadel-compose/docker-compose.yml up -d`
 5. Re-provision penuh (project, apps, Actions V2, test users)
-6. Sync downstream: MokiBox `.env` + integration_test.sh `ADMIN_LOGIN`
-7. `docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.ports.yml up -d --force-recreate`
+6. Sync downstream: MokiBox `.env` + `deploy/demo/config.js` + integration_test.sh `ADMIN_LOGIN`
+7. `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --force-recreate`
 
 ### Verifikasi cepat (setiap setup dev baru)
 
@@ -1022,9 +1023,9 @@ di fase 7), `DELETE /api/users/me` WAJIB idempotent:
   live), pattern worker-swap untuk timeout verification (rebuild
   image dulu), gap assertion honesty di smoke script, dan nginx
   stale-DNS 502 post-reboot.
-- `references/demo-ui.md` — **[USANG]** demo web sudah dihapus,
-  digantikan Swagger UI `/api/docs`. Pola yang masih relevan:
-  PKCE S256 SPA flow + **HLS player
+- `references/demo-ui.md` — pattern single-page browser UI untuk
+  manual E2E demo semua endpoint (fase-10 deliverable):
+  PKCE S256 SPA flow + nginx /callback 302 ke UI + **HLS player
   auth via `?token=` URL, BUKAN Authorization header di
   hls.js (xhrSetup meneruskan header ke segment R2 presigned
   → 400 SignatureDoesNotMatch yang tampak seperti CORS error;

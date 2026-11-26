@@ -149,18 +149,16 @@ Internet → aaPanel nginx host (:80/:443, TLS wildcard DNS-01)
 | TLS termination, HSTS, security headers | aaPanel vhost (translate dari `deploy/nginx/default.conf`) |
 | api-gateway | publish loopback `127.0.0.1:8180:8080` |
 | Zitadel Traefik | publish loopback `127.0.0.1:8181:80` |
-| mokibox-nginx | tidak dipakai (tidak di-up di VPS) |
-| demo UI `/demo/` | **DIHAPUS** — digantikan Swagger UI `/api/docs` |
+| mokibox-nginx | tidak dipakai (drop via overlay `profiles: [disabled]`) |
+| demo UI `/demo/` | static alias aaPanel (file di host, tanpa container) |
 
 Aturan turunan (wajib untuk sesi deploy di VPS):
 
-- **Semua compose command di VPS eksplisit TIGA `-f`**:
-  `docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.ports.yml ...`
-  (`docker-compose.prod.yml` TIDAK ada di repo; diverifikasi dari
-  label `config_files` container via `docker inspect`).
-  Dev override TRACKED di repo — compose polos di clone VPS
-  akan auto-load config dev (local.conf, alias domain lokal) dan
-  prod jalan broken.
+- **Semua compose command di VPS eksplisit dua `-f`**:
+  `docker compose -f docker-compose.yml -f docker-compose.prod.yml ...`
+  — dev override TRACKED di repo, jadi compose polos di clone VPS
+  akan auto-load config dev (local.conf, port dev, alias domain
+  lokal) dan prod jalan broken.
 - Publish loopback (`127.0.0.1:<port>:<container-port>`) untuk
   setiap proxy target aaPanel — bukan interface publik; proxy_pass
   ke `127.0.0.1` juga kebal pola stale-DNS upstream.
