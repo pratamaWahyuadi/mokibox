@@ -179,41 +179,60 @@ Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
 
 ## Production deploy VPS (2026-09-10) — AKTIF (prompt 2 selesai)
 
+> **DOMAIN TRIO SAAT INI (2026-11, keputusan user 2026-11-25):**
+> backend `https://api.mokibox.my.id`, Zitadel
+> `https://auth.mokibox.my.id`, frontend apex
+> `https://mokibox.my.id`. Migrasi dari
+> `mokiboxapi.binery.my.id` sudah live di VPS (vhost + DNS +
+> TLS + R2 CORS origin + target webhook Zitadel baru
+> `https://api.mokibox.my.id/api/webhooks/zitadel`).
+> Referensi `*.binery.my.id` di bawah dan di dokumen
+> riwayat (bagian 2026-09) adalah KONDISI LAMA — lihat
+> juga bagian "Riwayat domain API (pre-2026-11)" di bawah.
+
 MokiBox production live di VPS multi-tenant `43.157.227.130`,
 repo `/www/wwwroot/mokibox` (branch `deploy/aapanel` — bukan main,
 sesuai keputusan user: main bebas perubahan yang menyesuaikan aaPanel).
 
 ### Topologi
 - Edge: aaPanel nginx host (port 80/443) — `mokibox-nginx` TIDAK jalan
-  (`docker-compose.prod.yml` overlay: nginx `profiles:[disabled]`,
-  gateway publish `127.0.0.1:8180:8080`). Compose selalu eksplisit
-  `-f docker-compose.yml -f docker-compose.prod.yml` (dev override
-  ter-track TIDAK boleh auto-load di VPS).
+  di VPS (nginx service tidak di-up; gateway publish `127.0.0.1:8180:8080`).
+  **Deploy compose di VPS memakai TIGA file eksplisit** (diverifikasi
+  dari label `config_files` via `docker inspect`; file
+  `docker-compose.prod.yml` TIDAK ADA di repo mana pun):
+  `docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.ports.yml up -d`
 - Zitadel: sibling compose `zitadel-compose/` fresh instance
   (volumes bootstrap+postgres-data fresh), Traefik publish
   `127.0.0.1:8181:80`, deny-list DEFAULT (tanpa bypass dev).
-- vhost aaPanel: `mokiboxapi.binery.my.id` → 127.0.0.1:8180,
-  `auth.mokibox.my.id` → 127.0.0.1:8181 (file
-  `/www/server/panel/vhost/nginx/mokiboxapi.binery.my.id.conf`,
-  `/www/server/panel/vhost/nginx/auth.mokibox.my.id.conf`;
-  HSTS max-age=63072000, X-Content-Type-Options, X-Frame-Options,
-  Referrer-Policy; /demo/ alias ke repo; /callback 302).
-- TLS: wildcard LE `*.binery.my.id` + apex via acme.sh DNS-01
-  (Cloudflare API token), cert di
+- vhost aaPanel SAAT INI (2026-11): `api.mokibox.my.id` → 127.0.0.1:8180,
+  `auth.mokibox.my.id` → 127.0.0.1:8181, apex `mokibox.my.id` → SPA
+  MokiBox-web (HSTS max-age=63072000, X-Content-Type-Options,
+  X-Frame-Options, Referrer-Policy; /callback 302). Riwayat vhost lama
+  `mokiboxapi.binery.my.id.conf` (pre-2026-11) sudah dipensiunkan.
+  Demo web DIHAPUS, digantikan Swagger UI `/api/docs`.
+- TLS SAAT INI: cert per-domain via acme.sh DNS-01 (Cloudflare API
+  token) — `api.mokibox.my.id`, `auth.mokibox.my.id`,
+  `mokibox.my.id`, wildcard `*.mokibox.my.id` — di
   `/www/server/panel/vhost/cert/<domain>/{fullchain,privkey}.pem`,
-  renewal otomatis (cron acme.sh, ARI window Nov 2026).
+  renewal otomatis (cron acme.sh). Riwayat: wildcard LE
+  `*.binery.my.id` dipakai sebelum migrasi TLD.
   HTTP→HTTPS 301 aktif.
-- DNS: `mokiboxapi` + `auth` A-record 43.157.227.130 **DNS-only** (grey).
-  `mokibox` (frontend) belum dibuat — frontend memang di-host terpisah.
-  Zitadel domain baru: `auth.mokibox.my.id` (migrasi dari `auth.binery.my.id`
+- DNS SAAT INI: `api`, `auth`, apex `mokibox.my.id` → VPS,
+  DNS-only (grey). Riwayat: `mokiboxapi` A-record lama. Zitadel
+  domain: `auth.mokibox.my.id` (migrasi dari `auth.binery.my.id`
   2026-09-24, fresh re-init Zitadel + re-provisioning penuh).
 
 ### Provisioning (Zitadel v4.16.0, script `scripts/zitadel-provision-prod.sh`)
+- Script sekarang env-driven: `ZITADEL_DOMAIN` (default
+  `auth.mokibox.my.id`), `API_BASE` (default
+  `https://api.mokibox.my.id`) — redirect URI apps +
+  endpoint webhook mengikuti `API_BASE`.
 - Project mokibox + apps: `mokibox_web` (confidential BASIC),
   `mokibox_spa` (PKCE public), `mokibox_api` (JWT audience).
 - Actions V2: target `mokibox-webhook` →
-  `https://mokiboxapi.binery.my.id/api/webhooks/zitadel` (Opsi W,
+  `https://api.mokibox.my.id/api/webhooks/zitadel` (Opsi W,
   tanpa deny-list bypass), execution `user.deactivated`.
+  Riwayat: target pre-2026-11 memakai `mokiboxapi.binery.my.id`.
 - Test users test1/test2, password sesuai kontrak integration_test.sh
   (`MokiTest1-A`/`MokiTest2-B`, di-set via
   `POST /management/v1/users/{id}/password` + `noVerification:true`).
@@ -228,7 +247,9 @@ sesuai keputusan user: main bebas perubahan yang menyesuaikan aaPanel).
   (aggregateID), soft delete + cleanup).
 - integration_test.sh diperbaiki: `ADMIN_LOGIN` domain update ke
   `zitadel-admin@zitadel.auth.mokibox.my.id` (commit 061f46d).
-- R2 CORS origin `https://mokiboxapi.binery.my.id` terverifikasi
+- R2 CORS origin SAAT INI: `https://api.mokibox.my.id`
+  (ditambah saat migrasi 2026-11). Riwayat origin lama
+  `https://mokiboxapi.binery.my.id` juga sempat terverifikasi
   (ACAO header muncul di presigned GET — lesson prompt-1 #8 closed).
 - /api/users/me 401 envelope; anonymous video-GET 401
   (rate-limit middleware depan — DEViasi dari ekspektasi prompt
@@ -273,7 +294,14 @@ sesuai keputusan user: main bebas perubahan yang menyesuaikan aaPanel).
   password manager; acme.sh renewal di VPS butuh token aktif.
 
 
-## Domain-asli lokal (2026-09-09) — AKTIF
+## Riwayat domain API (pre-2026-11) — Domain-asli lokal (2026-09-09)
+
+> **[RIWAYAT]** Bagian ini mendokumentasikan kondisi saat itu:
+> backend `mokiboxapi.binery.my.id`, auth `auth.binery.my.id`,
+> frontend `mokibox.binery.my.id`. SAAT INI backend
+> `api.mokibox.my.id`, Zitadel `auth.mokibox.my.id`, frontend
+> `mokibox.my.id`. Domain trio binery di sini tidak lagi
+> dipakai — jangan dijadikan referensi konfigurasi sekarang.
 
 Domain trio (keputusan user 2026-09-04): backend
 `mokiboxapi.binery.my.id`, auth `auth.binery.my.id`,
@@ -330,6 +358,12 @@ frontend `mokibox.binery.my.id`. Semua verifikasi hijau:
 
 ### Runbook lengkap (domain-asli, menggantikan runbook *.localhost)
 
+> CATATAN (2026-11-24): demo web (`deploy/demo/index.html`,
+> `deploy/demo/config.js`, alias `/demo/`) sudah [DIHAPUS] dan
+> digantikan Swagger UI di `/api/docs` — lihat bagian
+> "Swagger UI + login Zitadel". Langkah yang menyebut demo
+> di bawah disimpan sebagai riwayat saja.
+
 1. Zitadel stack (`zitadel-compose/`, gitignored):
    - `.env`: `ZITADEL_DOMAIN=auth.binery.my.id`,
      `ZITADEL_EXTERNALPORT=80`, `ZITADEL_EXTERNALSECURE=false`,
@@ -340,14 +374,29 @@ frontend `mokibox.binery.my.id`. Semua verifikasi hijau:
      zitadel_postgres-data` + up.
 2. MokiBox compose: `docker compose up -d` — override auto-load:
    nginx local.conf (server_name domain-asli) + aliases
-   domain-asli + demo UI mount.
+   domain-asli. [DIHAPUS] mount demo UI.
 3. Provisioning: lihat "Domain-asli lokal" di atas + gotcha 1-3.
-   Semua ID/secret/signing key → `.env`; regen
-   `deploy/demo/config.js` dari `ZITADEL_SPA_CLIENT_ID`.
+   Semua ID/secret/signing key → `.env`. [DIHAPUS] regen
+   `deploy/demo/config.js`.
 4. `bash scripts/integration_test.sh` — hostname sekarang
    env-driven (baca `API_BASE_URL`/`ZITADEL_ISSUER_URL` dari
    `.env`; ADMIN_LOGIN/ADMIN_PASS overridable env var).
-5. Demo UI browser: `http://mokiboxapi.binery.my.id/demo/`.
+5. [DIHAPUS] Demo UI browser `http://mokiboxapi.binery.my.id/demo/`
+   — sekarang digantikan Swagger UI: `https://api.mokibox.my.id/api/docs`
+   (riwayat saat runbook ini aktif: `mokiboxapi.binery.my.id`).
+
+### Urutan deploy produksi (VPS, tiga-file compose)
+
+1. **Backup**: `pg_dump` database + salinan `.env` (jangan
+   di-commit, simpan di luar repo tree).
+2. **Migrasi dulu** (sebelum build gateway baru — middleware auth
+   membaca kolom baru): `psql ... -v ON_ERROR_STOP=1 -f
+   migrations/00N_*.sql`. Migrasi 008_user_avatar_upload.sql sudah
+   diterapkan di produksi 2026-11-24. Migrasi 003-007 dicadangkan
+   roadmap parity (jangan diisi nomor lain).
+3. **Build & recreate** (hanya service yang berubah):
+   `docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.ports.yml up -d --build --no-deps api-gateway transcoder-worker`
+4. **Verifikasi**: `curl http://127.0.0.1:8180/healthz` → 200.
 
 
 ## Latest
@@ -666,3 +715,116 @@ HANDOFF.md                               MODIFIED — this section
 - `scripts/smoketest/phase11_search` — PASS 2x back-to-back
 
 
+
+## Swagger UI + login Zitadel (pengganti demo web, 2026-11)
+
+Demo web lama (`deploy/demo/index.html`) dihapus; dokumentasi API +
+"coba langsung" digantikan Swagger UI:
+
+- Docs di-serve gateway di `/api/docs` via `go:embed`
+  (`api-gateway/docs/`: swagger.json, index.html,
+  oauth2-redirect.html/js). **Spec dan HTML di-embed ke binary —
+  setiap perubahan docs butuh rebuild image gateway**, bukan
+  cukup restart.
+- Login pakai Authorization Code + PKCE dengan SPA client docs
+  (client ID tercatat di `api-gateway/docs/index.html`).
+- Redirect URI yang harus terdaftar di Zitadel app:
+  - lokal: `http://localhost/api/docs/oauth2-redirect.html`
+  - produksi: `https://api.mokibox.my.id/api/docs/oauth2-redirect.html`
+- Di dialog Authorize Swagger, **Auth Token Type harus JWT**
+  (bukan default opaque) agar access token bisa dipakai
+  api-gateway (audience ZITADEL_API_CLIENT_ID).
+- Redirect URI ini harus terdaftar di Zitadel app docs; setelah
+  migrasi API-domain 2026-11 ke `api.mokibox.my.id`, URI lama
+  di app Zitadel perlu diganti/ ditambah (lihat migrasi infra).
+
+## Pelajaran operasional baru (ringkas)
+
+1. **nginx host aaPanel bisa mati sendiri** — kalau semua domain
+   tiba-tiba down padahal container sehat, cek dulu service nginx
+   aaPanel di host sebelum menyelidiki compose.
+2. **Urutan migrasi-sebelum-gateway** — middleware auth membaca
+   kolom baru; deploy gateway sebelum migrasi bisa mematikan semua
+   endpoint authenticated (lihat deploy order PR #72).
+3. **Verifikasi compose via `docker inspect`** — cara sahih memastikan
+   file compose apa yang benar-benar dipakai container produksi:
+   baca label `config_files`. Jangan percaya dokumen lama
+   (docker-compose.prod.yml ternyata tidak pernah ada).
+4. **Merge tanpa conflict tetap harus dites** — merge bersih tidak
+   menjamin perilaku; jalankan build+test+smoke setelah merge
+   sebelum klaim selesai.
+
+## Next work (belum dikerjakan) — HANYA catatan analisis, belum implementasi
+
+### a. Ubah username maksimal sekali per 7 hari
+
+Temuan kode (fakta, belum ada implementasi):
+
+- Kolom: tabel `users` belum punya penanda waktu perubahan username.
+  Dibutuhkan mis. `username_changed_at TIMESTAMPTZ NULL` — NULL = belum
+  pernah ganti (boleh ganti kapan pun).
+- Nomor migrasi kosong berikutnya: **009** (keputusan user:
+  003–007 dicadangkan roadmap parity, 008 terpakai avatar —
+  fitur username memakai `009_username_change.sql` atau serupa).
+- GRANT: role DB `tiktok_api` harus bisa UPDATE kolom baru itu;
+  ikuti gaya column-level GRANT seperti `migrations/002_...sql`
+  dan `008_user_avatar_upload.sql`.
+- Validasi yang ada sekarang (`handlers/user.go` + validator):
+  format + unique case-insensitive via constraint/index unique;
+  belum ada daftar kata terlarang (reserved words: "admin",
+  "mokibox", dll.) — perlu daftar eksplisit.
+- Efek ke payload notifikasi: beberapa payload notifikasi menyimpan
+  snapshot username (mis. follow) — username lama bisa "membeku"
+  di notifikasi lama; dokumen harus menyatakan ini acceptable
+  atau read-time join harus dilakukan.
+- Respons error saat belum 7 hari: butuh error code baru
+  (mis. USERNAME_CHANGE_COOLDOWN) + mapping status di
+  `shared/errors.go` — jangan reuse 400 generik tanpa code.
+- **Peringatan inkonsistensi dokumen**: dokumen saat ini (UserProfile
+  di `planning/04_api_contracts.md`, PRD, dan deskripsi PUT
+  /users/me di swagger.json) menyatakan username immutable.
+  Implementasi fitur ini WAJIB mengubah tiga dokumen itu juga.
+
+### b. Search & feed tanpa access token (anonim)
+
+Temuan kode:
+
+- `routes.go`: seluruh grup `/api` dipasang
+  `middleware.Authenticate` + rate limiter auth-first. Produksi
+  punya bukti log "rate limit requires authenticated user".
+- `middleware/auth.go`: **AuthenticateOptional sudah ada** (dipakai
+  playlist `?token=` path, fail-closed: header absent → anonim,
+  header present tapi invalid → 401). Bisa langsung dipakai.
+- `middleware/ratelimit.go`: limiter identitas-user (`NewRateLimitAuth`)
+  menolak user anonim. Untuk anonim perlu limiter berbasis IP —
+  pola referensi `NewRateLimitWebhook` (by-IP) ada; risiko:
+  `c.ClientIP()` bisa di-spoof kalau trusted-proxy tidak benar
+  (aaPanel nginx → gateway; pastikan X-Forwarded-For diset dan
+  dipercaya hanya dari loopback).
+- Visibilitas anonim (`visibility.go`): hanya video publik +
+  status READY + owner aktif; aturan ini tidak perlu diubah,
+  cukup pastikan viewer nil ditangani.
+- Nilai field viewer-dependent untuk anonim: `liked_by_me=false`,
+  `is_owner=false`, `is_following=false` (jangan null — konsisten
+  dengan tipe non-nullable di kontrak).
+- Dampak swagger.json: security global berlaku ke semua operasi;
+  endpoint anonim baru butuh `security: []` per-operasi
+  (`/api/search`, `/api/feed/home`), dan `planning/04_api_contracts.md`
+  harus ikut.
+- Risiko: scraping/abuse anonim — rate limit IP + pertimbangkan
+  batas page-size/cursor ketat untuk anonim.
+
+File yang perlu diubah nanti: `api-gateway/routes.go`,
+`api-gateway/middleware/ratelimit.go`,
+`api-gateway/middleware/auth.go` (kalau perlu varian optional),
+`api-gateway/handlers/search.go`, `api-gateway/handlers/feed.go`,
+`api-gateway/docs/swagger.json` (sekalian hapus `VIDEO_NOT_READY`
+dari daftar contoh error code — keputusan user: dibiarkan di PR
+cleanup, dibersihkan saat fitur ini mengubah spec),
+`planning/04_api_contracts.md`.
+
+Usulan tes: unit test rate-limiter by-IP untuk request tanpa auth;
+unit test handler search/feed dengan viewer nil; integration
+smoke: GET /api/search + /api/feed/home tanpa Authorization → 200
+dengan liked_by_me=false; header invalid tetap 401 (fail-closed);
+akun privat tidak muncul untuk anonim.
