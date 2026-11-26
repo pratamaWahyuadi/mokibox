@@ -102,6 +102,17 @@ db-migrate-dm-existing: ## Apply DM 010-011 and 015 to a database that already h
 			psql -U $(POSTGRES_USER) -d $(DB_NAME) -v ON_ERROR_STOP=1 || exit 1; \
 	done
 
+.PHONY: db-migrate-marketplace
+db-migrate-marketplace: ## Apply Marketplace migrations 012-014 and 016 (forward-only).
+	@for migration in 012_marketplace.sql 013_marketplace_cleanup_outbox.sql 014_marketplace_location.sql 016_marketplace_extensions.sql; do \
+		if [ ! -f $(MIGRATIONS)/$$migration ]; then \
+			echo "ERROR: $(MIGRATIONS)/$$migration not found."; \
+			exit 1; \
+		fi; \
+		cat $(MIGRATIONS)/$$migration | $(COMPOSE) exec -T $(SERVICE_DB) \
+			psql -U $(POSTGRES_USER) -d $(DB_NAME) -v ON_ERROR_STOP=1 || exit 1; \
+	done
+
 .PHONY: db-psql
 db-psql: ## Open a psql shell as POSTGRES_USER on $(DB_NAME).
 	$(COMPOSE) exec $(SERVICE_DB) psql -U $(POSTGRES_USER) -d $(DB_NAME)
@@ -205,6 +216,25 @@ test: ## Run go test ./...
 .PHONY: vet
 vet: ## Run go vet.
 	$(GO) vet ./...
+
+.PHONY: smoke-marketplace-local
+smoke-marketplace-local: ## Run local Marketplace HTTP+DB smoke (requires DATABASE_URL).
+	@test -n "$(DATABASE_URL)" || { echo "ERROR: DATABASE_URL is required"; exit 1; }
+	@DATABASE_URL="$(DATABASE_URL)" $(GO) test -tags=integration ./api-gateway ./shared/db -run 'TestMarketplace' -count=1 -v
+
+.PHONY: smoke-marketplace-stub-server
+smoke-marketplace-stub-server: ## Start local stub-auth gateway for simulated live smoke.
+	@test -n "$(DATABASE_URL)" || { echo "ERROR: DATABASE_URL is required"; exit 1; }
+	@DATABASE_URL="$(DATABASE_URL)" MARKETPLACE_STUB_SERVER_ENABLED=1 $(GO) test -tags=integration ./api-gateway -run TestStubMarketplaceServer -count=1 -v
+
+.PHONY: smoke-marketplace-live
+smoke-marketplace-live: ## Run live/staging Marketplace smoke from .env.live.local.
+	@set -a; . ./.env.live.local; set +a; \
+	if [ "$$MARKETPLACE_SMOKE_MODE" = "local-simulation" ]; then echo "WARNING: .env.live.local berisi simulasi lokal, bukan staging asli"; fi; \
+	for v in MARKETPLACE_API_URL DATABASE_URL MARKETPLACE_SMOKE_SELLER_USER MARKETPLACE_SMOKE_SELLER_TOKEN MARKETPLACE_SMOKE_BUYER_USER MARKETPLACE_SMOKE_BUYER_TOKEN; do \
+		case "$${!v}" in ""|replace-*) echo "ERROR: $$v belum diisi di .env.live.local"; exit 1;; esac; \
+	done; \
+	$(GO) run ./scripts/smoketest/marketplace
 
 .PHONY: clean
 clean: ## Remove ./bin and Go test cache.

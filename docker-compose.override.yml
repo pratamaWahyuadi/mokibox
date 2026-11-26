@@ -2,14 +2,6 @@
 # docker-compose.override.yml - LOCAL-ONLY override
 # for Fase 10 issue #30 (integration smoke test).
 #
-# DEV LOKAL SAJA — TIDAK DIPAKAI SEBAGAI-ISI DI VPS.
-# Deploy VPS memakai TIGA file eksplisit:
-#   docker compose -f docker-compose.yml \
-#     -f docker-compose.override.yml -f docker-compose.ports.yml up -d
-# (diverifikasi dari label container `docker inspect`;
-# docker-compose.prod.yml TIDAK ADA). Alias domain di
-# bawah adalah konfigurasi dev lokal.
-#
 # Auto-loaded by `docker compose up` so production
 # `docker-compose.yml` is NOT edited. To disable:
 #   docker compose --no-override-file up

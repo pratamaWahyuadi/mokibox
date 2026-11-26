@@ -94,6 +94,82 @@ type Like struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type MarketplaceCategory struct {
+	Slug      string `json:"slug"`
+	Name      string `json:"name"`
+	SortOrder int16  `json:"sort_order"`
+}
+
+type MarketplaceCleanupOutbox struct {
+	ID            int64     `json:"id"`
+	R2Keys        []string  `json:"r2_keys"`
+	Status        string    `json:"status"`
+	Attempts      int32     `json:"attempts"`
+	NextAttemptAt time.Time `json:"next_attempt_at"`
+	LastError     string    `json:"last_error"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+type MarketplaceContact struct {
+	ListingID    uuid.UUID    `json:"listing_id"`
+	BuyerUserID  uuid.UUID    `json:"buyer_user_id"`
+	SellerUserID uuid.UUID    `json:"seller_user_id"`
+	CreatedAt    time.Time    `json:"created_at"`
+	ExpiresAt    time.Time    `json:"expires_at"`
+	RevokedAt    sql.NullTime `json:"revoked_at"`
+}
+
+type MarketplaceFavorite struct {
+	UserID    uuid.UUID `json:"user_id"`
+	ListingID uuid.UUID `json:"listing_id"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type MarketplaceListing struct {
+	ID            uuid.UUID       `json:"id"`
+	SellerUserID  uuid.UUID       `json:"seller_user_id"`
+	CategorySlug  string          `json:"category_slug"`
+	Title         string          `json:"title"`
+	Description   string          `json:"description"`
+	PriceIdr      int64           `json:"price_idr"`
+	City          string          `json:"city"`
+	ItemCondition string          `json:"item_condition"`
+	Status        string          `json:"status"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
+	Latitude      sql.NullFloat64 `json:"latitude"`
+	Longitude     sql.NullFloat64 `json:"longitude"`
+	ExpiresAt     time.Time       `json:"expires_at"`
+}
+
+type MarketplaceListingImage struct {
+	ID          uuid.UUID     `json:"id"`
+	ListingID   uuid.UUID     `json:"listing_id"`
+	R2Key       string        `json:"r2_key"`
+	ContentType string        `json:"content_type"`
+	SortOrder   int16         `json:"sort_order"`
+	Status      string        `json:"status"`
+	ExpiresAt   sql.NullTime  `json:"expires_at"`
+	CreatedAt   time.Time     `json:"created_at"`
+	SizeBytes   sql.NullInt64 `json:"size_bytes"`
+	IsCover     bool          `json:"is_cover"`
+}
+
+type MarketplaceReport struct {
+	ID             uuid.UUID      `json:"id"`
+	ListingID      uuid.UUID      `json:"listing_id"`
+	ReporterUserID uuid.UUID      `json:"reporter_user_id"`
+	Reason         string         `json:"reason"`
+	Details        string         `json:"details"`
+	Status         string         `json:"status"`
+	CreatedAt      time.Time      `json:"created_at"`
+	ReviewedAt     sql.NullTime   `json:"reviewed_at"`
+	ReviewerUserID uuid.NullUUID  `json:"reviewer_user_id"`
+	ReviewNote     string         `json:"review_note"`
+	Resolution     sql.NullString `json:"resolution"`
+}
+
 type Notification struct {
 	ID        uuid.UUID       `json:"id"`
 	UserID    uuid.UUID       `json:"user_id"`

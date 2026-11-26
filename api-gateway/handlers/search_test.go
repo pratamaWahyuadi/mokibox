@@ -50,6 +50,9 @@ func (m *mockR2Store) HeadObject(ctx context.Context, key string) (int64, error)
 func (m *mockR2Store) GetObject(ctx context.Context, key string, maxBytes int64) ([]byte, error) {
 	return []byte("data"), nil
 }
+func (m *mockR2Store) PutObject(ctx context.Context, key, contentType string, body []byte) error {
+	return nil
+}
 
 func setupSearchTestContext(method, target string, user *db.User) (echo.Context, *httptest.ResponseRecorder) {
 	e := echo.New()

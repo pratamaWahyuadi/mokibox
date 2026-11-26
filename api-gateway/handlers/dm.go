@@ -34,7 +34,7 @@ type dmStore interface {
 	GetDMDeviceByUserAndID(ctx context.Context, arg db.GetDMDeviceByUserAndIDParams) (db.DmDevice, error)
 	GetDMDeviceOwner(ctx context.Context, deviceID uuid.UUID) (uuid.UUID, error)
 	GetDMTargetDevice(ctx context.Context, userID uuid.UUID) (db.DmDevice, error)
-	IsDMMutualFollow(ctx context.Context, arg db.IsDMMutualFollowParams) (bool, error)
+	IsDMRecipientAllowed(ctx context.Context, arg db.IsDMRecipientAllowedParams) (bool, error)
 	InsertDMOneTimeKey(ctx context.Context, arg db.InsertDMOneTimeKeyParams) (int64, error)
 	GetDMFallbackKey(ctx context.Context, deviceID uuid.UUID) (db.DmFallbackKey, error)
 	ClaimDMOneTimeKey(ctx context.Context, deviceID uuid.UUID) (db.ClaimDMOneTimeKeyRow, error)
@@ -354,7 +354,7 @@ func (h *DMHandler) GetKeyBundle(c echo.Context) error {
 			}
 			return dmStoreError("read requesting DM device", err)
 		}
-		eligible, err := q.IsDMMutualFollow(c.Request().Context(), db.IsDMMutualFollowParams{
+		eligible, err := q.IsDMRecipientAllowed(c.Request().Context(), db.IsDMRecipientAllowedParams{
 			ID: user.ID, ID_2: targetID,
 		})
 		if err != nil {
@@ -556,7 +556,7 @@ func (h *DMHandler) SendMessage(c echo.Context) error {
 			return dmStoreError("reserve DM idempotency record", err)
 		}
 
-		eligible, err := q.IsDMMutualFollow(c.Request().Context(), db.IsDMMutualFollowParams{
+		eligible, err := q.IsDMRecipientAllowed(c.Request().Context(), db.IsDMRecipientAllowedParams{
 			ID: user.ID, ID_2: recipientID,
 		})
 		if err != nil {

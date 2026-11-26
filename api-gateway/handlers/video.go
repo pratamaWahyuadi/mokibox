@@ -101,6 +101,7 @@ type r2ObjectStore interface {
 	PresignGet(ctx context.Context, key string, expiry time.Duration) (string, error)
 	HeadObject(ctx context.Context, key string) (int64, error)
 	GetObject(ctx context.Context, key string, maxBytes int64) ([]byte, error)
+	PutObject(ctx context.Context, key, contentType string, body []byte) error
 }
 
 // NewVideoHandler builds a VideoHandler with all
@@ -199,20 +200,20 @@ func (h *VideoHandler) UploadIntent(c echo.Context) error {
 		return shared.RespondError(c, shared.Wrap(shared.ErrValidation, "invalid JSON body"))
 	}
 	// c.Validate runs the validator/v10 struct tag
-// rules declared on uploadIntentRequest. On
-// failure it returns *shared.APIError already
-// translated to the canonical envelope shape, so
-// shared.RespondError can serialise it directly.
+	// rules declared on uploadIntentRequest. On
+	// failure it returns *shared.APIError already
+	// translated to the canonical envelope shape, so
+	// shared.RespondError can serialise it directly.
 	if err := c.Validate(&req); err != nil {
 		return shared.RespondError(c, err)
 	}
 	title := strings.TrimSpace(*req.Title)
 	if title == "" {
 		// Belt-and-braces: validator 'required'
-// passes when Title is a non-nil pointer to
-// "", but a whitespace-only title is also not
-// what the contract means by "title is
-// required". Reject explicitly.
+		// passes when Title is a non-nil pointer to
+		// "", but a whitespace-only title is also not
+		// what the contract means by "title is
+		// required". Reject explicitly.
 		return shared.RespondError(c, shared.NewAPIError(shared.CodeValidationError, "title is required").
 			WithDetails(shared.FieldError{Field: "title", Message: "must be between 1 and 200 characters"}))
 	}
@@ -269,7 +270,7 @@ func (h *VideoHandler) UploadIntent(c echo.Context) error {
 				R2Key: r2Key,
 			})
 			if uerr != nil {
-						if errors.Is(uerr, sql.ErrNoRows) {
+				if errors.Is(uerr, sql.ErrNoRows) {
 					// Concurrent state transition.
 					return shared.RespondError(c, shared.Wrap(shared.ErrVideoStatusConflict,
 						"video state changed concurrently"))
@@ -284,7 +285,7 @@ func (h *VideoHandler) UploadIntent(c echo.Context) error {
 			Title:       nullString(title),
 			Description: nullString(desc),
 		}); merr != nil {
-				if errors.Is(merr, sql.ErrNoRows) {
+			if errors.Is(merr, sql.ErrNoRows) {
 				// Same race: the row was promoted to
 				// PROCESSING between our two updates.
 				return shared.RespondError(c, shared.Wrap(shared.ErrVideoStatusConflict,
@@ -373,12 +374,12 @@ type confirmResponse struct {
 //  3. Validate ownership / status / r2_key match.
 //  4. HeadObject on R2:
 //     - missing -> 409 UPLOAD_MISSING (tx still commits,
-//       status stays PENDING_UPLOAD so the user can
-//       retry).
+//     status stays PENDING_UPLOAD so the user can
+//     retry).
 //     - size outside 1 KB..200 MB -> 400
-//       UPLOAD_SIZE_INVALID + enqueue cleanup of the
-//       invalid object. Tx still commits so the row
-//       stays PENDING_UPLOAD and the user can retry.
+//     UPLOAD_SIZE_INVALID + enqueue cleanup of the
+//     invalid object. Tx still commits so the row
+//     stays PENDING_UPLOAD and the user can retry.
 //  5. ConfirmVideoProcessing (PENDING_UPLOAD ->
 //     PROCESSING, retry_count=0).
 //  6. Enqueue transcode:video with asynq.MaxRetry(1).
@@ -415,8 +416,8 @@ func (h *VideoHandler) ConfirmUpload(c echo.Context) error {
 		// Defence in depth: validator's `uuid` tag
 		// should already have caught this. If it
 		// did not (e.g. validator version mismatch)
-// we still fail safely rather than passing a
-// malformed UUID down the stack.
+		// we still fail safely rather than passing a
+		// malformed UUID down the stack.
 		return shared.RespondError(c, shared.NewAPIError(shared.CodeValidationError, "invalid video_id").
 			WithDetails(shared.FieldError{Field: "video_id", Message: "must be a valid UUID"}))
 	}

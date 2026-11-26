@@ -46,6 +46,7 @@
 //   - GET  /api/notifications                (auth)
 //   - PUT  /api/notifications/read-all       (auth)
 //   - DELETE /api/users/me                   (auth)
+//   - /api/marketplace/*                      (auth; MARKETPLACE_ENABLED)
 //   - POST /api/dm/device                    (auth + feature flag)
 //   - POST /api/dm/device/one-time-keys      (auth + feature flag)
 //   - GET  /api/dm/users/:id/key-bundle      (auth + feature flag)
@@ -395,6 +396,54 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	}
 	api.DELETE("/users/me", ah.DeleteMe)
 
+	marketplaceEnabled := d.Cfg != nil && d.Cfg.MarketplaceEnabled
+	if marketplaceEnabled {
+		mh, err := handlers.NewMarketplaceHandler(d.Queries, d.DB, d.R2, d.Cfg)
+		if err != nil {
+			panic(fmt.Sprintf("api-gateway: NewMarketplaceHandler: %v", err))
+		}
+		marketplaceWriteLimit, err := middleware.NewRateLimitAuth(middleware.RateLimitConfig{
+			Rate:          rate.Limit(0.2), // 12 per minute
+			Burst:         10,
+			TTL:           10 * time.Minute,
+			SweepInterval: 5 * time.Minute,
+		})
+		if err != nil {
+			panic(fmt.Sprintf("api-gateway: NewRateLimitAuth for marketplace writes: %v", err))
+		}
+		marketplaceImageLimit, err := middleware.NewRateLimitAuth(middleware.RateLimitConfig{
+			Rate:          rate.Limit(1), // 60 per minute; one listing can need 16+ image calls
+			Burst:         30,
+			TTL:           10 * time.Minute,
+			SweepInterval: 5 * time.Minute,
+		})
+		if err != nil {
+			panic(fmt.Sprintf("api-gateway: NewRateLimitAuth for marketplace images: %v", err))
+		}
+		marketplace := api.Group("/marketplace")
+		marketplace.GET("/categories", mh.Categories)
+		marketplace.POST("/listings", mh.CreateListing, marketplaceWriteLimit)
+		marketplace.GET("/listings", mh.Browse)
+		marketplace.GET("/listings/:id", mh.GetListing)
+		marketplace.PUT("/listings/:id", mh.UpdateListing, marketplaceWriteLimit)
+		marketplace.PATCH("/listings/:id/status", mh.UpdateListingStatus, marketplaceWriteLimit)
+		marketplace.DELETE("/listings/:id", mh.DeleteListing, marketplaceWriteLimit)
+		marketplace.GET("/me/listings", mh.MyListings)
+		marketplace.GET("/users/:seller_user_id/listings", mh.SellerListings)
+		marketplace.POST("/listings/:id/images/upload-intent", mh.UploadImageIntent, marketplaceImageLimit)
+		marketplace.POST("/listings/:id/images/:image_id/confirm", mh.ConfirmImage, marketplaceImageLimit)
+		marketplace.DELETE("/listings/:id/images/:image_id", mh.DeleteImage, marketplaceImageLimit)
+		marketplace.POST("/listings/:id/images/:image_id/cover", mh.SetCoverImage, marketplaceImageLimit)
+		marketplace.POST("/listings/:id/favorite", mh.Favorite, marketplaceWriteLimit)
+		marketplace.DELETE("/listings/:id/favorite", mh.Unfavorite, marketplaceWriteLimit)
+		marketplace.GET("/me/favorites", mh.MyFavorites)
+		marketplace.POST("/listings/:id/report", mh.Report, marketplaceWriteLimit)
+		marketplace.POST("/listings/:id/contact", mh.ContactSeller, marketplaceWriteLimit)
+		marketplace.DELETE("/listings/:id/contact", mh.RevokeContact, marketplaceWriteLimit)
+		marketplace.GET("/moderation/reports", mh.ListReports)
+		marketplace.POST("/moderation/reports/:id/review", mh.ReviewReport, marketplaceWriteLimit)
+	}
+
 	// Public API-contract docs: the raw OpenAPI spec and a
 	// minimal Swagger UI index, mounted outside the auth
 	// group so the contract is readable anonymously.
@@ -406,6 +455,9 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	e.RouteNotFound("/api/*", notFound)
 	if d.Cfg != nil && d.Cfg.DME2EEEnabled {
 		e.RouteNotFound("/api/dm/*", notFound)
+	}
+	if marketplaceEnabled {
+		e.RouteNotFound("/api/marketplace/*", notFound)
 	}
 
 	return e

@@ -59,6 +59,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pratamaWahyuadi/mokibox/api-gateway/handlers"
 	"github.com/pratamaWahyuadi/mokibox/api-gateway/middleware"
 	"github.com/pratamaWahyuadi/mokibox/shared"
 	"github.com/pratamaWahyuadi/mokibox/shared/db"
@@ -235,6 +236,15 @@ func main() {
 	e := NewRouter(deps)
 	if cfg.DME2EEEnabled {
 		go runDMJanitor(ctx, queries, time.Hour)
+	}
+	if cfg.MarketplaceEnabled {
+		mh, err := handlers.NewMarketplaceHandler(queries, sqlDB, r2Client, cfg)
+		if err != nil {
+			slog.Error("api-gateway: build marketplace janitor handler", "err", err)
+			os.Exit(1)
+		}
+		go runMarketplaceJanitor(ctx, queries, mh, handlers.NewTaskEnqueuer(asynqClient),
+			cfg.MarketplaceSweepInterval, int32(cfg.MarketplaceSweepBatch))
 	}
 
 	srv := &http.Server{
