@@ -233,6 +233,9 @@ func main() {
 	}
 
 	e := NewRouter(deps)
+	if cfg.DME2EEEnabled {
+		go runDMJanitor(ctx, queries, time.Hour)
+	}
 
 	srv := &http.Server{
 		Addr:              addr,
