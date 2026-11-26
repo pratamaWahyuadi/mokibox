@@ -26,7 +26,8 @@ its source is not copied. This design uses account-bound device keys instead.
 
 ### Backend included
 
-- 1:1 text messages between active MokiBox users who mutually follow each other.
+- 1:1 text messages between active MokiBox users who mutually follow each other
+  or hold an active Marketplace contact grant.
 - One active DM device per account. Registering a replacement revokes the old
   device and deletes its server-held keys and queued messages.
 - HTTP key-bundle fetch, ciphertext send, inbox polling, and acknowledgement.
@@ -95,8 +96,13 @@ only its bounded ciphertext queue supports offline recipients.
 - Every DM route is authenticated and is registered only when
   `DM_E2EE_ENABLED=true`; the default is false. When enabled,
   `DM_INBOX_TTL=168h` is required.
-- Key-bundle fetch and send require mutual follows. Missing and ineligible
-  recipients have the same not-found response.
+- Key-bundle fetch and send require mutual follows or an unrevoked, unexpired
+  Marketplace contact grant for the user pair. Revoking a grant purges queued
+  ciphertext for that pair in the same transaction only when no other grant or
+  mutual-follow still authorizes the pair. Missing and ineligible
+  recipients have the same not-found response. Migration `012_marketplace.sql`
+  must be applied before enabling this gateway version because the DM
+  authorization query reads the contact-grant table.
 - Key-bundle fetch supports identity-only lookup; the client uses that form to
   inspect a peer fingerprint without consuming a one-time key.
 - Device-sensitive requests include `device_id`; stale IDs return
@@ -118,7 +124,7 @@ only its bounded ciphertext queue supports offline recipients.
   Account deletion removes all DM inbox rows where the user is sender or
   recipient, plus device keys, fallback keys and idempotency records, in its
   existing transaction. This runs even when the DM feature flag is off, so the
-  009-011 migrations are mandatory for every deployment and must be applied
+  009-014 migrations are mandatory for every deployment and must be applied
   before the new binary takes traffic. Sent inbox rows reference the sender
   user (not the short-lived device), so re-registering a device does not delete
   delivery history. The v1 privacy decision is one-sided: deleting an account
@@ -127,7 +133,8 @@ only its bounded ciphertext queue supports offline recipients.
 - `GET /api/dm/users/:id/key-bundle` with `include_one_time_key=true` claims a
   one-time key and advances that device's key pool. Clients should use
   `include_one_time_key=false` for fingerprint inspection; rate limits bound
-  but do not eliminate one-time-key draining by mutual followers.
+  but do not eliminate one-time-key draining by mutual followers or contact
+  pairs.
 - `fk_dm_inbox_sender_user` uses `ON DELETE RESTRICT`. The deployment only
   tombstones users, so this is safe. A future hard-delete flow must purge DM
   inbox rows first.
@@ -140,7 +147,7 @@ only its bounded ciphertext queue supports offline recipients.
 1. Go handler tests exercise the public HTTP contract with a test verifier and
    consumer-side store doubles.
 2. `scripts/smoketest/dm` runs against real HTTP + PostgreSQL and covers the
-   009-011 schema, `FOR UPDATE SKIP LOCKED`, idempotency upsert, register,
+   009-014 schema, `FOR UPDATE SKIP LOCKED`, idempotency upsert, register,
    upload, send, poll and ack. Its recorded results are in
    `scripts/smoketest/dm/README.md`.
 3. The Go SDK integration tests in `clients/dm` cover a local Olm end-to-end run

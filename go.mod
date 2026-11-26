@@ -13,6 +13,7 @@ require (
 	github.com/hibiken/asynq v0.26.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/labstack/echo/v4 v4.15.4
+	github.com/lib/pq v1.12.3
 	github.com/zitadel/zitadel-go/v3 v3.29.3
 	golang.org/x/image v0.45.0
 	golang.org/x/time v0.15.0

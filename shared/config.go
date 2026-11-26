@@ -63,6 +63,15 @@ type APIConfig struct {
 	// Direct messages remain disabled unless explicitly enabled.
 	DME2EEEnabled bool
 	DMInboxTTL    time.Duration
+
+	// Marketplace routes and its cleanup janitor are enabled by default
+	// for the local backend. Set MARKETPLACE_ENABLED=false to keep them
+	// unregistered until the independent security review is done.
+	MarketplaceEnabled bool
+
+	// Marketplace cleanup janitor cadence and maximum rows swept per tick.
+	MarketplaceSweepInterval time.Duration
+	MarketplaceSweepBatch    int
 }
 
 // WorkerConfig is the configuration consumed by transcoder-worker.
@@ -146,6 +155,24 @@ func LoadAPI() (*APIConfig, error) {
 	}
 	if c.DME2EEEnabled && c.DMInboxTTL != 168*time.Hour {
 		return nil, fmt.Errorf("DM_INBOX_TTL must be 168h when DM_E2EE_ENABLED=true")
+	}
+
+	marketplaceEnabled := true
+	if raw := os.Getenv("MARKETPLACE_ENABLED"); raw != "" {
+		marketplaceEnabled, err = strconv.ParseBool(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid boolean for MARKETPLACE_ENABLED=%q: %w", raw, err)
+		}
+	}
+	c.MarketplaceEnabled = marketplaceEnabled
+
+	c.MarketplaceSweepInterval, err = envDuration("MARKETPLACE_SWEEP_INTERVAL", time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	c.MarketplaceSweepBatch, err = envInt("MARKETPLACE_SWEEP_BATCH", 100)
+	if err != nil {
+		return nil, err
 	}
 
 	if err := requireFields(

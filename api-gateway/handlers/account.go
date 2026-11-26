@@ -59,6 +59,7 @@ import (
 type accountTxStore interface {
 	ListVideoKeysByUser(ctx context.Context, userID uuid.UUID) ([]db.ListVideoKeysByUserRow, error)
 	GetUserAvatarKeys(ctx context.Context, id uuid.UUID) (db.GetUserAvatarKeysRow, error)
+	ListMarketplaceImageKeysBySeller(ctx context.Context, sellerUserID uuid.UUID) ([]string, error)
 	DecrementLikesForUser(ctx context.Context, userID uuid.UUID) error
 	DecrementCommentsForUser(ctx context.Context, userID uuid.UUID) error
 	DeleteVideosByUser(ctx context.Context, userID uuid.UUID) error
@@ -70,6 +71,10 @@ type accountTxStore interface {
 	DeleteNotificationsByActor(ctx context.Context, actorID uuid.UUID) error
 	DeleteDMInboxByUser(ctx context.Context, userID uuid.UUID) (int64, error)
 	DeleteDMDevicesByUser(ctx context.Context, userID uuid.UUID) (int64, error)
+	DeleteMarketplaceContactsByUser(ctx context.Context, buyerUserID uuid.UUID) error
+	DeleteMarketplaceReportsByUser(ctx context.Context, reporterUserID uuid.UUID) error
+	DeleteMarketplaceFavoritesByUser(ctx context.Context, userID uuid.UUID) error
+	DeleteMarketplaceListingsBySeller(ctx context.Context, sellerUserID uuid.UUID) error
 	TombstoneUser(ctx context.Context, id uuid.UUID) (db.User, error)
 }
 
@@ -177,7 +182,7 @@ func DeleteUserData(ctx context.Context, q *db.Queries, dbHandle *sql.DB, queue 
 //     both directions -> delete the user's own like +
 //     comment rows -> delete notifications where the
 //     user is recipient or actor -> delete E2EE DM inbox
-//     + device/key/idempotency rows -> TombstoneUser.
+//     + device/key/idempotency rows -> Marketplace records -> TombstoneUser.
 //  2. Commit (runner).
 //  3. AFTER commit: enqueue cleanup:objects with the
 //     raw + thumbnail keys (hls_prefix is left to the
@@ -247,7 +252,12 @@ func collectUserR2Keys(ctx context.Context, runner txRunner[accountTxStore], use
 			}
 			return shared.Wrap(shared.ErrInternal, fmt.Sprintf("list avatar keys: %v", err))
 		}
-		r2Keys = make([]string, 0, 3*len(rows)+2)
+		marketplaceKeys, err := qtx.ListMarketplaceImageKeysBySeller(ctx, userID)
+		if err != nil {
+			return shared.Wrap(shared.ErrInternal, fmt.Sprintf("list Marketplace image keys: %v", err))
+		}
+		r2Keys = make([]string, 0, 3*len(rows)+2+len(marketplaceKeys))
+		r2Keys = append(r2Keys, marketplaceKeys...)
 		if avatarKeys.AvatarKey.Valid && avatarKeys.AvatarKey.String != "" {
 			r2Keys = append(r2Keys, avatarKeys.AvatarKey.String)
 		}
@@ -332,7 +342,23 @@ func collectUserR2Keys(ctx context.Context, runner txRunner[accountTxStore], use
 			return shared.Wrap(shared.ErrInternal, fmt.Sprintf("delete DM devices: %v", err))
 		}
 
-		// Step 9: tombstone. Username placeholder is
+		// Step 9: remove Marketplace contact grants and user data before
+		// tombstoning. Listing deletion cascades dependent images,
+		// favorites, and reports after their R2 keys have been collected.
+		if err := qtx.DeleteMarketplaceContactsByUser(ctx, userID); err != nil {
+			return shared.Wrap(shared.ErrInternal, fmt.Sprintf("delete Marketplace contacts: %v", err))
+		}
+		if err := qtx.DeleteMarketplaceReportsByUser(ctx, userID); err != nil {
+			return shared.Wrap(shared.ErrInternal, fmt.Sprintf("delete Marketplace reports: %v", err))
+		}
+		if err := qtx.DeleteMarketplaceFavoritesByUser(ctx, userID); err != nil {
+			return shared.Wrap(shared.ErrInternal, fmt.Sprintf("delete Marketplace favorites: %v", err))
+		}
+		if err := qtx.DeleteMarketplaceListingsBySeller(ctx, userID); err != nil {
+			return shared.Wrap(shared.ErrInternal, fmt.Sprintf("delete Marketplace listings: %v", err))
+		}
+
+		// Step 10: tombstone. Username placeholder is
 		// deterministic so the UNIQUE constraint on
 		// username keeps holding.
 		if _, err := qtx.TombstoneUser(ctx, userID); err != nil {

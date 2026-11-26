@@ -124,6 +124,9 @@ services:
       PRESIGN_UPLOAD_EXPIRY: ${PRESIGN_UPLOAD_EXPIRY}
       DM_E2EE_ENABLED:     ${DM_E2EE_ENABLED:-false}
       DM_INBOX_TTL:        ${DM_INBOX_TTL:-168h}
+      MARKETPLACE_ENABLED: ${MARKETPLACE_ENABLED:-true}
+      MARKETPLACE_SWEEP_INTERVAL: ${MARKETPLACE_SWEEP_INTERVAL:-1m}
+      MARKETPLACE_SWEEP_BATCH:    ${MARKETPLACE_SWEEP_BATCH:-100}
     depends_on:
       postgres:
         condition: service_healthy

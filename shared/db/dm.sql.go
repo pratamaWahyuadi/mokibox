@@ -250,6 +250,27 @@ func (q *Queries) DeleteDMDevicesByUser(ctx context.Context, userID uuid.UUID) (
 	return result.RowsAffected()
 }
 
+const deleteDMIdempotencyForPairMessages = `-- name: DeleteDMIdempotencyForPairMessages :execrows
+DELETE FROM dm_idempotency i
+USING dm_inbox m
+WHERE i.message_id = m.message_id
+  AND ((m.sender_user_id = $1 AND m.recipient_user_id = $2)
+    OR (m.sender_user_id = $2 AND m.recipient_user_id = $1))
+`
+
+type DeleteDMIdempotencyForPairMessagesParams struct {
+	SenderID    uuid.UUID `json:"sender_id"`
+	RecipientID uuid.UUID `json:"recipient_id"`
+}
+
+func (q *Queries) DeleteDMIdempotencyForPairMessages(ctx context.Context, arg DeleteDMIdempotencyForPairMessagesParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteDMIdempotencyForPairMessages, arg.SenderID, arg.RecipientID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const deleteDMInboxByUser = `-- name: DeleteDMInboxByUser :execrows
 DELETE FROM dm_inbox
 WHERE sender_user_id = $1 OR recipient_user_id = $1
@@ -257,6 +278,25 @@ WHERE sender_user_id = $1 OR recipient_user_id = $1
 
 func (q *Queries) DeleteDMInboxByUser(ctx context.Context, userID uuid.UUID) (int64, error) {
 	result, err := q.db.ExecContext(ctx, deleteDMInboxByUser, userID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const deleteDMInboxForPair = `-- name: DeleteDMInboxForPair :execrows
+DELETE FROM dm_inbox
+WHERE (sender_user_id = $1 AND recipient_user_id = $2)
+   OR (sender_user_id = $2 AND recipient_user_id = $1)
+`
+
+type DeleteDMInboxForPairParams struct {
+	SenderID    uuid.UUID `json:"sender_id"`
+	RecipientID uuid.UUID `json:"recipient_id"`
+}
+
+func (q *Queries) DeleteDMInboxForPair(ctx context.Context, arg DeleteDMInboxForPairParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteDMInboxForPair, arg.SenderID, arg.RecipientID)
 	if err != nil {
 		return 0, err
 	}
@@ -497,7 +537,7 @@ func (q *Queries) InsertDMOneTimeKey(ctx context.Context, arg InsertDMOneTimeKey
 	return result.RowsAffected()
 }
 
-const isDMMutualFollow = `-- name: IsDMMutualFollow :one
+const isDMRecipientAllowed = `-- name: IsDMRecipientAllowed :one
 SELECT EXISTS (
     SELECT 1
     FROM users sender
@@ -505,24 +545,35 @@ SELECT EXISTS (
     WHERE sender.id = $1
       AND sender.is_active = TRUE
       AND recipient.is_active = TRUE
-      AND EXISTS (
-          SELECT 1 FROM follows
-          WHERE follower_id = sender.id AND followee_id = recipient.id
-      )
-      AND EXISTS (
-          SELECT 1 FROM follows
-          WHERE follower_id = recipient.id AND followee_id = sender.id
+      AND (
+          (
+              EXISTS (
+                  SELECT 1 FROM follows
+                  WHERE follower_id = sender.id AND followee_id = recipient.id
+              )
+              AND EXISTS (
+                  SELECT 1 FROM follows
+                  WHERE follower_id = recipient.id AND followee_id = sender.id
+              )
+          )
+          OR EXISTS (
+              SELECT 1 FROM marketplace_contacts c
+              WHERE ((c.buyer_user_id = sender.id AND c.seller_user_id = recipient.id)
+                     OR (c.buyer_user_id = recipient.id AND c.seller_user_id = sender.id))
+                AND c.revoked_at IS NULL
+                AND c.expires_at > NOW()
+          )
       )
 )
 `
 
-type IsDMMutualFollowParams struct {
+type IsDMRecipientAllowedParams struct {
 	ID   uuid.UUID `json:"id"`
 	ID_2 uuid.UUID `json:"id_2"`
 }
 
-func (q *Queries) IsDMMutualFollow(ctx context.Context, arg IsDMMutualFollowParams) (bool, error) {
-	row := q.db.QueryRowContext(ctx, isDMMutualFollow, arg.ID, arg.ID_2)
+func (q *Queries) IsDMRecipientAllowed(ctx context.Context, arg IsDMRecipientAllowedParams) (bool, error) {
+	row := q.db.QueryRowContext(ctx, isDMRecipientAllowed, arg.ID, arg.ID_2)
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err

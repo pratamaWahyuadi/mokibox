@@ -144,6 +144,7 @@ type stubR2 struct {
 	presignGet func(ctx context.Context, key string, expiry time.Duration) (string, error)
 	headObject func(ctx context.Context, key string) (int64, error)
 	getObject  func(ctx context.Context, key string, maxBytes int64) ([]byte, error)
+	putObject  func(ctx context.Context, key, contentType string, body []byte) error
 }
 
 func (s *stubR2) PresignPut(ctx context.Context, key, contentType string, expiry time.Duration) (string, error) {
@@ -169,6 +170,12 @@ func (s *stubR2) GetObject(ctx context.Context, key string, maxBytes int64) ([]b
 		return nil, errors.New("stubR2: getObject not scripted")
 	}
 	return s.getObject(ctx, key, maxBytes)
+}
+func (s *stubR2) PutObject(ctx context.Context, key, contentType string, body []byte) error {
+	if s.putObject == nil {
+		return errors.New("stubR2: putObject not scripted")
+	}
+	return s.putObject(ctx, key, contentType, body)
 }
 
 // stubEnqueuer records every enqueue call.
@@ -499,14 +506,15 @@ func TestUploadIntent_ReusesPendingRowAndRotatesKey(t *testing.T) {
 
 // stubAccountTx records the delete cascade call order.
 type stubAccountTx struct {
-	listVideoKeys       func(ctx context.Context, userID uuid.UUID) ([]db.ListVideoKeysByUserRow, error)
-	avatarKeys          db.GetUserAvatarKeysRow
-	dmInboxDeleteErr    error
-	dmDeviceDeleteErr   error
-	dmInboxDeletedFor   []uuid.UUID
-	dmDevicesDeletedFor []uuid.UUID
-	tombstoneErr        error
-	calls               []string
+	listVideoKeys        func(ctx context.Context, userID uuid.UUID) ([]db.ListVideoKeysByUserRow, error)
+	marketplaceImageKeys []string
+	avatarKeys           db.GetUserAvatarKeysRow
+	dmInboxDeleteErr     error
+	dmDeviceDeleteErr    error
+	dmInboxDeletedFor    []uuid.UUID
+	dmDevicesDeletedFor  []uuid.UUID
+	tombstoneErr         error
+	calls                []string
 }
 
 func (s *stubAccountTx) ListVideoKeysByUser(ctx context.Context, userID uuid.UUID) ([]db.ListVideoKeysByUserRow, error) {
@@ -519,6 +527,10 @@ func (s *stubAccountTx) ListVideoKeysByUser(ctx context.Context, userID uuid.UUI
 func (s *stubAccountTx) GetUserAvatarKeys(ctx context.Context, id uuid.UUID) (db.GetUserAvatarKeysRow, error) {
 	s.calls = append(s.calls, "GetUserAvatarKeys")
 	return s.avatarKeys, nil
+}
+func (s *stubAccountTx) ListMarketplaceImageKeysBySeller(ctx context.Context, userID uuid.UUID) ([]string, error) {
+	s.calls = append(s.calls, "ListMarketplaceImageKeysBySeller")
+	return s.marketplaceImageKeys, nil
 }
 func (s *stubAccountTx) DecrementLikesForUser(ctx context.Context, userID uuid.UUID) error {
 	s.calls = append(s.calls, "DecrementLikesForUser")
@@ -572,6 +584,22 @@ func (s *stubAccountTx) DeleteDMDevicesByUser(ctx context.Context, userID uuid.U
 	}
 	return 1, nil
 }
+func (s *stubAccountTx) DeleteMarketplaceContactsByUser(ctx context.Context, userID uuid.UUID) error {
+	s.calls = append(s.calls, "DeleteMarketplaceContactsByUser")
+	return nil
+}
+func (s *stubAccountTx) DeleteMarketplaceReportsByUser(ctx context.Context, userID uuid.UUID) error {
+	s.calls = append(s.calls, "DeleteMarketplaceReportsByUser")
+	return nil
+}
+func (s *stubAccountTx) DeleteMarketplaceFavoritesByUser(ctx context.Context, userID uuid.UUID) error {
+	s.calls = append(s.calls, "DeleteMarketplaceFavoritesByUser")
+	return nil
+}
+func (s *stubAccountTx) DeleteMarketplaceListingsBySeller(ctx context.Context, userID uuid.UUID) error {
+	s.calls = append(s.calls, "DeleteMarketplaceListingsBySeller")
+	return nil
+}
 func (s *stubAccountTx) TombstoneUser(ctx context.Context, id uuid.UUID) (db.User, error) {
 	s.calls = append(s.calls, "TombstoneUser")
 	if s.tombstoneErr != nil {
@@ -604,6 +632,7 @@ func TestDeleteMe_HappyPathCascadeAndEnqueue(t *testing.T) {
 				{R2Key: "uploads/x/2/source.mp4"},
 			}, nil
 		},
+		marketplaceImageKeys: []string{"marketplace/listings/1/photo.webp"},
 		avatarKeys: db.GetUserAvatarKeysRow{
 			AvatarKey:        sql.NullString{String: "avatars/user/current.png", Valid: true},
 			PendingAvatarKey: sql.NullString{String: "avatars/user/pending.png", Valid: true},
@@ -630,10 +659,12 @@ func TestDeleteMe_HappyPathCascadeAndEnqueue(t *testing.T) {
 	}
 	// Full cascade order (LLD section 11).
 	wantOrder := []string{
-		"ListVideoKeysByUser", "GetUserAvatarKeys", "DecrementLikesForUser", "DecrementCommentsForUser",
+		"ListVideoKeysByUser", "GetUserAvatarKeys", "ListMarketplaceImageKeysBySeller", "DecrementLikesForUser", "DecrementCommentsForUser",
 		"DeleteVideosByUser", "DeleteFollowsByFollower", "DeleteFollowsByFollowee",
 		"DeleteLikesByUser", "DeleteCommentsByUser", "DeleteNotificationsForUser",
 		"DeleteNotificationsByActor", "DeleteDMInboxByUser", "DeleteDMDevicesByUser",
+		"DeleteMarketplaceContactsByUser", "DeleteMarketplaceReportsByUser",
+		"DeleteMarketplaceFavoritesByUser", "DeleteMarketplaceListingsBySeller",
 		"TombstoneUser",
 	}
 	if len(tx.calls) != len(wantOrder) {
@@ -648,8 +679,8 @@ func TestDeleteMe_HappyPathCascadeAndEnqueue(t *testing.T) {
 		t.Error("successful delete must commit")
 	}
 	// Video and current/pending avatar keys are all removed.
-	if len(enq.cleanupObjectsKeys) != 1 || len(enq.cleanupObjectsKeys[0]) != 5 {
-		t.Errorf("cleanup keys = %+v, want 1 batch with 5 keys", enq.cleanupObjectsKeys)
+	if len(enq.cleanupObjectsKeys) != 1 || len(enq.cleanupObjectsKeys[0]) != 6 {
+		t.Errorf("cleanup keys = %+v, want 1 batch with 6 keys", enq.cleanupObjectsKeys)
 	}
 	user := viewerUser()
 	if len(tx.dmInboxDeletedFor) != 1 || tx.dmInboxDeletedFor[0] != user.ID {

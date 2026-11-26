@@ -4,18 +4,20 @@ Dokumen ini memisahkan pekerjaan yang sudah terverifikasi di PR #82 dari keputus
 
 ## 1. Migrasi environment
 
-Migrasi `009_dm_e2ee.sql`, `010_dm_inbox_sender_fk.sql`, dan `011_dm_fallback_keys.sql` wajib diterapkan di setiap environment sebelum binary baru menerima traffic. Ini berlaku walau flag DM mati, karena cleanup `DELETE /api/users/me` memanggil query DM di dalam transaksi yang sama.
+Migrasi `009_dm_e2ee.sql`, `010_dm_inbox_sender_fk.sql`, `011_dm_fallback_keys.sql`, `012_marketplace.sql`, `013_marketplace_cleanup_outbox.sql`, dan `014_marketplace_location.sql` wajib diterapkan di setiap environment sebelum binary baru menerima traffic. Ini berlaku walau flag DM mati, karena cleanup `DELETE /api/users/me` memanggil query DM dan Marketplace di dalam transaksi yang sama, dan eligibility DM membaca tabel kontak Marketplace.
 
-Pastikan prasyarat `001`, `002`, dan `008` sudah terpasang. Untuk database yang belum punya DM:
+Pastikan prasyarat `001`, `002`, dan `008` sudah terpasang. Untuk database yang belum punya migrasi 009–014:
 
 ```sh
 make db-migrate-dm DB_NAME=<nama_db> COMPOSE="<perintah compose environment>"
+make db-migrate-marketplace DB_NAME=<nama_db> COMPOSE="<perintah compose environment>"
 ```
 
 Untuk database yang sudah punya `009` dari build sebelumnya:
 
 ```sh
 make db-migrate-dm-existing DB_NAME=<nama_db> COMPOSE="<perintah compose environment>"
+make db-migrate-marketplace DB_NAME=<nama_db> COMPOSE="<perintah compose environment>"
 ```
 
 Verifikasi skema:
@@ -26,7 +28,12 @@ psql -h <host> -U <user> -d <nama_db> -Atqc "
      AND to_regclass('dm_fallback_keys') IS NOT NULL
      AND EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_dm_inbox_sender_user')
      AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_dm_inbox_sender_device')
-     AND NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_dm_inbox_sender_user_id')"
+     AND NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_dm_inbox_sender_user_id')
+     AND to_regclass('marketplace_contacts') IS NOT NULL
+     AND EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_name = 'marketplace_contacts' AND column_name = 'revoked_at')
+     AND EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_name = 'marketplace_contacts' AND column_name = 'expires_at')"
 ```
 
 Hasil harus `t`. Database lama yang masih menyimpan `idx_dm_inbox_sender_user_id` hanya mengalami drift index; hapus dengan `DROP INDEX IF EXISTS idx_dm_inbox_sender_user_id;` bila ingin rapi.

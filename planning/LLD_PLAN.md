@@ -1137,3 +1137,30 @@ Menjamin keamanan dan fitur P0 siap demo.
 - [ ] Unit test lewat: `make test`.
 
 Plan ini siap dieksekusi. Jika ada satu keputusan yang harus diubah di tengah jalan, kembalilah ke PRD ini dan catat perubahannya sebagai asumsi baru.
+
+## 16. Marketplace v1 — local backend
+
+Scope ini ditambahkan secara lokal dan tidak membuat branch, commit, atau PR.
+Contract produk/API ada di [desain Marketplace v1](./15_marketplace_v1.md).
+
+1. Tambahkan migration `012_marketplace.sql`, `013_marketplace_cleanup_outbox.sql`,
+   dan `014_marketplace_location.sql`, category seed, constraint, index,
+   cleanup outbox, koordinat lokasi, serta grants untuk `tiktok_api`.
+2. Tambahkan sqlc queries/generated Go code untuk listing browse/detail/owner
+   management, image upload state, favorites, reports, contact grants, dan
+   account deletion cleanup.
+3. Implementasikan authenticated Echo routes dengan presigned R2 image upload,
+   server-side image validation, owner authorization, keyset pagination,
+   private favorites, idempotent reports, dan post-commit object cleanup.
+4. Integrasikan contact grants ke DM key-bundle/send authorization sebagai
+   pengecualian mutual-follow yang hanya terbuka sesudah buyer meminta kontak
+   pada listing aktif.
+5. Tambahkan consumer-side handler test doubles, SQL tests, dan local HTTP /
+   PostgreSQL smoke script. Smoke lokal dijalankan; smoke live/staging menjadi
+   gate production.
+6. Checkout, order lifecycle, payment, shipping, moderation dashboard, public
+   phone/contact data, and UI tetap out of scope.
+
+Migration forward-only 012–014 diterapkan user hanya pada database disposable
+yang sudah memiliki schema 001–011. Production flag/deploy bukan bagian dari
+fase lokal ini.

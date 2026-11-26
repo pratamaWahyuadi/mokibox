@@ -236,7 +236,8 @@ memverifikasinya dengan identity key.
 
 ### `GET /api/dm/users/:id/key-bundle?device_id=uuid&include_one_time_key=true`
 
-Caller harus memiliki device aktif. Target harus aktif dan mutual-follow.
+Caller harus memiliki device aktif. Target harus aktif dan pasangan harus
+mutual-follow, kecuali sudah ada grant kontak Marketplace untuk pasangan itu.
 Response `200` berisi target `user_id`, `device_id`, kedua identity public
 keys, dan default-nya satu one-time key yang diklaim secara atomik. Jika tidak
 ada one-time key, server mengembalikan `fallback_key` yang tersimpan (tidak
@@ -244,13 +245,14 @@ dikonsumsi per sesi). Dengan `include_one_time_key=false`, response hanya berisi
 identity keys dan `one_time_key: null`; client memakai opsi ini untuk
 fingerprint checking agar tidak membakar key. Jika key diminta tetapi neither
 one-time nor fallback key tersedia, response `409 DM_KEY_UNAVAILABLE`. Target
-yang tidak ditemukan atau tidak memenuhi mutual-follow sama-sama
-`404 NOT_FOUND`.
+yang tidak ditemukan, tidak memenuhi mutual-follow, atau hanya memiliki grant
+kontak yang dicabut/kedaluwarsa sama-sama `404 NOT_FOUND`.
 
 ### `POST /api/dm/messages`
 
 Mengirim satu Olm envelope opaque ke target device yang termasuk dalam key bundle yang sudah
-diambil. Caller harus memiliki device aktif dan kedua akun harus mutual-follow.
+diambil. Caller harus memiliki device aktif dan pasangan harus mutual-follow
+atau memiliki grant kontak Marketplace.
 Jika target sudah mengganti device, pengiriman gagal dengan
 `409 DM_DEVICE_STALE`; client harus mengambil bundle dan memverifikasi ulang.
 
@@ -301,7 +303,7 @@ ack berhasil dengan `204`; ciphertext dihapus dari penyimpanan inbox.
 |---|---|---|
 | 400 | `VALIDATION_ERROR` | Body/cursor/encoding tidak valid |
 | 401 | `UNAUTHORIZED` | JWT hilang, invalid, atau user nonaktif |
-| 404 | `NOT_FOUND` | Target tak ada atau mutual-follow tidak terpenuhi |
+| 404 | `NOT_FOUND` | Target tak ada atau tidak ada mutual-follow/grant kontak Marketplace |
 | 409 | `DM_DEVICE_STALE` | Device ID tidak aktif untuk caller atau dimiliki user lain |
 | 409 | `DM_KEY_UNAVAILABLE` | Tidak ada one-time atau fallback key untuk target |
 | 409 | `DM_IDEMPOTENCY_CONFLICT` | ID client dipakai ulang dengan body berbeda |
@@ -309,18 +311,53 @@ ack berhasil dengan `204`; ciphertext dihapus dari penyimpanan inbox.
 | 429 | `RATE_LIMITED` | Per-user DM control (20 burst) atau delivery (120 burst) limiter menolak request |
 | 500 | `INTERNAL_ERROR` | Kegagalan DB/internal; detail hanya di log |
 
-Pengiriman diperiksa mutual-follow pada saat send. Jika follow relation berubah
-setelah enqueue, pesan yang sudah berada di inbox tetap dapat diambil sampai
-ack/expiry. Ini konsekuensi kontrak v1.
+Pengiriman memeriksa mutual-follow atau grant kontak Marketplace yang masih
+aktif pada saat send. Grant Marketplace tetap berlaku setelah listing berubah
+status, tetapi berhenti saat dicabut atau kedaluwarsa; expired grant dapat
+diperbarui dengan memanggil ulang endpoint contact. Pencabutan menghapus
+antrean ciphertext dan idempotency pasangan hanya jika tidak ada grant lain
+atau mutual-follow yang masih mengizinkan pasangan itu. Jika akses hanya
+berasal dari mutual-follow, perubahan follow setelah enqueue tidak mencabut
+pesan yang sudah berada di inbox sebelum ack/expiry.
 
 `GET /api/dm/users/:id/key-bundle` dengan `include_one_time_key=true` mengonsumsi
 satu one-time key target. Klien harus memakai `include_one_time_key=false`
 saat hanya ingin memeriksa fingerprint; rate limit membatasi, tetapi tidak
-menghilangkan, kemungkinan pengurasan key oleh mutual follower.
+menghilangkan, kemungkinan pengurasan key oleh mutual follower atau pasangan
+dengan grant kontak Marketplace.
 
 FK `fk_dm_inbox_sender_user` memakai `ON DELETE RESTRICT`. Deploy saat ini
 hanya tombstone user, sehingga aman. Alur hard-delete di masa depan harus
 menghapus baris inbox DM terlebih dahulu.
+
+## Marketplace — v1 lokal
+
+Kontrak lengkap routes dan payload ada di
+[planning/15_marketplace_v1.md](./15_marketplace_v1.md). Semua endpoint di
+bawah `/api/marketplace` memerlukan JWT dan memakai envelope, pagination,
+serta error format standar.
+
+`GET /api/marketplace/listings` menerima `q`, `category`, `city` (exact,
+case-insensitive), `min_price_idr`, `max_price_idr`, `limit`, `cursor`, serta
+triplet opsional `latitude`, `longitude`, `radius_km` (wajib bersamaan,
+0 < radius ≤ 200 km) yang memfilter listing dengan koordinat valid dan
+mengembalikan `distance_km`. Browse hanya mengembalikan listing `active` milik
+user aktif.
+Harga integer IDR. Detail
+listing `sold` tetap dapat dibaca; `archived` hanya dapat dibaca seller.
+
+Foto diupload ke R2 privat dengan presigned PUT ke kunci sementara. Saat
+konfirmasi, server memvalidasi byte lalu menyalin byte tersebut ke kunci final
+unik per percobaan konfirmasi yang tidak pernah mendapat presigned URL, sehingga
+URL upload tidak dapat menimpa foto aktif dan retry yang kalah tidak dapat
+menghapus objek pemenang. Listing kontak menggunakan
+`POST /api/marketplace/listings/:id/contact`; endpoint ini membuat izin DM
+untuk pasangan buyer/seller setelah memeriksa listing aktif. Izin ini menjadi
+pengecualian eksplisit atas syarat mutual-follow untuk DM, berlaku dua arah
+selama aktif, dan tetap berlaku sesudah status listing berubah. Izin
+kedaluwarsa setelah 30 hari dan bisa dicabut oleh salah satu pihak lewat
+`DELETE /api/marketplace/listings/:id/contact`. Pesan tetap wajib mengikuti
+kontrak Olm opaque ciphertext pada bagian Direct Messages.
 
 ## 1. Daftar Endpoint
 
@@ -331,6 +368,23 @@ menghapus baris inbox DM terlebih dahulu.
 | POST | `/api/users/me/avatar/upload-intent` | Minta presigned URL foto profil | JWT |
 | POST | `/api/users/me/avatar/confirm` | Validasi dan aktifkan foto profil | JWT |
 | DELETE | `/api/users/me` | Hapus akun sendiri + data lokal | JWT |
+| GET | `/api/marketplace/categories` | Daftar kategori barang | JWT |
+| POST | `/api/marketplace/listings` | Buat listing | JWT |
+| GET | `/api/marketplace/listings` | Jelajah/cari/filter listing | JWT |
+| GET | `/api/marketplace/listings/:id` | Detail listing | JWT |
+| PUT | `/api/marketplace/listings/:id` | Edit listing sendiri | JWT |
+| PATCH | `/api/marketplace/listings/:id/status` | Ubah status listing sendiri | JWT |
+| DELETE | `/api/marketplace/listings/:id` | Arsipkan listing sendiri | JWT |
+| GET | `/api/marketplace/me/listings` | Listing milik sendiri | JWT |
+| POST | `/api/marketplace/listings/:id/images/upload-intent` | Minta URL upload foto | JWT |
+| POST | `/api/marketplace/listings/:id/images/:image_id/confirm` | Konfirmasi foto | JWT |
+| DELETE | `/api/marketplace/listings/:id/images/:image_id` | Hapus foto sendiri | JWT |
+| POST | `/api/marketplace/listings/:id/favorite` | Simpan favorit | JWT |
+| DELETE | `/api/marketplace/listings/:id/favorite` | Hapus favorit | JWT |
+| GET | `/api/marketplace/me/favorites` | Favorit milik sendiri | JWT |
+| POST | `/api/marketplace/listings/:id/report` | Laporkan listing | JWT |
+| POST | `/api/marketplace/listings/:id/contact` | Mulai kontak E2EE dengan seller | JWT |
+| DELETE | `/api/marketplace/listings/:id/contact` | Cabut izin kontak dan bersihkan antrean pasangan | JWT |
 | GET | `/api/users/:id` | Profil user lain | JWT |
 | GET | `/api/users/:id/videos` | List video milik user | JWT |
 | POST | `/api/users/:id/follow` | Follow user | JWT |

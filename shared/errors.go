@@ -55,6 +55,11 @@ const (
 	// 409.
 	CodeAvatarUploadConflict ErrorCode = "AVATAR_UPLOAD_CONFLICT"
 
+	// CodeMarketplaceConflict is returned when a listing
+	// mutation conflicts with its current state or image limit.
+	// 409.
+	CodeMarketplaceConflict ErrorCode = "MARKETPLACE_CONFLICT"
+
 	// CodeVideoNotReady is returned when a client tries to
 	// consume a video (play, like, comment) that has not
 	// finished processing. 409.
@@ -125,6 +130,7 @@ var knownErrorCodes = []ErrorCode{
 	CodeNotFound,
 	CodeVideoStatusConflict,
 	CodeAvatarUploadConflict,
+	CodeMarketplaceConflict,
 	CodeVideoNotReady,
 	CodeUploadMissing,
 	CodeUploadSizeInvalid,
@@ -149,6 +155,7 @@ var (
 	ErrNotFound              = errors.New("not found")
 	ErrVideoStatusConflict   = errors.New("video status conflict")
 	ErrAvatarUploadConflict  = errors.New("avatar upload conflict")
+	ErrMarketplaceConflict   = errors.New("marketplace conflict")
 	ErrVideoNotReady         = errors.New("video not ready")
 	ErrUploadMissing         = errors.New("upload missing")
 	ErrUploadSizeInvalid     = errors.New("upload size invalid")
@@ -180,6 +187,8 @@ func httpStatusFor(err error) int {
 	case errors.Is(err, ErrVideoStatusConflict):
 		return http.StatusConflict
 	case errors.Is(err, ErrAvatarUploadConflict):
+		return http.StatusConflict
+	case errors.Is(err, ErrMarketplaceConflict):
 		return http.StatusConflict
 	case errors.Is(err, ErrVideoNotReady):
 		return http.StatusConflict
@@ -227,7 +236,7 @@ func httpStatusForCode(code ErrorCode) int {
 		return http.StatusForbidden
 	case CodeNotFound:
 		return http.StatusNotFound
-	case CodeVideoStatusConflict, CodeAvatarUploadConflict, CodeVideoNotReady, CodeUploadMissing,
+	case CodeVideoStatusConflict, CodeAvatarUploadConflict, CodeMarketplaceConflict, CodeVideoNotReady, CodeUploadMissing,
 		CodeDMDeviceStale, CodeDMKeyUnavailable, CodeDMIdempotencyConflict, CodeDMInboxFull:
 		return http.StatusConflict
 	case CodeRateLimited:
@@ -254,6 +263,8 @@ func codeFor(err error) ErrorCode {
 		return CodeVideoStatusConflict
 	case errors.Is(err, ErrAvatarUploadConflict):
 		return CodeAvatarUploadConflict
+	case errors.Is(err, ErrMarketplaceConflict):
+		return CodeMarketplaceConflict
 	case errors.Is(err, ErrVideoNotReady):
 		return CodeVideoNotReady
 	case errors.Is(err, ErrUploadMissing):
