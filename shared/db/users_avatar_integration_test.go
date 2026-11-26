@@ -292,39 +292,3 @@ func TestUpdateUserProfileIntegration(t *testing.T) {
 		t.Fatalf("UpdateUserProfile missing user: err = %v, want sql.ErrNoRows", err)
 	}
 }
-
-func TestDMBlocksDenyMutualFollowIntegration(t *testing.T) {
-	sqlDB, q := newIntegrationDB(t)
-	ctx := context.Background()
-	first := newTempUser(t, sqlDB, q)
-	second := newTempUser(t, sqlDB, q)
-
-	if err := q.FollowUser(ctx, FollowUserParams{FollowerID: first.ID, FolloweeID: second.ID}); err != nil {
-		t.Fatalf("first follow: %v", err)
-	}
-	if err := q.FollowUser(ctx, FollowUserParams{FollowerID: second.ID, FolloweeID: first.ID}); err != nil {
-		t.Fatalf("second follow: %v", err)
-	}
-	eligible, err := q.IsDMMutualFollow(ctx, IsDMMutualFollowParams{ID: first.ID, ID_2: second.ID})
-	if err != nil || !eligible {
-		t.Fatalf("mutual follow eligible = %t, err = %v", eligible, err)
-	}
-
-	blocked, err := q.InsertDMBlock(ctx, InsertDMBlockParams{BlockerID: second.ID, BlockedID: first.ID})
-	if err != nil || blocked != 1 {
-		t.Fatalf("insert block rows = %d, err = %v", blocked, err)
-	}
-	eligible, err = q.IsDMMutualFollow(ctx, IsDMMutualFollowParams{ID: first.ID, ID_2: second.ID})
-	if err != nil || eligible {
-		t.Fatalf("blocked pair eligible = %t, err = %v", eligible, err)
-	}
-
-	unblocked, err := q.DeleteDMBlock(ctx, DeleteDMBlockParams{BlockerID: second.ID, BlockedID: first.ID})
-	if err != nil || unblocked != 1 {
-		t.Fatalf("delete block rows = %d, err = %v", unblocked, err)
-	}
-	eligible, err = q.IsDMMutualFollow(ctx, IsDMMutualFollowParams{ID: first.ID, ID_2: second.ID})
-	if err != nil || !eligible {
-		t.Fatalf("unblocked pair eligible = %t, err = %v", eligible, err)
-	}
-}

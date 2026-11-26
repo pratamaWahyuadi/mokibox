@@ -21,67 +21,6 @@ type Comment struct {
 	CreatedAt time.Time     `json:"created_at"`
 }
 
-type DmBlock struct {
-	BlockerID uuid.UUID `json:"blocker_id"`
-	BlockedID uuid.UUID `json:"blocked_id"`
-	CreatedAt time.Time `json:"created_at"`
-}
-
-type DmDevice struct {
-	DeviceID           uuid.UUID `json:"device_id"`
-	UserID             uuid.UUID `json:"user_id"`
-	IdentityCurve25519 string    `json:"identity_curve25519"`
-	IdentityEd25519    string    `json:"identity_ed25519"`
-	NextInboxSequence  int64     `json:"next_inbox_sequence"`
-	CreatedAt          time.Time `json:"created_at"`
-}
-
-type DmFallbackKey struct {
-	DeviceID  uuid.UUID `json:"device_id"`
-	KeyID     string    `json:"key_id"`
-	PublicKey string    `json:"public_key"`
-	Signature string    `json:"signature"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-}
-
-type DmIdempotency struct {
-	SenderDeviceID   uuid.UUID     `json:"sender_device_id"`
-	ClientMessageID  uuid.UUID     `json:"client_message_id"`
-	RequestDigest    []byte        `json:"request_digest"`
-	MessageID        uuid.UUID     `json:"message_id"`
-	ResponseSequence sql.NullInt64 `json:"response_sequence"`
-	CreatedAt        time.Time     `json:"created_at"`
-	ExpiresAt        time.Time     `json:"expires_at"`
-}
-
-type DmInbox struct {
-	MessageID         uuid.UUID    `json:"message_id"`
-	SenderUserID      uuid.UUID    `json:"sender_user_id"`
-	SenderDeviceID    uuid.UUID    `json:"sender_device_id"`
-	RecipientUserID   uuid.UUID    `json:"recipient_user_id"`
-	RecipientDeviceID uuid.UUID    `json:"recipient_device_id"`
-	Sequence          int64        `json:"sequence"`
-	ClientMessageID   uuid.UUID    `json:"client_message_id"`
-	Protocol          string       `json:"protocol"`
-	ProtocolVersion   int16        `json:"protocol_version"`
-	MessageType       int16        `json:"message_type"`
-	Ciphertext        []byte       `json:"ciphertext"`
-	CreatedAt         time.Time    `json:"created_at"`
-	ExpiresAt         time.Time    `json:"expires_at"`
-	AcknowledgedAt    sql.NullTime `json:"acknowledged_at"`
-}
-
-type DmOneTimeKey struct {
-	ID        uuid.UUID    `json:"id"`
-	DeviceID  uuid.UUID    `json:"device_id"`
-	KeyID     string       `json:"key_id"`
-	PublicKey string       `json:"public_key"`
-	Signature string       `json:"signature"`
-	CreatedAt time.Time    `json:"created_at"`
-	ClaimedAt sql.NullTime `json:"claimed_at"`
-}
-
 type Follow struct {
 	FollowerID uuid.UUID `json:"follower_id"`
 	FolloweeID uuid.UUID `json:"followee_id"`
