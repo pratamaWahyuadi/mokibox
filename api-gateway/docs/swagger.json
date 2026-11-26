@@ -21,7 +21,8 @@
     {"name": "Search", "description": "Search users and videos."},
     {"name": "Social", "description": "Like, view tracking, comments, replies."},
     {"name": "Notifications", "description": "Notification inbox."},
-    {"name": "Account", "description": "Self-service account deletion."}
+    {"name": "Account", "description": "Self-service account deletion."},
+    {"name": "Direct Messages", "description": "E2EE DM relay (enabled by DM_E2EE_ENABLED). Opaque ciphertext only; the server never decrypts messages."}
   ],
   "security": [
     {"zitadelOAuth": ["openid","profile","email","urn:zitadel:iam:org:project:id:392147270604222467:aud"]}
@@ -670,6 +671,147 @@
           "401": {"$ref": "#/components/responses/Unauthorized"}
         }
       }
+    },
+    "/api/dm/device": {
+      "post": {
+        "tags": ["Direct Messages"],
+        "operationId": "registerDMDevice",
+        "summary": "Register or rotate the caller's E2EE DM device.",
+        "description": "Requires DM_E2EE_ENABLED=true. device_id and identity keys are public key material; private keys are never sent. Re-registering with a new device_id replaces the old device and invalidates its one-time keys.",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DMRegisterDeviceRequest"}}}
+        },
+        "responses": {
+          "200": {
+            "description": "Device registered or replaced",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DMRegisterDeviceResponse"}}}
+          },
+          "400": {"$ref": "#/components/responses/Validation"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "409": {"description": "Stale device or conflicting registration (DM_DEVICE_STALE).", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+          "429": {"$ref": "#/components/responses/RateLimited"}
+        }
+      }
+    },
+    "/api/dm/device/one-time-keys": {
+      "post": {
+        "tags": ["Direct Messages"],
+        "operationId": "uploadDMOneTimeKeys",
+        "summary": "Upload one-time keys (and optional fallback key) for the registered device.",
+        "description": "Requires DM_E2EE_ENABLED=true. Keys are stored as public material only and consumed one at a time when another user fetches a key bundle.",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DMUploadKeysRequest"}}}
+        },
+        "responses": {
+          "200": {
+            "description": "Upload result",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DMUploadKeysResponse"}}}
+          },
+          "400": {"$ref": "#/components/responses/Validation"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "409": {"description": "Stale device or duplicate key id (DM_DEVICE_STALE / DM_KEY_UNAVAILABLE).", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+          "429": {"$ref": "#/components/responses/RateLimited"}
+        }
+      }
+    },
+    "/api/dm/users/{id}/key-bundle": {
+      "get": {
+        "tags": ["Direct Messages"],
+        "operationId": "getDMKeyBundle",
+        "summary": "Fetch a recipient's public key bundle.",
+        "description": "Requires DM_E2EE_ENABLED=true. Mutual followers or an active Marketplace contact grant may fetch the bundle. One-time keys are consumed; include_one_time_key=false allows fingerprint inspection without consuming one.",
+        "parameters": [
+          {"$ref": "#/components/parameters/UserId"},
+          {"name": "device_id", "in": "query", "required": true, "description": "Caller's registered DM device UUID.", "schema": {"type": "string", "format": "uuid"}},
+          {"name": "include_one_time_key", "in": "query", "required": false, "description": "Consume and return one one-time key. Default true.", "schema": {"type": "boolean", "default": true}}
+        ],
+        "responses": {
+          "200": {
+            "description": "Public key bundle",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DMKeyBundle"}}}
+          },
+          "400": {"$ref": "#/components/responses/Validation"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"description": "Caller is neither a mutual follower nor an active contact-grant holder.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+          "409": {"description": "Caller device is stale (DM_DEVICE_STALE).", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+          "429": {"$ref": "#/components/responses/RateLimited"}
+        }
+      }
+    },
+    "/api/dm/messages": {
+      "post": {
+        "tags": ["Direct Messages"],
+        "operationId": "sendDMMessage",
+        "summary": "Send an opaque ciphertext message to another device.",
+        "description": "Requires DM_E2EE_ENABLED=true. Only olm protocol version 1 is accepted. The relay stores ciphertext only and expires messages after DM_INBOX_TTL (168h).",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DMSendRequest"}}}
+        },
+        "responses": {
+          "201": {
+            "description": "Message stored",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DMSendResponse"}}}
+          },
+          "200": {
+            "description": "Idempotent replay of an existing client_message_id",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DMSendResponse"}}}
+          },
+          "400": {"$ref": "#/components/responses/Validation"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"description": "Recipient is not authorized for this caller (not a mutual follower or active contact grant).", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+          "409": {"description": "Stale device or idempotency conflict (DM_DEVICE_STALE / DM_IDEMPOTENCY_CONFLICT).", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+          "429": {"$ref": "#/components/responses/RateLimited"}
+        }
+      }
+    },
+    "/api/dm/inbox": {
+      "get": {
+        "tags": ["Direct Messages"],
+        "operationId": "pollDMInbox",
+        "summary": "Poll pending ciphertext messages for the registered device.",
+        "description": "Requires DM_E2EE_ENABLED=true. Returned messages are not marked delivered; call POST /api/dm/inbox/{message_id}/ack after the client has stored them.",
+        "parameters": [
+          {"name": "device_id", "in": "query", "required": true, "description": "Registered DM device UUID.", "schema": {"type": "string", "format": "uuid"}},
+          {"name": "after", "in": "query", "required": true, "description": "Exclusive sequence cursor (non-negative integer); use 0 for the first poll and next_after for subsequent polls.", "schema": {"type": "integer", "format": "int64", "minimum": 0}},
+          {"name": "limit", "in": "query", "required": false, "description": "Page size (1–100). Default 100.", "schema": {"type": "integer", "default": 100, "minimum": 1, "maximum": 100}}
+        ],
+        "responses": {
+          "200": {
+            "description": "Pending messages",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DMPollResponse"}}}
+          },
+          "400": {"$ref": "#/components/responses/Validation"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "409": {"description": "Stale device (DM_DEVICE_STALE).", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+          "429": {"$ref": "#/components/responses/RateLimited"}
+        }
+      }
+    },
+    "/api/dm/inbox/{message_id}/ack": {
+      "post": {
+        "tags": ["Direct Messages"],
+        "operationId": "acknowledgeDMInboxMessage",
+        "summary": "Acknowledge a delivered ciphertext message.",
+        "description": "Requires DM_E2EE_ENABLED=true. Idempotent: repeated acks return 204. The device must match the message recipient device.",
+        "parameters": [
+          {"name": "message_id", "in": "path", "required": true, "description": "DM message UUID.", "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DMAckRequest"}}}
+        },
+        "responses": {
+          "204": {"description": "Acknowledged (also returned for repeated acks)"},
+          "400": {"$ref": "#/components/responses/Validation"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"description": "Stale device (DM_DEVICE_STALE).", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+          "429": {"$ref": "#/components/responses/RateLimited"}
+        }
+      }
     }
   },
   "components": {
@@ -1257,6 +1399,122 @@
           }
         },
         "required": ["data", "pagination"]
+      },
+      "DMRegisterDeviceRequest": {
+        "type": "object",
+        "description": "POST /api/dm/device body. Only public key material is sent; private keys stay on the client.",
+        "required": ["device_id", "identity_curve25519", "identity_ed25519"],
+        "properties": {
+          "device_id": {"type": "string", "format": "uuid"},
+          "identity_curve25519": {"type": "string", "description": "Base64url X25519 identity public key."},
+          "identity_ed25519": {"type": "string", "description": "Base64url Ed25519 identity public key."}
+        }
+      },
+      "DMRegisterDeviceResponse": {
+        "type": "object",
+        "required": ["device_id", "replaced_device"],
+        "properties": {
+          "device_id": {"type": "string", "format": "uuid"},
+          "replaced_device": {"type": "boolean", "description": "True when a previous device was replaced by this registration."}
+        }
+      },
+      "DMOneTimeKey": {
+        "type": "object",
+        "description": "Base64url public one-time key material with its Ed25519 signature.",
+        "required": ["key_id", "public_key", "signature"],
+        "properties": {
+          "key_id": {"type": "string"},
+          "public_key": {"type": "string"},
+          "signature": {"type": "string"}
+        }
+      },
+      "DMUploadKeysRequest": {
+        "type": "object",
+        "required": ["device_id", "keys"],
+        "properties": {
+          "device_id": {"type": "string", "format": "uuid"},
+          "keys": {"type": "array", "items": {"$ref": "#/components/schemas/DMOneTimeKey"}},
+          "fallback_key": {"nullable": true, "allOf": [{"$ref": "#/components/schemas/DMOneTimeKey"}]}
+        }
+      },
+      "DMUploadKeysResponse": {
+        "type": "object",
+        "required": ["accepted"],
+        "properties": {
+          "accepted": {"type": "integer", "minimum": 0}
+        }
+      },
+      "DMKeyBundle": {
+        "type": "object",
+        "description": "Recipient's public key bundle. one_time_key is consumed when present; fallback_key is only present when the recipient uploaded one.",
+        "required": ["user_id", "device_id", "identity_curve25519", "identity_ed25519", "one_time_key", "fallback_key"],
+        "properties": {
+          "user_id": {"type": "string", "format": "uuid"},
+          "device_id": {"type": "string", "format": "uuid"},
+          "identity_curve25519": {"type": "string"},
+          "identity_ed25519": {"type": "string"},
+          "one_time_key": {"nullable": true, "allOf": [{"$ref": "#/components/schemas/DMOneTimeKey"}]},
+          "fallback_key": {"nullable": true, "allOf": [{"$ref": "#/components/schemas/DMOneTimeKey"}]}
+        }
+      },
+      "DMSendRequest": {
+        "type": "object",
+        "description": "POST /api/dm/messages body. ciphertext is opaque to the server; only olm protocol version 1 is accepted.",
+        "required": ["device_id", "recipient_user_id", "recipient_device_id", "client_message_id", "protocol", "protocol_version", "message_type", "ciphertext"],
+        "properties": {
+          "device_id": {"type": "string", "format": "uuid"},
+          "recipient_user_id": {"type": "string", "format": "uuid"},
+          "recipient_device_id": {"type": "string", "format": "uuid"},
+          "client_message_id": {"type": "string", "format": "uuid", "description": "Client-generated idempotency key."},
+          "protocol": {"type": "string", "enum": ["olm"]},
+          "protocol_version": {"type": "integer", "enum": [1]},
+          "message_type": {"type": "integer", "minimum": 0},
+          "ciphertext": {"type": "string", "description": "Base64url opaque ciphertext; never decrypted by the relay."}
+        }
+      },
+      "DMSendResponse": {
+        "type": "object",
+        "required": ["message_id", "sequence", "expires_at"],
+        "properties": {
+          "message_id": {"type": "string", "format": "uuid"},
+          "sequence": {"type": "integer", "format": "int64"},
+          "expires_at": {"type": "string", "format": "date-time"}
+        }
+      },
+      "DMInboxMessage": {
+        "type": "object",
+        "description": "Opaque ciphertext delivered by GET /api/dm/inbox.",
+        "required": ["message_id", "sender_user_id", "sender_device_id", "recipient_user_id", "recipient_device_id", "sequence", "protocol", "protocol_version", "message_type", "ciphertext", "created_at", "expires_at"],
+        "properties": {
+          "message_id": {"type": "string", "format": "uuid"},
+          "sender_user_id": {"type": "string", "format": "uuid"},
+          "sender_device_id": {"type": "string", "format": "uuid"},
+          "recipient_user_id": {"type": "string", "format": "uuid"},
+          "recipient_device_id": {"type": "string", "format": "uuid"},
+          "sequence": {"type": "integer", "format": "int64"},
+          "protocol": {"type": "string", "enum": ["olm"]},
+          "protocol_version": {"type": "integer", "enum": [1]},
+          "message_type": {"type": "integer"},
+          "ciphertext": {"type": "string"},
+          "created_at": {"type": "string", "format": "date-time"},
+          "expires_at": {"type": "string", "format": "date-time"}
+        }
+      },
+      "DMPollResponse": {
+        "type": "object",
+        "required": ["messages", "next_after", "has_more"],
+        "properties": {
+          "messages": {"type": "array", "items": {"$ref": "#/components/schemas/DMInboxMessage"}},
+          "next_after": {"type": "integer", "format": "int64"},
+          "has_more": {"type": "boolean"}
+        }
+      },
+      "DMAckRequest": {
+        "type": "object",
+        "required": ["device_id"],
+        "properties": {
+          "device_id": {"type": "string", "format": "uuid"}
+        }
       }
     },
     "responses": {
