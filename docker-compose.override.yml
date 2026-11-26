@@ -19,7 +19,7 @@
 #     the nginx container. Useful for in-Docker
 #     resolution from other services (e.g. Zitadel
 #     Actions V2 webhook calling back to
-#     mokiboxapi.binery.my.id, or worker smoke using the
+#     api.mokibox.my.id, or worker smoke using the
 #     same alias).
 #
 #  3. Mounts deploy/nginx/local.conf (HTTP-only,
@@ -58,12 +58,12 @@ services:
     networks:
       backend:
         aliases:
-          - auth.binery.my.id
-          - mokiboxapi.binery.my.id
+          - auth.mokibox.my.id
+          - api.mokibox.my.id
       zitadel:
         aliases:
-          - auth.binery.my.id
-          - mokiboxapi.binery.my.id
+          - auth.mokibox.my.id
+          - api.mokibox.my.id
 
   # -------------------------------------------------
   # api-gateway - attach to zitadel network so it

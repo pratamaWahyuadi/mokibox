@@ -3,14 +3,13 @@
 # integration_test.sh - MokiBox end-to-end integration
 # smoke test (Fase 10, issue #30).
 #
-# Runs the full user journey against the LOCAL real-domain
-# environment (see deploy/nginx/local.conf +
-# docker-compose.override.yml, commit phase-10.1; domain
-# migration 2026-09-09 swapped *.localhost for the real
-# trio resolved via /etc/hosts):
+# Runs the full user journey (env-driven; nilai aktual dibaca
+# dari API_BASE_URL / ZITADEL_ISSUER_URL di .env atau ENV_FILE).
 #
-#   auth.binery.my.id     -> Zitadel (via Traefik, cross-network)
-#   mokiboxapi.binery.my.id -> MokiBox api-gateway
+# Infra produksi SAAT INI (2026-11+): backend
+# https://api.mokibox.my.id, Zitadel https://auth.mokibox.my.id,
+# frontend apex https://mokibox.my.id. Riwayat domain lama
+# (*.binery.my.id) hanya ada di dokumen runbook historis.
 #
 # Prerequisites (documented in HANDOFF.md "Local E2E
 # environment" section):
@@ -18,10 +17,10 @@
 #   1. MokiBox .env has real values for:
 #      ZITADEL_CLIENT_ID, ZITADEL_API_CLIENT_ID,
 #      ZITADEL_CLIENT_SECRET, ZITADEL_TARGET_SIGNING_KEY,
-#      ZITADEL_ISSUER_URL=http://auth.binery.my.id,
-#      API_BASE_URL=http://mokiboxapi.binery.my.id
+#      ZITADEL_ISSUER_URL, API_BASE_URL (contoh produksi:
+#      https://auth.mokibox.my.id dan https://api.mokibox.my.id)
 #   2. zitadel-compose is UP with the domain override
-#      (ZITADEL_DOMAIN=auth.binery.my.id) and the
+#      (ZITADEL_DOMAIN=auth.mokibox.my.id) and the
 #      docker-compose.override.yml HTTPClient deny-list
 #      override ( zitadel-compose/ is gitignored; the
 #      override file content is reproduced in this
@@ -31,7 +30,7 @@
 #      users (test1/test2) with passwords set, and an
 #      Actions V2 target + executions
 #      (user.deactivated, user.removed) pointing at
-#      http://mokiboxapi.binery.my.id/api/webhooks/zitadel.
+#      $API_BASE/api/webhooks/zitadel.
 #   4. The login-client PAT is available from the
 #      zitadel-bootstrap volume (used for the headless
 #      session login; see login() below).
@@ -52,8 +51,8 @@ set -uo pipefail
 ENV_FILE="${ENV_FILE:-.env}"
 API="${API:-$(grep -E '^API_BASE_URL=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)}"
 AUTH="${AUTH:-$(grep -E '^ZITADEL_ISSUER_URL=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)}"
-API="${API:-http://mokiboxapi.binery.my.id}"
-AUTH="${AUTH:-http://auth.binery.my.id}"
+API="${API:-http://api.mokibox.my.id}"
+AUTH="${AUTH:-http://auth.mokibox.my.id}"
 REDIRECT_URI="$API/callback"
 VIDEO_OUT="/tmp/mokibox-itest.mp4"
 POLL_TIMEOUT="${POLL_TIMEOUT:-300}"     # 5 min for transcode

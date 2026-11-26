@@ -418,13 +418,13 @@ di-manage terpisah, di-host yang sama:
   start. Production: mount dari secret manager atau
   certbot. Phase 9 own.
 
-### Production VPS multi-tenant (aaPanel edge) — LIVE-VERIFIED 2026-09-24
+### Production VPS multi-tenant (aaPanel edge) — LIVE-VERIFIED 2026-09-24, API-domain migrasi 2026-11 → api.mokibox.my.id
 
 Deploy ke VPS `43.157.227.130` multi-tenant (9 container tenant lain + aaPanel + host processes) dengan aaPanel nginx sebagai edge:
 
 **Topologi:**
 - Internet → aaPanel nginx host (:80/:443, TLS di sini)
-  - `mokiboxapi.binery.my.id` → `proxy_pass http://127.0.0.1:8180` (mokibox-api-gateway publish host loopback)
+  - `api.mokibox.my.id` → `proxy_pass http://127.0.0.1:8180` (mokibox-api-gateway publish host loopback; migrasi dari `mokiboxapi.binery.my.id` 2026-11)
   - `auth.mokibox.my.id` → `proxy_pass http://127.0.0.1:8181` (Zitadel Traefik publish host loopback)
   - `mokibox-nginx` container TIDAK jalan (nginx `profiles:[disabled]` di `docker-compose.prod.yml`)
 
