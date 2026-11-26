@@ -237,6 +237,37 @@ func (q *Queries) CreateDMInboxMessage(ctx context.Context, arg CreateDMInboxMes
 	return i, err
 }
 
+const deleteDMBlock = `-- name: DeleteDMBlock :execrows
+DELETE FROM dm_blocks
+WHERE blocker_id = $1 AND blocked_id = $2
+`
+
+type DeleteDMBlockParams struct {
+	BlockerID uuid.UUID `json:"blocker_id"`
+	BlockedID uuid.UUID `json:"blocked_id"`
+}
+
+func (q *Queries) DeleteDMBlock(ctx context.Context, arg DeleteDMBlockParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteDMBlock, arg.BlockerID, arg.BlockedID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const deleteDMBlocksByUser = `-- name: DeleteDMBlocksByUser :execrows
+DELETE FROM dm_blocks
+WHERE blocker_id = $1 OR blocked_id = $1
+`
+
+func (q *Queries) DeleteDMBlocksByUser(ctx context.Context, userID uuid.UUID) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteDMBlocksByUser, userID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const deleteDMDevicesByUser = `-- name: DeleteDMDevicesByUser :execrows
 DELETE FROM dm_devices
 WHERE user_id = $1
@@ -250,6 +281,31 @@ func (q *Queries) DeleteDMDevicesByUser(ctx context.Context, userID uuid.UUID) (
 	return result.RowsAffected()
 }
 
+const deleteDMIdempotencyForPairMessages = `-- name: DeleteDMIdempotencyForPairMessages :execrows
+DELETE FROM dm_idempotency
+WHERE sender_device_id IN (
+    SELECT device_id FROM dm_devices WHERE user_id = $1
+)
+AND EXISTS (
+    SELECT 1 FROM dm_inbox
+    WHERE dm_inbox.message_id = dm_idempotency.message_id
+      AND dm_inbox.recipient_user_id = $2
+)
+`
+
+type DeleteDMIdempotencyForPairMessagesParams struct {
+	SenderID    uuid.UUID `json:"sender_id"`
+	RecipientID uuid.UUID `json:"recipient_id"`
+}
+
+func (q *Queries) DeleteDMIdempotencyForPairMessages(ctx context.Context, arg DeleteDMIdempotencyForPairMessagesParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteDMIdempotencyForPairMessages, arg.SenderID, arg.RecipientID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const deleteDMInboxByUser = `-- name: DeleteDMInboxByUser :execrows
 DELETE FROM dm_inbox
 WHERE sender_user_id = $1 OR recipient_user_id = $1
@@ -257,6 +313,24 @@ WHERE sender_user_id = $1 OR recipient_user_id = $1
 
 func (q *Queries) DeleteDMInboxByUser(ctx context.Context, userID uuid.UUID) (int64, error) {
 	result, err := q.db.ExecContext(ctx, deleteDMInboxByUser, userID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const deleteDMInboxForPair = `-- name: DeleteDMInboxForPair :execrows
+DELETE FROM dm_inbox
+WHERE sender_user_id = $1 AND recipient_user_id = $2
+`
+
+type DeleteDMInboxForPairParams struct {
+	SenderID    uuid.UUID `json:"sender_id"`
+	RecipientID uuid.UUID `json:"recipient_id"`
+}
+
+func (q *Queries) DeleteDMInboxForPair(ctx context.Context, arg DeleteDMInboxForPairParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteDMInboxForPair, arg.SenderID, arg.RecipientID)
 	if err != nil {
 		return 0, err
 	}
@@ -471,6 +545,25 @@ func (q *Queries) GetDMTargetDevice(ctx context.Context, userID uuid.UUID) (DmDe
 	return i, err
 }
 
+const insertDMBlock = `-- name: InsertDMBlock :execrows
+INSERT INTO dm_blocks (blocker_id, blocked_id)
+VALUES ($1, $2)
+ON CONFLICT DO NOTHING
+`
+
+type InsertDMBlockParams struct {
+	BlockerID uuid.UUID `json:"blocker_id"`
+	BlockedID uuid.UUID `json:"blocked_id"`
+}
+
+func (q *Queries) InsertDMBlock(ctx context.Context, arg InsertDMBlockParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, insertDMBlock, arg.BlockerID, arg.BlockedID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const insertDMOneTimeKey = `-- name: InsertDMOneTimeKey :execrows
 INSERT INTO dm_one_time_keys (device_id, key_id, public_key, signature)
 VALUES ($1, $2, $3, $4)
@@ -505,6 +598,11 @@ SELECT EXISTS (
     WHERE sender.id = $1
       AND sender.is_active = TRUE
       AND recipient.is_active = TRUE
+      AND NOT EXISTS (
+          SELECT 1 FROM dm_blocks
+          WHERE (blocker_id = sender.id AND blocked_id = recipient.id)
+             OR (blocker_id = recipient.id AND blocked_id = sender.id)
+      )
       AND EXISTS (
           SELECT 1 FROM follows
           WHERE follower_id = sender.id AND followee_id = recipient.id

@@ -4,7 +4,7 @@ Dokumen ini memisahkan pekerjaan yang sudah terverifikasi di PR #82 dari keputus
 
 ## 1. Migrasi environment
 
-Migrasi `009_dm_e2ee.sql`, `010_dm_inbox_sender_fk.sql`, dan `011_dm_fallback_keys.sql` wajib diterapkan di setiap environment sebelum binary baru menerima traffic. Ini berlaku walau flag DM mati, karena cleanup `DELETE /api/users/me` memanggil query DM di dalam transaksi yang sama.
+Migrasi `009_dm_e2ee.sql`, `010_dm_inbox_sender_fk.sql`, `011_dm_fallback_keys.sql`, dan `015_dm_authorization_hardening.sql` wajib diterapkan di setiap environment sebelum binary baru menerima traffic. Ini berlaku walau flag DM mati, karena cleanup `DELETE /api/users/me` memanggil query DM di dalam transaksi yang sama.
 
 Pastikan prasyarat `001`, `002`, dan `008` sudah terpasang. Untuk database yang belum punya DM:
 

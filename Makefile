@@ -83,21 +83,21 @@ db-migrate-avatar: ## Apply migrations/008_user_avatar_upload.sql before deployi
 		psql -U $(POSTGRES_USER) -d $(DB_NAME) -v ON_ERROR_STOP=1
 
 .PHONY: db-migrate-dm
-db-migrate-dm: ## Apply E2EE DM migrations (009-011, forward-only).
-	@for migration in 009_dm_e2ee.sql 010_dm_inbox_sender_fk.sql 011_dm_fallback_keys.sql; do \
+db-migrate-dm: ## Apply E2EE DM migrations (009-011, 015; forward-only).
+	@for migration in 009_dm_e2ee.sql 010_dm_inbox_sender_fk.sql 011_dm_fallback_keys.sql 015_dm_authorization_hardening.sql; do \
 		if [ ! -f $(MIGRATIONS)/$$migration ]; then \
 			echo "ERROR: $(MIGRATIONS)/$$migration not found."; \
 			exit 1; \
 		fi; \
 	done
-	@for migration in 009_dm_e2ee.sql 010_dm_inbox_sender_fk.sql 011_dm_fallback_keys.sql; do \
+	@for migration in 009_dm_e2ee.sql 010_dm_inbox_sender_fk.sql 011_dm_fallback_keys.sql 015_dm_authorization_hardening.sql; do \
 		cat $(MIGRATIONS)/$$migration | $(COMPOSE) exec -T $(SERVICE_DB) \
 			psql -U $(POSTGRES_USER) -d $(DB_NAME) -v ON_ERROR_STOP=1 || exit 1; \
 	done
 
 .PHONY: db-migrate-dm-existing
-db-migrate-dm-existing: ## Apply DM 010-011 to a database that already has 009.
-	@for migration in 010_dm_inbox_sender_fk.sql 011_dm_fallback_keys.sql; do \
+db-migrate-dm-existing: ## Apply DM 010-011 and 015 to a database that already has 009.
+	@for migration in 010_dm_inbox_sender_fk.sql 011_dm_fallback_keys.sql 015_dm_authorization_hardening.sql; do \
 		cat $(MIGRATIONS)/$$migration | $(COMPOSE) exec -T $(SERVICE_DB) \
 			psql -U $(POSTGRES_USER) -d $(DB_NAME) -v ON_ERROR_STOP=1 || exit 1; \
 	done
