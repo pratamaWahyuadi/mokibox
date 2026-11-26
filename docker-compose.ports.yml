@@ -2,3 +2,13 @@ services:
   api-gateway:
     ports:
       - "127.0.0.1:8180:8080"
+
+# Pin subnet jaringan backend agar TRUSTED_PROXY_CIDRS stabil.
+# Lihat prompts/IMPL-A-... §Tahap 0 dan HANDOFF.md.
+networks:
+  backend:
+    name: mokibox_backend
+    ipam:
+      config:
+        - subnet: 192.168.144.0/20
+          gateway: 192.168.144.1
