@@ -124,17 +124,20 @@ only its bounded ciphertext queue supports offline recipients.
   Account deletion removes all DM inbox rows where the user is sender or
   recipient, plus device keys, fallback keys and idempotency records, in its
   existing transaction. This runs even when the DM feature flag is off, so the
-  009-014 migrations are mandatory for every deployment and must be applied
-  before the new binary takes traffic. Sent inbox rows reference the sender
+  009-015 migrations are mandatory for every deployment and must be applied
+  before the new binary takes traffic. Migration 015 adds two-way `dm_blocks`;
+  a block denies key-bundle and send eligibility in both directions, including
+  an active Marketplace contact grant, and purges pair state. Sent inbox rows
+  reference the sender
   user (not the short-lived device), so re-registering a device does not delete
   delivery history. The v1 privacy decision is one-sided: deleting an account
   also removes messages that account sent but whose recipients have not polled
   them yet; the alternative would retain deleted-user ciphertext in the relay.
-- `GET /api/dm/users/:id/key-bundle` with `include_one_time_key=true` claims a
-  one-time key and advances that device's key pool. Clients should use
-  `include_one_time_key=false` for fingerprint inspection; rate limits bound
-  but do not eliminate one-time-key draining by mutual followers or contact
-  pairs.
+- `GET /api/dm/users/:id/key-bundle` defaults to fingerprint-only inspection and
+  only claims a one-time key with `include_one_time_key=true`. The key-bundle
+  limiter is scoped to `(caller, target)` so one client cannot drain a target's
+  key pool by cycling callers. Eligible mutual followers and active Marketplace
+  contact pairs are both subject to two-way blocks.
 - `fk_dm_inbox_sender_user` uses `ON DELETE RESTRICT`. The deployment only
   tombstones users, so this is safe. A future hard-delete flow must purge DM
   inbox rows first.
@@ -147,7 +150,7 @@ only its bounded ciphertext queue supports offline recipients.
 1. Go handler tests exercise the public HTTP contract with a test verifier and
    consumer-side store doubles.
 2. `scripts/smoketest/dm` runs against real HTTP + PostgreSQL and covers the
-   009-014 schema, `FOR UPDATE SKIP LOCKED`, idempotency upsert, register,
+   009-015 schema, `FOR UPDATE SKIP LOCKED`, idempotency upsert, register,
    upload, send, poll and ack. Its recorded results are in
    `scripts/smoketest/dm/README.md`.
 3. The Go SDK integration tests in `clients/dm` cover a local Olm end-to-end run

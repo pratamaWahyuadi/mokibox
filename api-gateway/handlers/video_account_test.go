@@ -586,6 +586,10 @@ func (s *stubAccountTx) DeleteDMDevicesByUser(ctx context.Context, userID uuid.U
 	}
 	return 1, nil
 }
+func (s *stubAccountTx) DeleteDMBlocksByUser(ctx context.Context, userID uuid.UUID) (int64, error) {
+	s.calls = append(s.calls, "DeleteDMBlocksByUser")
+	return 1, nil
+}
 func (s *stubAccountTx) DeleteMarketplaceContactsByUser(ctx context.Context, userID uuid.UUID) error {
 	s.calls = append(s.calls, "DeleteMarketplaceContactsByUser")
 	return nil
@@ -673,7 +677,7 @@ func TestDeleteMe_HappyPathCascadeAndEnqueue(t *testing.T) {
 		"DeleteVideosByUser", "DeleteFollowsByFollower", "DeleteFollowsByFollowee",
 		"DeleteLikesByUser", "DeleteCommentsByUser", "DeleteNotificationsForUser",
 		"DeleteNotificationsByActor", "DeleteDMInboxByUser", "DeleteDMDevicesByUser",
-		"DeleteMarketplaceContactsByUser", "DeleteMarketplaceReportsByUser",
+		"DeleteDMBlocksByUser", "DeleteMarketplaceContactsByUser", "DeleteMarketplaceReportsByUser",
 		"DeleteMarketplaceFavoritesByUser", "DeleteMarketplaceListingsBySeller",
 		"InsertMarketplaceCleanupOutbox", "TombstoneUser",
 	}

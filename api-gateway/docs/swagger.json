@@ -804,11 +804,11 @@
         "tags": ["Direct Messages"],
         "operationId": "getDMKeyBundle",
         "summary": "Fetch a recipient's public key bundle.",
-        "description": "Requires DM_E2EE_ENABLED=true. Mutual followers or an active Marketplace contact grant may fetch the bundle. One-time keys are consumed; include_one_time_key=false allows fingerprint inspection without consuming one.",
+        "description": "Requires DM_E2EE_ENABLED=true. Mutual followers may fetch the bundle unless either user blocked the other. A one-time key is only consumed when include_one_time_key=true.",
         "parameters": [
           {"$ref": "#/components/parameters/UserId"},
           {"name": "device_id", "in": "query", "required": true, "description": "Caller's registered DM device UUID.", "schema": {"type": "string", "format": "uuid"}},
-          {"name": "include_one_time_key", "in": "query", "required": false, "description": "Consume and return one one-time key. Default true.", "schema": {"type": "boolean", "default": true}}
+          {"name": "include_one_time_key", "in": "query", "required": false, "description": "Consume and return one one-time key. Default false.", "schema": {"type": "boolean", "default": false}}
         ],
         "responses": {
           "200": {
@@ -817,7 +817,7 @@
           },
           "400": {"$ref": "#/components/responses/Validation"},
           "401": {"$ref": "#/components/responses/Unauthorized"},
-          "403": {"description": "Caller is neither a mutual follower nor an active contact-grant holder.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+          "403": {"description": "Caller is not a mutual follower, or either user blocked the other.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
           "409": {"description": "Caller device is stale (DM_DEVICE_STALE).", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
           "429": {"$ref": "#/components/responses/RateLimited"}
         }
@@ -957,7 +957,7 @@
           },
           "400": {"$ref": "#/components/responses/Validation"},
           "401": {"$ref": "#/components/responses/Unauthorized"},
-          "403": {"description": "Recipient is not authorized for this caller (not a mutual follower or active contact grant).", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+          "403": {"description": "Recipient is not authorized for this caller (not a mutual follower, or either user blocked the other).", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
           "409": {"description": "Stale device or idempotency conflict (DM_DEVICE_STALE / DM_IDEMPOTENCY_CONFLICT).", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
           "429": {"$ref": "#/components/responses/RateLimited"}
         }
@@ -1005,6 +1005,40 @@
           "401": {"$ref": "#/components/responses/Unauthorized"},
           "404": {"$ref": "#/components/responses/NotFound"},
           "409": {"description": "Stale device (DM_DEVICE_STALE).", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+          "429": {"$ref": "#/components/responses/RateLimited"}
+        }
+      }
+    },
+    "/api/dm/blocks/{id}": {
+      "post": {
+        "tags": ["Direct Messages"],
+        "operationId": "blockDMUser",
+        "summary": "Block another user from DMs.",
+        "description": "Requires DM_E2EE_ENABLED=true. The block is symmetric: neither user can fetch a key bundle or send messages to the other. Existing ciphertext and idempotency state for the pair is purged. Blocking does not unfollow either user.",
+        "parameters": [
+          {"$ref": "#/components/parameters/UserId"}
+        ],
+        "responses": {
+          "200": {"description": "User blocked", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DMBlockResponse"}}}},
+          "400": {"$ref": "#/components/responses/Validation"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "429": {"$ref": "#/components/responses/RateLimited"}
+        }
+      },
+      "delete": {
+        "tags": ["Direct Messages"],
+        "operationId": "unblockDMUser",
+        "summary": "Remove a DM block.",
+        "description": "Requires DM_E2EE_ENABLED=true. Only the caller's own block is removed; mutual follow still governs whether DMs are allowed afterwards.",
+        "parameters": [
+          {"$ref": "#/components/parameters/UserId"}
+        ],
+        "responses": {
+          "200": {"description": "Block removed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DMBlockResponse"}}}},
+          "400": {"$ref": "#/components/responses/Validation"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {"$ref": "#/components/responses/NotFound"},
           "429": {"$ref": "#/components/responses/RateLimited"}
         }
       }
@@ -1627,6 +1661,14 @@
         "properties": {
           "device_id": {"type": "string", "format": "uuid"},
           "replaced_device": {"type": "boolean", "description": "True when a previous device was replaced by this registration."}
+        }
+      },
+      "DMBlockResponse": {
+        "type": "object",
+        "required": ["user_id", "blocked"],
+        "properties": {
+          "user_id": {"type": "string", "format": "uuid"},
+          "blocked": {"type": "boolean", "description": "False after a successful unblock."}
         }
       },
       "DMOneTimeKey": {

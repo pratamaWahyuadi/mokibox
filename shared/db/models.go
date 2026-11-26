@@ -21,6 +21,12 @@ type Comment struct {
 	CreatedAt time.Time     `json:"created_at"`
 }
 
+type DmBlock struct {
+	BlockerID uuid.UUID `json:"blocker_id"`
+	BlockedID uuid.UUID `json:"blocked_id"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 type DmDevice struct {
 	DeviceID           uuid.UUID `json:"device_id"`
 	UserID             uuid.UUID `json:"user_id"`

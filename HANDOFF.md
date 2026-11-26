@@ -62,19 +62,31 @@ Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
   tetap bisa dimulai saat one-time key habis.
 - Tes baru: outbox retry identik, karantina + lanjut, fallback upload/bundle,
   fallback encrypt/decrypt, dan re-register tidak menghapus inbox terkirim.
-  `make db-migrate-dm` menerapkan 009–011 berurutan; `make db-migrate-marketplace`
+  `make db-migrate-dm` menerapkan 009–011 + 015; `make db-migrate-marketplace`
   menerapkan 012–014.
 
+## Security follow-up — DM authorization hardening
+
+- `migrations/015_dm_authorization_hardening.sql` menambah `dm_blocks`; blok
+  bersifat dua arah untuk eligibility DM dan wajib diapply sebelum binary baru.
+- `IsDMRecipientAllowed` menolak pasangan yang salah satu memblokir user lain,
+  termasuk saat kontak Marketplace masih aktif; key bundle tidak mengonsumsi
+  one-time key kecuali `include_one_time_key=true`.
+- Endpoint baru `POST`/`DELETE /api/dm/blocks/:id` menghapus inbox dan
+  idempotency pasangan saat blok dipasang. Limiter key bundle dihitung per
+  `(caller, target)` agar satu klien tidak menguras one-time key korban.
+
 ## Review follow-up — QA verdict (2026-11-25)
+
 
 - `DeleteUserData` sekarang menghapus semua inbox DM where user sebagai sender
   atau recipient, lalu `DeleteDMDevicesByUser` menghapus device, one-time/fallback
   key, dan idempotency dalam tx yang sama dengan tombstone. Ini berjalan walau
-  `DM_E2EE_ENABLED=false`; migrasi 009–014 wajib untuk semua deploy.
+  `DM_E2EE_ENABLED=false`; migrasi 001–015 wajib untuk semua deploy.
 - Tes `TestDeleteMe_HappyPathCascadeAndEnqueue` memverifikasi urutan pembersihan
   DM; `TestDeleteMe_DMCleanupFailureIs500` memverifikasi rollback.
 - `scripts/smoketest/dm` menjalankan alur register, upload key, send, poll, ack
-  terhadap HTTP + PostgreSQL asli, termasuk schema 009–014, `FOR UPDATE SKIP
+  terhadap HTTP + PostgreSQL asli, termasuk schema 009–011 + 015, `FOR UPDATE SKIP
   LOCKED`, `ON CONFLICT ... WHERE`, dan ciphertext-only storage. Bukti ada di
   `scripts/smoketest/dm/README.md`.
 - `apiDelivery` hanya dibuat saat flag DM aktif; tes route memeriksa enam route
@@ -91,11 +103,11 @@ Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
 - Smoke concurrent claim diperkuat: transaksi pertama menahan lock, transaksi
   kedua harus mengambil key berbeda dalam 3 detik; cleanup dipindah ke `defer`
   agar gagal di tengah tidak menyisakan data.
-- Deploy gate didokumentasikan: migrasi 009–014 wajib sebelum binary baru
+- Deploy gate didokumentasikan: migrasi 001–015 wajib sebelum binary baru
   melayani traffic. Keputusan v1 penghapusan sepihak dan drift index 010 lama
   juga dicatat.
 - CI ditambahkan di `.github/workflows/ci.yml`: build/vet/test/race/mod verify
-  dengan Go dari `go.mod` (1.25.5), job migrasi 009–014 pada PostgreSQL 16, dan
+  dengan Go dari `go.mod` (1.25.5), job migrasi 001–015 pada PostgreSQL 16, dan
   integration test bertanda `integration`.
 - Gate rilis DM, template keputusan produk, dan template persetujuan
   lisensi/audit dirangkum di
@@ -104,7 +116,7 @@ Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
 ## DM E2EE — backend relay only
 
 - Go gateway, migrasi `009_dm_e2ee.sql` + `010_dm_inbox_sender_fk.sql` +
-  `011_dm_fallback_keys.sql`, opaque ciphertext relay, key/device
+  `011_dm_fallback_keys.sql` + `015_dm_authorization_hardening.sql`, opaque ciphertext relay, key/device
   endpoints, inbox polling/ack, idempotency, TTL janitor, dan feature gate
   tersedia. Compose meneruskan `DM_E2EE_ENABLED` dan `DM_INBOX_TTL`; flag
   default tetap mati dan TTL v1 adalah 168 jam.

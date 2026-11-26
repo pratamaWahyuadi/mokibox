@@ -237,6 +237,37 @@ func (q *Queries) CreateDMInboxMessage(ctx context.Context, arg CreateDMInboxMes
 	return i, err
 }
 
+const deleteDMBlock = `-- name: DeleteDMBlock :execrows
+DELETE FROM dm_blocks
+WHERE blocker_id = $1 AND blocked_id = $2
+`
+
+type DeleteDMBlockParams struct {
+	BlockerID uuid.UUID `json:"blocker_id"`
+	BlockedID uuid.UUID `json:"blocked_id"`
+}
+
+func (q *Queries) DeleteDMBlock(ctx context.Context, arg DeleteDMBlockParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteDMBlock, arg.BlockerID, arg.BlockedID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const deleteDMBlocksByUser = `-- name: DeleteDMBlocksByUser :execrows
+DELETE FROM dm_blocks
+WHERE blocker_id = $1 OR blocked_id = $1
+`
+
+func (q *Queries) DeleteDMBlocksByUser(ctx context.Context, userID uuid.UUID) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteDMBlocksByUser, userID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const deleteDMDevicesByUser = `-- name: DeleteDMDevicesByUser :execrows
 DELETE FROM dm_devices
 WHERE user_id = $1
@@ -511,6 +542,25 @@ func (q *Queries) GetDMTargetDevice(ctx context.Context, userID uuid.UUID) (DmDe
 	return i, err
 }
 
+const insertDMBlock = `-- name: InsertDMBlock :execrows
+INSERT INTO dm_blocks (blocker_id, blocked_id)
+VALUES ($1, $2)
+ON CONFLICT DO NOTHING
+`
+
+type InsertDMBlockParams struct {
+	BlockerID uuid.UUID `json:"blocker_id"`
+	BlockedID uuid.UUID `json:"blocked_id"`
+}
+
+func (q *Queries) InsertDMBlock(ctx context.Context, arg InsertDMBlockParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, insertDMBlock, arg.BlockerID, arg.BlockedID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const insertDMOneTimeKey = `-- name: InsertDMOneTimeKey :execrows
 INSERT INTO dm_one_time_keys (device_id, key_id, public_key, signature)
 VALUES ($1, $2, $3, $4)
@@ -545,6 +595,11 @@ SELECT EXISTS (
     WHERE sender.id = $1
       AND sender.is_active = TRUE
       AND recipient.is_active = TRUE
+      AND NOT EXISTS (
+          SELECT 1 FROM dm_blocks
+          WHERE (blocker_id = sender.id AND blocked_id = recipient.id)
+             OR (blocker_id = recipient.id AND blocked_id = sender.id)
+      )
       AND (
           (
               EXISTS (
@@ -560,10 +615,11 @@ SELECT EXISTS (
               SELECT 1 FROM marketplace_contacts c
               WHERE ((c.buyer_user_id = sender.id AND c.seller_user_id = recipient.id)
                      OR (c.buyer_user_id = recipient.id AND c.seller_user_id = sender.id))
-                AND c.revoked_at IS NULL
-                AND c.expires_at > NOW()
+                 AND c.revoked_at IS NULL
+                 AND c.expires_at > NOW()
           )
       )
+
 )
 `
 

@@ -53,6 +53,19 @@ WHERE i.message_id = m.message_id
   AND ((m.sender_user_id = sqlc.arg(sender_id) AND m.recipient_user_id = sqlc.arg(recipient_id))
     OR (m.sender_user_id = sqlc.arg(recipient_id) AND m.recipient_user_id = sqlc.arg(sender_id)));
 
+-- name: InsertDMBlock :execrows
+INSERT INTO dm_blocks (blocker_id, blocked_id)
+VALUES (sqlc.arg(blocker_id), sqlc.arg(blocked_id))
+ON CONFLICT DO NOTHING;
+
+-- name: DeleteDMBlock :execrows
+DELETE FROM dm_blocks
+WHERE blocker_id = sqlc.arg(blocker_id) AND blocked_id = sqlc.arg(blocked_id);
+
+-- name: DeleteDMBlocksByUser :execrows
+DELETE FROM dm_blocks
+WHERE blocker_id = sqlc.arg(user_id) OR blocked_id = sqlc.arg(user_id);
+
 -- name: CreateDMDevice :one
 INSERT INTO dm_devices (
     device_id, user_id, identity_curve25519, identity_ed25519
@@ -69,6 +82,11 @@ SELECT EXISTS (
     WHERE sender.id = $1
       AND sender.is_active = TRUE
       AND recipient.is_active = TRUE
+      AND NOT EXISTS (
+          SELECT 1 FROM dm_blocks
+          WHERE (blocker_id = sender.id AND blocked_id = recipient.id)
+             OR (blocker_id = recipient.id AND blocked_id = sender.id)
+      )
       AND (
           (
               EXISTS (
@@ -84,10 +102,11 @@ SELECT EXISTS (
               SELECT 1 FROM marketplace_contacts c
               WHERE ((c.buyer_user_id = sender.id AND c.seller_user_id = recipient.id)
                      OR (c.buyer_user_id = recipient.id AND c.seller_user_id = sender.id))
-                AND c.revoked_at IS NULL
-                AND c.expires_at > NOW()
+                 AND c.revoked_at IS NULL
+                 AND c.expires_at > NOW()
           )
       )
+
 );
 
 -- name: GetDMTargetDevice :one
