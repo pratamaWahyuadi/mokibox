@@ -3,6 +3,142 @@
 State captured 2026-09-09, post domain-migration lokal (DOMAIN-MIGRATION-LOCAL-PROMPT.md).
 Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
 
+## Go DM client SDK + CLI (ditambahkan sesi ini)
+
+- `clients/dm` dan `clients/dm/cmd/dmcli` menyediakan client Olm v1 referensi:
+  register device, upload signed one-time keys, key bundle + fingerprint
+  verification, encrypt/decrypt, inbox poll, ack retry, dan pickle state
+  terenkripsi (`0600`).
+- Dependensi kriptografi: `maunium.net/go/mautrix v0.30.0`
+  (`crypto/goolm`, pure Go, MPL-2.0). Tidak ada cgo/libolm.
+- `go build ./...`, `go vet ./...`, `go test ./... -count=1` lulus. Tes client
+  memakai relay in-memory (`httptest`), bukan PostgreSQL/Zitadel.
+- Smoke live lokal 2026-11-25 memakai gateway `.smoke` + fake OIDC + PostgreSQL:
+  dua user saling follow, tukar fingerprint dari key bundle, A→B dan B→A
+  berhasil di-encrypt/relay/decrypt/ack. Row unacked berisi 95 byte ciphertext,
+  sentinel plaintext tidak ditemukan di DB; hasil `LIVE_DM_E2EE_SMOKE_OK`.
+- Flag backend tetap `DM_E2EE_ENABLED=false`; client ini belum melewati
+  independent security review/pentest. Jangan klaim production-ready.
+
+## Security review + PR readiness (2026-11-25)
+
+- HIGH diperbaiki: `dmStoreError`/`dmInternal` dulu mengirim detail DB/nama operasi
+  ke klien lewat `ClassifyError`; sekarang respons generic `INTERNAL_ERROR`, detail
+  tetap di log (`api-gateway/handlers/dm.go:754`,
+  `api-gateway/handlers/dm_test.go:498`).
+- MEDIUM diperbaiki: rotasi fingerprint ditolak sampai `ForceVerify`/`-force`
+  (`clients/dm/service.go:191`), `Send`/`Receive` dimutex untuk pemakaian konkuren,
+  `NewClient` menolak `http` ke host non-loopback (`clients/dm/client.go:36`),
+  CLI bisa baca plaintext dari stdin, dan trust store hanya mutasi setelah write
+  sukses (`clients/dm/store.go:144`).
+- Risiko residual: server tidak memverifikasi tanda tangan OTK/fallback (sesuai
+  kontrak; client yang memverifikasi), satu device aktif per user, metadata
+  terlihat server, rate limit masih in-process per gateway instance, Zitadel
+  asli/pentest belum diuji.
+- Verified: `go build ./...`, `go vet ./...`, `go test ./... -count=1`,
+  `go test -race ./clients/... ./api-gateway/... -count=1`, `go mod verify`, dan
+  secret scan; hanya placeholder/example + dummy `.smoke`, private key dan pickle
+  key ber-mode `0600`.
+- Untuk PR: sertakan `clients/dm`, `go.mod/go.sum`, `api-gateway/handlers/dm.go`,
+  `api-gateway/handlers/dm_test.go`, `migrations/009_dm_e2ee.sql`, `README.md`, dan
+  `HANDOFF.md`. Aktifkan flag di environment; jangan commit token/pickle key.
+
+## Review follow-up — lima temuan teman (2026-11-25)
+
+- `Receive` mengarantina pesan rusak/decrypt gagal/fingerprint berubah, tidak
+  meng-ack pesan tersebut, dan tetap memproses sequence berikutnya; state v1
+  dibaca dan dinormalisasi ke v2 tanpa kehilangan session/ack lama.
+- `Send` menyimpan request lengkap + hash plaintext ke outbox sebelum request
+  pertama. Retry dengan `-message-id` mengirim ulang ciphertext persis sama;
+  plaintext/recipient berubah ditolak lokal dengan `ErrOutboxConflict`.
+- Rate limit DM dipisah: kontrol (device, upload key, bundle) 20 burst,
+  delivery (send/poll/ack) 120 burst 10/detik dan tidak kena limiter auth
+  60/menit.
+- FK `dm_inbox.sender_device_id` diganti ke `sender_user_id ... ON DELETE
+  RESTRICT` di `migrations/010_dm_inbox_sender_fk.sql`, sehingga re-register
+  device tidak menghapus pesan yang sudah dikirim.
+- Fallback key didukung di `migrations/011_dm_fallback_keys.sql`, handler upload
+  (`fallback_key`), key bundle (`fallback_key`), SDK/CLI, dan sqlc. Chat baru
+  tetap bisa dimulai saat one-time key habis.
+- Tes baru: outbox retry identik, karantina + lanjut, fallback upload/bundle,
+  fallback encrypt/decrypt, dan re-register tidak menghapus inbox terkirim.
+   `make db-migrate-dm` menerapkan 009–011 + 015 dan 015 berurutan.
+
+## Security follow-up — DM authorization hardening
+
+- `migrations/015_dm_authorization_hardening.sql` menambah `dm_blocks`; blok
+  bersifat dua arah untuk eligibility DM dan wajib diapply sebelum binary baru.
+- `IsDMMutualFollow` menolak pasangan yang salah satu memblokir user lain; key
+  bundle tidak mengonsumsi one-time key kecuali `include_one_time_key=true`.
+- Endpoint baru `POST`/`DELETE /api/dm/blocks/:id` menghapus inbox dan
+  idempotency pasangan saat blok dipasang. Limiter key bundle dihitung per
+  `(caller, target)` agar satu klien tidak menguras one-time key korban.
+
+## Review follow-up — QA verdict (2026-11-25)
+
+
+- `DeleteUserData` sekarang menghapus semua inbox DM where user sebagai sender
+  atau recipient, lalu `DeleteDMDevicesByUser` menghapus device, one-time/fallback
+  key, dan idempotency dalam tx yang sama dengan tombstone. Ini berjalan walau
+  `DM_E2EE_ENABLED=false`; migrasi 009–011 + 015 wajib untuk semua deploy.
+- Tes `TestDeleteMe_HappyPathCascadeAndEnqueue` memverifikasi urutan pembersihan
+  DM; `TestDeleteMe_DMCleanupFailureIs500` memverifikasi rollback.
+- `scripts/smoketest/dm` menjalankan alur register, upload key, send, poll, ack
+  terhadap HTTP + PostgreSQL asli, termasuk schema 009–011 + 015, `FOR UPDATE SKIP
+  LOCKED`, `ON CONFLICT ... WHERE`, dan ciphertext-only storage. Bukti ada di
+  `scripts/smoketest/dm/README.md`.
+- `apiDelivery` hanya dibuat saat flag DM aktif; tes route memeriksa enam route
+  DM mengikuti flag. Echo secara otomatis memberi middleware group pada
+  catch-all 404 buatannya, jadi `NewRouter` mendaftar ulang `/api/*` dan
+  `/api/dm/*` tanpa middleware; `TestUnknownAPIRouteSkipsAuthAndRateLimit`
+  membuktikan path tak dikenal kembali 404 tanpa auth/rate limit.
+- Registrasi `device_id` milik user lain kini `409 DM_DEVICE_STALE`, termasuk
+  fallback untuk race `23505`. Send mengunci device pengirim dengan
+  `FOR UPDATE` agar re-register konkuren tidak menyisakan FK error 500.
+- Tes tambahan: non-mutual follow 404, stale device upload/poll/ack 409, ack
+  pesan device lain 404, validasi `after`/`limit`, user nonaktif 401, janitor,
+  dan state v1 → v2.
+- Smoke concurrent claim diperkuat: transaksi pertama menahan lock, transaksi
+  kedua harus mengambil key berbeda dalam 3 detik; cleanup dipindah ke `defer`
+  agar gagal di tengah tidak menyisakan data.
+- Deploy gate didokumentasikan: migrasi 009–011 + 015 wajib sebelum binary baru
+  melayani traffic. Keputusan v1 penghapusan sepihak dan drift index 010 lama
+  juga dicatat.
+- CI ditambahkan di `.github/workflows/ci.yml`: build/vet/test/race/mod verify
+  dengan Go dari `go.mod` (1.25.5) dan job migrasi 009–011 + 015 pada PostgreSQL 16.
+- Gate rilis DM, template keputusan produk, dan template persetujuan
+  lisensi/audit dirangkum di
+  `planning/14_dm_e2ee_release_gate.md`.
+
+## DM E2EE — backend relay only
+
+- Go gateway, migrasi `009_dm_e2ee.sql` + `010_dm_inbox_sender_fk.sql` +
+  `011_dm_fallback_keys.sql` + `015_dm_authorization_hardening.sql`, opaque ciphertext relay, key/device
+  endpoints, inbox polling/ack, idempotency, TTL janitor, dan feature gate
+  tersedia. Compose meneruskan `DM_E2EE_ENABLED` dan `DM_INBOX_TTL`; flag
+  default tetap mati dan TTL v1 adalah 168 jam.
+- Bukti smoke ada di `scripts/smoketest/dm/README.md`: Go build/vet/test/race,
+  HTTP/PostgreSQL relay, ciphertext-only storage, fitur flag on/off, dan Olm
+  encrypt→relay→decrypt via SDK integration test. Zitadel asli dan production
+  tidak diuji; ini bukan audit keamanan independen.
+- Laporan smoke menemukan dua Critical yang kemudian diperbaiki: base64 DM
+  kini dikembalikan tanpa padding secara kanonis, dan `make db-migrate`
+  menerapkan migration files berurutan. Perintah migrasi forward-only, tanpa
+  ledger: gunakan hanya pada database kosong yang disposable, jangan ulangi.
+- Respon ganda setelah kegagalan auth dari laporan smoke sudah diperbaiki di
+  middleware dan dicakup tes regresi Go.
+- Validasi setelah patch auth: `go test ./... -count=1`, `go vet ./...`, dan
+  `go build ./...` lulus. Smoke tidak dijalankan ulang dan migration tidak
+  diterapkan oleh assistant.
+- Atas keputusan pemilik, package `clients/dm_core` dan helper Dart sementara
+  di `.smoke/` dihapus. Laporan/log bukti lokal dipertahankan. Backend tetap
+  hanya relay ciphertext; client Olm yang melakukan key verification,
+  encrypt/decrypt, dan secure local storage harus disediakan terpisah. SDK Go +
+  CLI referensi kini tersedia di `clients/dm` (lihat bagian atas), tetapi belum
+  melewati independent security review.
+- Production flag tetap mati. Belum ada client Olm eksternal terintegrasi,
+  independent security review, atau pentest; jangan klaim production-ready.
+
 ## Profile avatar upload — PR #72
 
 - Backend menyediakan `POST /api/users/me/avatar/upload-intent` dan

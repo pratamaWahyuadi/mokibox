@@ -169,6 +169,162 @@ Contoh per status:
 
 ---
 
+## Direct Messages — E2EE v1
+
+Semua endpoint berada di `/api/dm`, memerlukan JWT Zitadel dan hanya
+diregistrasikan saat `DM_E2EE_ENABLED=true`. API tidak pernah menerima
+plaintext atau private key. Semua binary key/ciphertext dikirim sebagai
+base64. User/device authorization tidak bergantung pada UUID rahasia.
+Rate limit dibagi dua bucket per user: kontrol (device, key upload, bundle)
+20 burst 1/3 detik, dan pengiriman (send/poll/ack) 120 burst 10/detik.
+Keduanya memakai group auth tersendiri, sehingga send/poll/ack tidak kena
+limiter auth generik 60/menit.
+
+### `POST /api/dm/device`
+
+Register atau re-register caller's DM device.
+
+```json
+{
+  "device_id": "uuid",
+  "identity_curve25519": "base64-public-key",
+  "identity_ed25519": "base64-public-key"
+}
+```
+
+Response `200`:
+
+```json
+{
+  "data": {
+    "device_id": "uuid",
+    "replaced_device": false
+  }
+}
+```
+
+Registration dengan device ID dan public keys yang sama bersifat idempotent.
+Mengganti device ID atau identity key membatalkan device lama, one-time keys,
+dan inbox-nya; kontak akan melihat fingerprint baru dan wajib memverifikasinya
+lagi.
+
+### `POST /api/dm/device/one-time-keys`
+
+Upload batch maksimum 100 signed Olm one-time keys. Device harus device aktif
+milik caller. Field `fallback_key` opsional dan formatnya sama seperti satu
+one-time key; server menyimpan satu fallback key per device untuk dipakai saat
+one-time key habis.
+
+```json
+{
+  "device_id": "uuid",
+  "keys": [
+    {
+      "key_id": "key-id",
+      "public_key": "base64-public-key",
+      "signature": "base64-ed25519-signature"
+    }
+  ],
+  "fallback_key": {
+    "key_id": "fallback-key-id",
+    "public_key": "base64-public-key",
+    "signature": "base64-ed25519-signature"
+  }
+}
+```
+
+Response `200`: `{ "data": { "accepted": 1 } }` (`accepted` hanya menghitung
+one-time key). Server menyimpan signatures secara opaque; peer client wajib
+memverifikasinya dengan identity key.
+
+### `GET /api/dm/users/:id/key-bundle?device_id=uuid&include_one_time_key=true`
+
+Caller harus memiliki device aktif. Target harus aktif dan mutual-follow.
+Response `200` berisi target `user_id`, `device_id`, kedua identity public
+keys, dan default-nya satu one-time key yang diklaim secara atomik. Jika tidak
+ada one-time key, server mengembalikan `fallback_key` yang tersimpan (tidak
+dikonsumsi per sesi). Dengan `include_one_time_key=false`, response hanya berisi
+identity keys dan `one_time_key: null`; client memakai opsi ini untuk
+fingerprint checking agar tidak membakar key. Jika key diminta tetapi neither
+one-time nor fallback key tersedia, response `409 DM_KEY_UNAVAILABLE`. Target
+yang tidak ditemukan atau tidak memenuhi mutual-follow sama-sama
+`404 NOT_FOUND`.
+
+### `POST /api/dm/messages`
+
+Mengirim satu Olm envelope opaque ke target device yang termasuk dalam key bundle yang sudah
+diambil. Caller harus memiliki device aktif dan kedua akun harus mutual-follow.
+Jika target sudah mengganti device, pengiriman gagal dengan
+`409 DM_DEVICE_STALE`; client harus mengambil bundle dan memverifikasi ulang.
+
+```json
+{
+  "device_id": "uuid",
+  "recipient_user_id": "uuid",
+  "recipient_device_id": "uuid",
+  "client_message_id": "uuid",
+  "protocol": "olm",
+  "protocol_version": 1,
+  "message_type": 0,
+  "ciphertext": "base64"
+}
+```
+
+`message_type` mengikuti binding Olm; server tidak menafsirkan ciphertext.
+Digest idempotensi memakai encoding canonical dari seluruh request body.
+Retry dengan ID dan digest sama mengembalikan ID/sequence pesan awal; ID sama
+dengan digest berbeda mengembalikan `409 DM_IDEMPOTENCY_CONFLICT`. Maksimum
+1,000 pesan pending per recipient device; jika penuh `409 DM_INBOX_FULL`.
+Response pertama `201` berisi `message_id`, `sequence`, dan `expires_at`.
+Retry yang cocok mengembalikan body yang sama dengan status `200`.
+
+### `GET /api/dm/inbox?device_id=uuid&after=0&limit=100`
+
+`after` wajib berupa integer non-negatif; `limit` default 100, maksimum 100.
+Hanya pesan pending untuk device aktif caller dengan `sequence > after` yang
+dikembalikan, urut sequence menaik. Response berisi IDs/routing metadata,
+Olm envelope, ciphertext, dan timestamps. Poll tidak memperpanjang TTL dan
+tidak acknowledge pesan. Client memajukan cursor setelah ack sukses. Pesan
+dengan envelope/ciphertext rusak, decrypt gagal, session hilang, atau
+fingerprint berubah dikarantina lokal (tidak di-ack, tidak menghentikan
+sequence berikutnya); cursor tetap maju melewati pesan tersebut.
+
+### `POST /api/dm/inbox/:message_id/ack`
+
+```json
+{ "device_id": "uuid" }
+```
+
+Acknowledge hanya pesan yang dialamatkan ke device aktif caller. Pengulangan
+ack berhasil dengan `204`; ciphertext dihapus dari penyimpanan inbox.
+
+### Error contract
+
+| HTTP | Code | Kondisi |
+|---|---|---|
+| 400 | `VALIDATION_ERROR` | Body/cursor/encoding tidak valid |
+| 401 | `UNAUTHORIZED` | JWT hilang, invalid, atau user nonaktif |
+| 404 | `NOT_FOUND` | Target tak ada atau mutual-follow tidak terpenuhi |
+| 409 | `DM_DEVICE_STALE` | Device ID tidak aktif untuk caller atau dimiliki user lain |
+| 409 | `DM_KEY_UNAVAILABLE` | Tidak ada one-time atau fallback key untuk target |
+| 409 | `DM_IDEMPOTENCY_CONFLICT` | ID client dipakai ulang dengan body berbeda |
+| 409 | `DM_INBOX_FULL` | Recipient memiliki 1,000 pesan pending |
+| 429 | `RATE_LIMITED` | Per-user DM control (20 burst) atau delivery (120 burst) limiter menolak request |
+| 500 | `INTERNAL_ERROR` | Kegagalan DB/internal; detail hanya di log |
+
+Pengiriman diperiksa mutual-follow pada saat send. Jika follow relation berubah
+setelah enqueue, pesan yang sudah berada di inbox tetap dapat diambil sampai
+ack/expiry. Ini konsekuensi kontrak v1.
+
+`GET /api/dm/users/:id/key-bundle` dengan `include_one_time_key=true` mengonsumsi
+satu one-time key target. Klien harus memakai `include_one_time_key=false`
+saat hanya ingin memeriksa fingerprint; rate limit membatasi, tetapi tidak
+menghilangkan, kemungkinan pengurasan key oleh mutual follower.
+
+FK `fk_dm_inbox_sender_user` memakai `ON DELETE RESTRICT`. Deploy saat ini
+hanya tombstone user, sehingga aman. Alur hard-delete di masa depan harus
+menghapus baris inbox DM terlebih dahulu.
+
 ## 1. Daftar Endpoint
 
 | Method | Path | Deskripsi | Auth |
@@ -200,6 +356,12 @@ Contoh per status:
 | POST | `/api/videos/:id/view` | Track view | JWT |
 | GET | `/api/notifications` | List notifikasi | JWT |
 | PUT | `/api/notifications/read-all` | Tandai semua notifikasi dibaca | JWT |
+| POST | `/api/dm/device` | Register/re-register DM device | JWT + feature flag |
+| POST | `/api/dm/device/one-time-keys` | Upload signed Olm one-time keys | JWT + feature flag |
+| GET | `/api/dm/users/:id/key-bundle` | Claim peer key bundle | JWT + feature flag |
+| POST | `/api/dm/messages` | Kirim Olm ciphertext | JWT + feature flag |
+| GET | `/api/dm/inbox` | Poll inbox ciphertext | JWT + feature flag |
+| POST | `/api/dm/inbox/:message_id/ack` | Acknowledge dan hapus ciphertext | JWT + feature flag |
 | POST | `/api/webhooks/zitadel` | Actions V2 target — notifikasi lifecycle user | HMAC signature (`ZITADEL-Signature`) |
 
 ---

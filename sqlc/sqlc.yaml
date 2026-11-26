@@ -4,6 +4,10 @@ sql:
     schema:
       - "../migrations/001_init.sql"
       - "../migrations/008_user_avatar_upload.sql"
+      - "../migrations/009_dm_e2ee.sql"
+      - "../migrations/010_dm_inbox_sender_fk.sql"
+      - "../migrations/011_dm_fallback_keys.sql"
+      - "../migrations/015_dm_authorization_hardening.sql"
     # Queries live in per-table files under sqlc/queries/.
     # sqlc picks up every *.sql file in the directory in
     # alphabetical order; split was introduced in phase-1.5

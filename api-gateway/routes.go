@@ -11,10 +11,14 @@
 // group. Phase 6 issue A added the home feed behind
 // the auth group; issue B added the video detail /
 // status / playlist endpoints; issue C added the
-// follow endpoints. The current full route set is:
+// follow endpoints. E2EE DM send/poll/ack use a
+// separate auth-only group so delivery is not capped
+// by the generic 60/min API limiter or the 20-burst
+// device/key management bucket.
+// The current full route set is:
 //   - GET  /healthz                          (no auth)
 //   - POST /api/webhooks/zitadel             (no JWT auth;
-//       signature verified inside the handler)
+//     signature verified inside the handler)
 //   - GET  /api/users/me                     (auth)
 //   - PUT  /api/users/me                     (auth)
 //   - POST /api/users/me/avatar/upload-intent (auth)
@@ -42,6 +46,14 @@
 //   - GET  /api/notifications                (auth)
 //   - PUT  /api/notifications/read-all       (auth)
 //   - DELETE /api/users/me                   (auth)
+//   - POST /api/dm/device                    (auth + feature flag)
+//   - POST /api/dm/device/one-time-keys      (auth + feature flag)
+//   - GET  /api/dm/users/:id/key-bundle      (auth + feature flag)
+//   - POST /api/dm/messages                  (auth + feature flag)
+//   - GET  /api/dm/inbox                     (auth + feature flag)
+//   - POST /api/dm/inbox/:message_id/ack     (auth + feature flag)
+//   - POST /api/dm/blocks/:id                 (auth + feature flag)
+//   - DELETE /api/dm/blocks/:id               (auth + feature flag)
 //   - GET  /api/docs/swagger.json             (no auth; raw OpenAPI spec)
 //   - GET  /api/docs/                         (no auth; minimal Swagger UI index)
 //   - GET  /api/docs                          (no auth; same as above)
@@ -56,6 +68,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"golang.org/x/time/rate"
 
@@ -110,22 +123,22 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	e := echo.New()
 
 	// Central HTTPErrorHandler safety net for Echo
-// framework errors (404, 405, body-bind failure)
-// and any error that reaches Echo without going
-// through shared.RespondError. See error_handler.go
-// for the full contract. Phase 3-8 handlers continue
-// to use shared.RespondError; this only catches what
-// slips past that path.
+	// framework errors (404, 405, body-bind failure)
+	// and any error that reaches Echo without going
+	// through shared.RespondError. See error_handler.go
+	// for the full contract. Phase 3-8 handlers continue
+	// to use shared.RespondError; this only catches what
+	// slips past that path.
 	e.HTTPErrorHandler = HTTPErrorHandler
 
 	// Request body validator. Per LLD section 12
-// (Fase 9), wire go-playground/validator/v10 as the
-// Echo validator. Handlers that take a JSON body
-// call c.Validate(&req) after c.Bind(&req); failures
-// are translated by RequestValidator into the
-// canonical shared.APIError{CodeValidationError,
-// Details:[]FieldError} envelope. See
-// request_validator.go for the translation rules.
+	// (Fase 9), wire go-playground/validator/v10 as the
+	// Echo validator. Handlers that take a JSON body
+	// call c.Validate(&req) after c.Bind(&req); failures
+	// are translated by RequestValidator into the
+	// canonical shared.APIError{CodeValidationError,
+	// Details:[]FieldError} envelope. See
+	// request_validator.go for the translation rules.
 	e.Validator = NewRequestValidator()
 
 	// Health probe (no auth, no auth middleware). Kept
@@ -170,13 +183,62 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	if err != nil {
 		panic(fmt.Sprintf("api-gateway: NewRateLimitAuth: %v", err))
 	}
-	api := e.Group("/api",
-		middleware.Authenticate(middleware.AuthenticateConfig{
-			Verifier: d.AuthVerifier,
-			Queries:  d.Queries,
-		}),
-		authRateLimit,
-	)
+	authenticate := middleware.Authenticate(middleware.AuthenticateConfig{
+		Verifier: d.AuthVerifier,
+		Queries:  d.Queries,
+	})
+	api := e.Group("/api", authenticate, authRateLimit)
+
+	if d.Cfg != nil && d.Cfg.DME2EEEnabled {
+		apiDelivery := e.Group("/api", authenticate)
+		dmHandler, err := handlers.NewDMHandler(d.Queries, d.DB, d.Cfg.DMInboxTTL)
+		if err != nil {
+			panic(fmt.Sprintf("api-gateway: NewDMHandler: %v", err))
+		}
+		dmControlLimit, err := middleware.NewRateLimitAuth(middleware.RateLimitConfig{
+			Rate:          rate.Limit(1.0 / 3.0),
+			Burst:         20,
+			TTL:           10 * time.Minute,
+			SweepInterval: 5 * time.Minute,
+		})
+		if err != nil {
+			panic(fmt.Sprintf("api-gateway: NewRateLimitAuth for DM control: %v", err))
+		}
+		dmDeliveryLimit, err := middleware.NewRateLimitAuth(middleware.RateLimitConfig{
+			Rate:          rate.Limit(10),
+			Burst:         120,
+			TTL:           10 * time.Minute,
+			SweepInterval: 5 * time.Minute,
+		})
+		if err != nil {
+			panic(fmt.Sprintf("api-gateway: NewRateLimitAuth for DM delivery: %v", err))
+		}
+		dmKeyBundleLimit, err := middleware.NewRateLimitAuthWithKey(middleware.RateLimitConfig{
+			Rate:          rate.Limit(0.2),
+			Burst:         5,
+			TTL:           10 * time.Minute,
+			SweepInterval: 5 * time.Minute,
+		}, func(c echo.Context) (string, error) {
+			userID, ok := middleware.UserIDFromContext(c)
+			if !ok || userID == uuid.Nil {
+				return "", shared.Wrap(shared.ErrUnauthorized, "rate limit requires authenticated user")
+			}
+			return "dm:key:" + userID.String() + ":" + c.Param("id"), nil
+		})
+		if err != nil {
+			panic(fmt.Sprintf("api-gateway: NewRateLimitAuthWithKey for DM key bundle: %v", err))
+		}
+		dmControl := api.Group("/dm", dmControlLimit)
+		dmDelivery := apiDelivery.Group("/dm", dmDeliveryLimit)
+		dmControl.POST("/device", dmHandler.RegisterDevice)
+		dmControl.POST("/device/one-time-keys", dmHandler.UploadOneTimeKeys)
+		dmControl.GET("/users/:id/key-bundle", dmHandler.GetKeyBundle, dmKeyBundleLimit)
+		dmControl.POST("/blocks/:id", dmHandler.BlockUser)
+		dmControl.DELETE("/blocks/:id", dmHandler.UnblockUser)
+		dmDelivery.POST("/messages", dmHandler.SendMessage)
+		dmDelivery.GET("/inbox", dmHandler.PollInbox)
+		dmDelivery.POST("/inbox/:message_id/ack", dmHandler.AcknowledgeMessage)
+	}
 
 	uh, err := handlers.NewUserHandler(d.Queries, d.R2, d.Queue, d.Cfg)
 	if err != nil {
@@ -339,6 +401,12 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	// Spec lives in api-gateway/docs/swagger.json (go:embed
 	// into docs.go), covering every route above.
 	registerDocsRoutes(e)
+
+	notFound := func(c echo.Context) error { return echo.ErrNotFound }
+	e.RouteNotFound("/api/*", notFound)
+	if d.Cfg != nil && d.Cfg.DME2EEEnabled {
+		e.RouteNotFound("/api/dm/*", notFound)
+	}
 
 	return e
 }
