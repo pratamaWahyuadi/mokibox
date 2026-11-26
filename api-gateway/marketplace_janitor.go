@@ -30,6 +30,7 @@ type marketplaceCleanupStore interface {
 
 type marketplaceImageSweeper interface {
 	SweepExpiredImages(context.Context, int32) (int, error)
+	ArchiveExpiredListings(context.Context, int32) (int, error)
 }
 
 type marketplaceCleanupEnqueuer interface {
@@ -46,6 +47,12 @@ func runMarketplaceJanitor(ctx context.Context, store marketplaceCleanupStore, s
 			slog.Error("marketplace image expiry sweep failed", "err", err)
 		} else if swept > 0 {
 			slog.Info("marketplace image expiry sweep", "rows", swept)
+		}
+		expired, err := sweepMarketplaceListings(ctx, sweeper, batchSize)
+		if err != nil {
+			slog.Error("marketplace listing expiry sweep failed", "err", err)
+		} else if expired > 0 {
+			slog.Info("marketplace listing expiry sweep", "rows", expired)
 		}
 		dispatched, err := dispatchMarketplaceCleanup(ctx, store, enqueuer, batchSize)
 		if err != nil {
@@ -79,6 +86,16 @@ func sweepMarketplaceImages(ctx context.Context, sweeper marketplaceImageSweeper
 		return 0, fmt.Errorf("marketplace sweep batch size must be > 0")
 	}
 	return sweeper.SweepExpiredImages(ctx, batchSize)
+}
+
+func sweepMarketplaceListings(ctx context.Context, sweeper marketplaceImageSweeper, batchSize int32) (int, error) {
+	if sweeper == nil {
+		return 0, fmt.Errorf("marketplace listing sweeper is nil")
+	}
+	if batchSize <= 0 {
+		return 0, fmt.Errorf("marketplace listing sweep batch size must be > 0")
+	}
+	return sweeper.ArchiveExpiredListings(ctx, batchSize)
 }
 
 func dispatchMarketplaceCleanup(ctx context.Context, store marketplaceCleanupStore, enqueuer marketplaceCleanupEnqueuer, batchSize int32) (int, error) {

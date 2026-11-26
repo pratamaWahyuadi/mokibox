@@ -14,6 +14,32 @@ import (
 	"github.com/lib/pq"
 )
 
+const archiveExpiredMarketplaceListings = `-- name: ArchiveExpiredMarketplaceListings :execrows
+UPDATE marketplace_listings
+SET status = 'archived', updated_at = NOW()
+WHERE id = ANY($1::uuid[])
+  AND status = 'active' AND expires_at <= NOW()
+`
+
+func (q *Queries) ArchiveExpiredMarketplaceListings(ctx context.Context, ids []uuid.UUID) (int64, error) {
+	result, err := q.db.ExecContext(ctx, archiveExpiredMarketplaceListings, pq.Array(ids))
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const clearMarketplaceListingCover = `-- name: ClearMarketplaceListingCover :exec
+UPDATE marketplace_listing_images
+SET is_cover = FALSE
+WHERE listing_id = $1 AND is_cover = TRUE
+`
+
+func (q *Queries) ClearMarketplaceListingCover(ctx context.Context, listingID uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, clearMarketplaceListingCover, listingID)
+	return err
+}
+
 const confirmMarketplaceListingImage = `-- name: ConfirmMarketplaceListingImage :execrows
 UPDATE marketplace_listing_images i
 SET status = 'active', expires_at = NULL, r2_key = $4
@@ -21,7 +47,7 @@ FROM marketplace_listings l
 WHERE i.id = $1 AND i.listing_id = l.id AND l.id = $2
   AND l.seller_user_id = $3 AND l.status <> 'archived'
   AND EXISTS (SELECT 1 FROM users seller WHERE seller.id = $3 AND seller.is_active = TRUE)
-  AND i.status = 'pending' AND i.expires_at > NOW()
+  AND i.status = 'pending' AND i.expires_at > NOW() AND i.size_bytes IS NOT NULL
 `
 
 type ConfirmMarketplaceListingImageParams struct {
@@ -107,7 +133,7 @@ SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9
 FROM users seller
 WHERE seller.id = $1 AND seller.is_active = TRUE
 RETURNING id, seller_user_id, category_slug, title, description, price_idr, city,
-          item_condition, status, created_at, updated_at, latitude, longitude
+          item_condition, status, created_at, updated_at, latitude, longitude, expires_at
 `
 
 type CreateMarketplaceListingParams struct {
@@ -149,22 +175,24 @@ func (q *Queries) CreateMarketplaceListing(ctx context.Context, arg CreateMarket
 		&i.UpdatedAt,
 		&i.Latitude,
 		&i.Longitude,
+		&i.ExpiresAt,
 	)
 	return i, err
 }
 
 const createMarketplaceListingImage = `-- name: CreateMarketplaceListingImage :one
-INSERT INTO marketplace_listing_images (listing_id, r2_key, content_type, sort_order, expires_at)
-VALUES ($1, $2, $3, $4, $5)
-RETURNING id, listing_id, r2_key, content_type, sort_order, status, expires_at, created_at
+INSERT INTO marketplace_listing_images (listing_id, r2_key, content_type, size_bytes, sort_order, expires_at)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING id, listing_id, r2_key, content_type, sort_order, status, expires_at, created_at, size_bytes, is_cover
 `
 
 type CreateMarketplaceListingImageParams struct {
-	ListingID   uuid.UUID    `json:"listing_id"`
-	R2Key       string       `json:"r2_key"`
-	ContentType string       `json:"content_type"`
-	SortOrder   int16        `json:"sort_order"`
-	ExpiresAt   sql.NullTime `json:"expires_at"`
+	ListingID   uuid.UUID     `json:"listing_id"`
+	R2Key       string        `json:"r2_key"`
+	ContentType string        `json:"content_type"`
+	SizeBytes   sql.NullInt64 `json:"size_bytes"`
+	SortOrder   int16         `json:"sort_order"`
+	ExpiresAt   sql.NullTime  `json:"expires_at"`
 }
 
 func (q *Queries) CreateMarketplaceListingImage(ctx context.Context, arg CreateMarketplaceListingImageParams) (MarketplaceListingImage, error) {
@@ -172,6 +200,7 @@ func (q *Queries) CreateMarketplaceListingImage(ctx context.Context, arg CreateM
 		arg.ListingID,
 		arg.R2Key,
 		arg.ContentType,
+		arg.SizeBytes,
 		arg.SortOrder,
 		arg.ExpiresAt,
 	)
@@ -185,6 +214,8 @@ func (q *Queries) CreateMarketplaceListingImage(ctx context.Context, arg CreateM
 		&i.Status,
 		&i.ExpiresAt,
 		&i.CreatedAt,
+		&i.SizeBytes,
+		&i.IsCover,
 	)
 	return i, err
 }
@@ -192,7 +223,7 @@ func (q *Queries) CreateMarketplaceListingImage(ctx context.Context, arg CreateM
 const deleteExpiredMarketplaceListingImages = `-- name: DeleteExpiredMarketplaceListingImages :many
 DELETE FROM marketplace_listing_images
 WHERE listing_id = $1 AND status = 'pending' AND expires_at <= NOW()
-RETURNING id, listing_id, r2_key, content_type, sort_order, status, expires_at, created_at
+RETURNING id, listing_id, r2_key, content_type, sort_order, status, expires_at, created_at, size_bytes, is_cover
 `
 
 func (q *Queries) DeleteExpiredMarketplaceListingImages(ctx context.Context, listingID uuid.UUID) ([]MarketplaceListingImage, error) {
@@ -213,6 +244,8 @@ func (q *Queries) DeleteExpiredMarketplaceListingImages(ctx context.Context, lis
 			&i.Status,
 			&i.ExpiresAt,
 			&i.CreatedAt,
+			&i.SizeBytes,
+			&i.IsCover,
 		); err != nil {
 			return nil, err
 		}
@@ -362,7 +395,7 @@ SELECT l.seller_user_id
 FROM marketplace_listings l
 JOIN users buyer ON buyer.id = $2 AND buyer.is_active = TRUE
 JOIN users seller ON seller.id = l.seller_user_id AND seller.is_active = TRUE
-WHERE l.id = $1 AND l.status = 'active' AND l.seller_user_id <> $2
+WHERE l.id = $1 AND l.status = 'active' AND l.expires_at > NOW() AND l.seller_user_id <> $2
   AND NOT EXISTS (
       SELECT 1 FROM marketplace_contacts c
       WHERE c.listing_id = l.id AND c.buyer_user_id = $2 AND c.revoked_at IS NOT NULL
@@ -386,7 +419,7 @@ const getMarketplaceListing = `-- name: GetMarketplaceListing :one
 SELECT l.id, l.seller_user_id, u.username, u.display_name,
        l.category_slug, c.name AS category_name, l.title, l.description,
        l.price_idr, l.city, l.item_condition, l.latitude, l.longitude,
-       l.status, l.created_at, l.updated_at,
+       l.status, l.created_at, l.updated_at, l.expires_at,
        EXISTS (
            SELECT 1 FROM marketplace_favorites f
            WHERE f.listing_id = l.id AND f.user_id = $2
@@ -396,6 +429,7 @@ JOIN users u ON u.id = l.seller_user_id AND u.is_active = TRUE
 JOIN marketplace_categories c ON c.slug = l.category_slug
 WHERE l.id = $1
   AND (l.status IN ('active', 'sold') OR l.seller_user_id = $2)
+  AND (l.expires_at > NOW() OR l.seller_user_id = $2 OR l.status <> 'active')
 `
 
 type GetMarketplaceListingParams struct {
@@ -420,6 +454,7 @@ type GetMarketplaceListingRow struct {
 	Status        string          `json:"status"`
 	CreatedAt     time.Time       `json:"created_at"`
 	UpdatedAt     time.Time       `json:"updated_at"`
+	ExpiresAt     time.Time       `json:"expires_at"`
 	IsFavorite    bool            `json:"is_favorite"`
 }
 
@@ -443,6 +478,7 @@ func (q *Queries) GetMarketplaceListing(ctx context.Context, arg GetMarketplaceL
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ExpiresAt,
 		&i.IsFavorite,
 	)
 	return i, err
@@ -471,7 +507,7 @@ func (q *Queries) GetMarketplaceListingForUpdate(ctx context.Context, id uuid.UU
 
 const getMarketplaceListingImageForOwner = `-- name: GetMarketplaceListingImageForOwner :one
 SELECT i.id, i.listing_id, i.r2_key, i.content_type, i.sort_order, i.status,
-       i.expires_at, i.created_at
+       i.expires_at, i.created_at, i.size_bytes, i.is_cover
 FROM marketplace_listing_images i
 JOIN marketplace_listings l ON l.id = i.listing_id
 WHERE i.id = $1 AND l.id = $2 AND l.seller_user_id = $3
@@ -495,6 +531,8 @@ func (q *Queries) GetMarketplaceListingImageForOwner(ctx context.Context, arg Ge
 		&i.Status,
 		&i.ExpiresAt,
 		&i.CreatedAt,
+		&i.SizeBytes,
+		&i.IsCover,
 	)
 	return i, err
 }
@@ -553,7 +591,7 @@ SELECT l.id, $2, $3, NOW() + INTERVAL '30 days'
 FROM marketplace_listings l
 JOIN users buyer ON buyer.id = $2 AND buyer.is_active = TRUE
 JOIN users seller ON seller.id = $3 AND seller.is_active = TRUE
-WHERE l.id = $1 AND l.status = 'active' AND l.seller_user_id = $3
+WHERE l.id = $1 AND l.status = 'active' AND l.expires_at > NOW() AND l.seller_user_id = $3
 ON CONFLICT (listing_id, buyer_user_id) DO NOTHING
 `
 
@@ -579,6 +617,7 @@ JOIN users seller ON seller.id = l.seller_user_id AND seller.is_active = TRUE
 JOIN users buyer ON buyer.id = $1 AND buyer.is_active = TRUE
 WHERE l.id = $2
   AND l.status = 'active'
+  AND l.expires_at > NOW()
   AND l.seller_user_id <> $1
 ON CONFLICT (user_id, listing_id) DO NOTHING
 `
@@ -604,6 +643,7 @@ JOIN users seller ON seller.id = l.seller_user_id AND seller.is_active = TRUE
 JOIN users reporter ON reporter.id = $1 AND reporter.is_active = TRUE
 WHERE l.id = $4
   AND l.status = 'active'
+  AND l.expires_at > NOW()
   AND l.seller_user_id <> $1
 ON CONFLICT (listing_id, reporter_user_id) DO NOTHING
 `
@@ -636,6 +676,7 @@ SELECT EXISTS (
     JOIN users buyer ON buyer.id = $1 AND buyer.is_active = TRUE
     WHERE l.id = $2
       AND l.status = 'active'
+      AND l.expires_at > NOW()
       AND l.seller_user_id <> $1
 )
 `
@@ -660,6 +701,7 @@ SELECT EXISTS (
     JOIN users reporter ON reporter.id = $1 AND reporter.is_active = TRUE
     WHERE l.id = $2
       AND l.status = 'active'
+      AND l.expires_at > NOW()
       AND l.seller_user_id <> $1
 )
 `
@@ -714,6 +756,38 @@ func (q *Queries) ListDueMarketplaceCleanupOutbox(ctx context.Context, pageSize 
 	return items, nil
 }
 
+const listExpiredMarketplaceListingsForUpdate = `-- name: ListExpiredMarketplaceListingsForUpdate :many
+SELECT l.id
+FROM marketplace_listings l
+WHERE l.status = 'active' AND l.expires_at <= NOW()
+ORDER BY l.expires_at, l.id
+LIMIT $1
+FOR UPDATE OF l SKIP LOCKED
+`
+
+func (q *Queries) ListExpiredMarketplaceListingsForUpdate(ctx context.Context, pageSize int32) ([]uuid.UUID, error) {
+	rows, err := q.db.QueryContext(ctx, listExpiredMarketplaceListingsForUpdate, pageSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listMarketplaceCategories = `-- name: ListMarketplaceCategories :many
 
 SELECT slug, name, sort_order
@@ -749,10 +823,10 @@ const listMarketplaceFavorites = `-- name: ListMarketplaceFavorites :many
 SELECT l.id, l.seller_user_id, u.username, u.display_name,
        l.category_slug, c.name AS category_name, l.title, l.description,
        l.price_idr, l.city, l.item_condition, l.latitude, l.longitude,
-       l.status, l.created_at, l.updated_at,
+       l.status, l.created_at, l.updated_at, l.expires_at,
        TRUE AS is_favorite
 FROM marketplace_favorites f
-JOIN marketplace_listings l ON l.id = f.listing_id AND l.status = 'active'
+JOIN marketplace_listings l ON l.id = f.listing_id AND l.status = 'active' AND l.expires_at > NOW()
 JOIN users u ON u.id = l.seller_user_id AND u.is_active = TRUE
 JOIN marketplace_categories c ON c.slug = l.category_slug
 WHERE f.user_id = $1
@@ -787,6 +861,7 @@ type ListMarketplaceFavoritesRow struct {
 	Status        string          `json:"status"`
 	CreatedAt     time.Time       `json:"created_at"`
 	UpdatedAt     time.Time       `json:"updated_at"`
+	ExpiresAt     time.Time       `json:"expires_at"`
 	IsFavorite    bool            `json:"is_favorite"`
 }
 
@@ -821,11 +896,41 @@ func (q *Queries) ListMarketplaceFavorites(ctx context.Context, arg ListMarketpl
 			&i.Status,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ExpiresAt,
 			&i.IsFavorite,
 		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMarketplaceImageKeysByListings = `-- name: ListMarketplaceImageKeysByListings :many
+SELECT r2_key
+FROM marketplace_listing_images
+WHERE listing_id = ANY($1::uuid[])
+`
+
+func (q *Queries) ListMarketplaceImageKeysByListings(ctx context.Context, ids []uuid.UUID) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listMarketplaceImageKeysByListings, pq.Array(ids))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var r2_key string
+		if err := rows.Scan(&r2_key); err != nil {
+			return nil, err
+		}
+		items = append(items, r2_key)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -867,7 +972,7 @@ func (q *Queries) ListMarketplaceImageKeysBySeller(ctx context.Context, sellerUs
 }
 
 const listMarketplaceImagesForListings = `-- name: ListMarketplaceImagesForListings :many
-SELECT id, listing_id, r2_key, content_type, sort_order, status, expires_at, created_at
+SELECT id, listing_id, r2_key, content_type, sort_order, status, expires_at, created_at, size_bytes, is_cover
 FROM marketplace_listing_images
 WHERE listing_id = ANY(string_to_array($1::text, ',')::uuid[])
   AND status = 'active'
@@ -892,6 +997,8 @@ func (q *Queries) ListMarketplaceImagesForListings(ctx context.Context, listingI
 			&i.Status,
 			&i.ExpiresAt,
 			&i.CreatedAt,
+			&i.SizeBytes,
+			&i.IsCover,
 		); err != nil {
 			return nil, err
 		}
@@ -907,7 +1014,7 @@ func (q *Queries) ListMarketplaceImagesForListings(ctx context.Context, listingI
 }
 
 const listMarketplaceListingImages = `-- name: ListMarketplaceListingImages :many
-SELECT id, listing_id, r2_key, content_type, sort_order, status, expires_at, created_at
+SELECT id, listing_id, r2_key, content_type, sort_order, status, expires_at, created_at, size_bytes, is_cover
 FROM marketplace_listing_images
 WHERE listing_id = $1 AND status = 'active'
 ORDER BY sort_order
@@ -931,6 +1038,8 @@ func (q *Queries) ListMarketplaceListingImages(ctx context.Context, listingID uu
 			&i.Status,
 			&i.ExpiresAt,
 			&i.CreatedAt,
+			&i.SizeBytes,
+			&i.IsCover,
 		); err != nil {
 			return nil, err
 		}
@@ -949,7 +1058,7 @@ const listMarketplaceListings = `-- name: ListMarketplaceListings :many
 SELECT l.id, l.seller_user_id, u.username, u.display_name,
        l.category_slug, c.name AS category_name, l.title, l.description,
        l.price_idr, l.city, l.item_condition, l.latitude, l.longitude,
-       l.status, l.created_at, l.updated_at,
+       l.status, l.created_at, l.updated_at, l.expires_at,
        CASE WHEN $1::double precision IS NULL THEN NULL
             ELSE 6371.0088 * 2 * asin(sqrt(LEAST(1.0,
                 power(sin(radians(l.latitude - $2::double precision) / 2), 2) +
@@ -965,6 +1074,7 @@ FROM marketplace_listings l
 JOIN users u ON u.id = l.seller_user_id AND u.is_active = TRUE
 JOIN marketplace_categories c ON c.slug = l.category_slug
 WHERE l.status = 'active'
+  AND l.expires_at > NOW()
   AND ($5::text IS NULL OR l.category_slug = $5)
   AND ($6::text IS NULL OR lower(l.city) = lower($6))
   AND ($7::text IS NULL
@@ -1026,6 +1136,7 @@ type ListMarketplaceListingsRow struct {
 	Status        string          `json:"status"`
 	CreatedAt     time.Time       `json:"created_at"`
 	UpdatedAt     time.Time       `json:"updated_at"`
+	ExpiresAt     time.Time       `json:"expires_at"`
 	DistanceKm    interface{}     `json:"distance_km"`
 	IsFavorite    bool            `json:"is_favorite"`
 }
@@ -1069,6 +1180,108 @@ func (q *Queries) ListMarketplaceListings(ctx context.Context, arg ListMarketpla
 			&i.Status,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ExpiresAt,
+			&i.DistanceKm,
+			&i.IsFavorite,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMarketplaceListingsBySeller = `-- name: ListMarketplaceListingsBySeller :many
+SELECT l.id, l.seller_user_id, u.username, u.display_name,
+       l.category_slug, c.name AS category_name, l.title, l.description,
+       l.price_idr, l.city, l.item_condition, l.latitude, l.longitude,
+       l.status, l.created_at, l.updated_at, l.expires_at,
+       NULL::double precision AS distance_km,
+       EXISTS (
+           SELECT 1 FROM marketplace_favorites f
+           WHERE f.listing_id = l.id AND f.user_id = $1
+       ) AS is_favorite
+FROM marketplace_listings l
+JOIN users u ON u.id = l.seller_user_id AND u.is_active = TRUE
+JOIN marketplace_categories c ON c.slug = l.category_slug
+WHERE l.seller_user_id = $2
+  AND l.status = 'active' AND l.expires_at > NOW()
+  AND ($3::timestamptz IS NULL
+       OR (l.created_at, l.id) <
+          ($3::timestamptz, $4::uuid))
+ORDER BY l.created_at DESC, l.id DESC
+LIMIT $5
+`
+
+type ListMarketplaceListingsBySellerParams struct {
+	ViewerID        uuid.UUID     `json:"viewer_id"`
+	SellerUserID    uuid.UUID     `json:"seller_user_id"`
+	CursorCreatedAt sql.NullTime  `json:"cursor_created_at"`
+	CursorID        uuid.NullUUID `json:"cursor_id"`
+	PageSize        int32         `json:"page_size"`
+}
+
+type ListMarketplaceListingsBySellerRow struct {
+	ID            uuid.UUID       `json:"id"`
+	SellerUserID  uuid.UUID       `json:"seller_user_id"`
+	Username      string          `json:"username"`
+	DisplayName   sql.NullString  `json:"display_name"`
+	CategorySlug  string          `json:"category_slug"`
+	CategoryName  string          `json:"category_name"`
+	Title         string          `json:"title"`
+	Description   string          `json:"description"`
+	PriceIdr      int64           `json:"price_idr"`
+	City          string          `json:"city"`
+	ItemCondition string          `json:"item_condition"`
+	Latitude      sql.NullFloat64 `json:"latitude"`
+	Longitude     sql.NullFloat64 `json:"longitude"`
+	Status        string          `json:"status"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
+	ExpiresAt     time.Time       `json:"expires_at"`
+	DistanceKm    sql.NullFloat64 `json:"distance_km"`
+	IsFavorite    bool            `json:"is_favorite"`
+}
+
+func (q *Queries) ListMarketplaceListingsBySeller(ctx context.Context, arg ListMarketplaceListingsBySellerParams) ([]ListMarketplaceListingsBySellerRow, error) {
+	rows, err := q.db.QueryContext(ctx, listMarketplaceListingsBySeller,
+		arg.ViewerID,
+		arg.SellerUserID,
+		arg.CursorCreatedAt,
+		arg.CursorID,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListMarketplaceListingsBySellerRow{}
+	for rows.Next() {
+		var i ListMarketplaceListingsBySellerRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SellerUserID,
+			&i.Username,
+			&i.DisplayName,
+			&i.CategorySlug,
+			&i.CategoryName,
+			&i.Title,
+			&i.Description,
+			&i.PriceIdr,
+			&i.City,
+			&i.ItemCondition,
+			&i.Latitude,
+			&i.Longitude,
+			&i.Status,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ExpiresAt,
 			&i.DistanceKm,
 			&i.IsFavorite,
 		); err != nil {
@@ -1089,7 +1302,7 @@ const listMarketplaceOwnListings = `-- name: ListMarketplaceOwnListings :many
 SELECT l.id, l.seller_user_id, u.username, u.display_name,
        l.category_slug, c.name AS category_name, l.title, l.description,
        l.price_idr, l.city, l.item_condition, l.latitude, l.longitude,
-       l.status, l.created_at, l.updated_at,
+       l.status, l.created_at, l.updated_at, l.expires_at,
        FALSE AS is_favorite
 FROM marketplace_listings l
 JOIN users u ON u.id = l.seller_user_id AND u.is_active = TRUE
@@ -1128,6 +1341,7 @@ type ListMarketplaceOwnListingsRow struct {
 	Status        string          `json:"status"`
 	CreatedAt     time.Time       `json:"created_at"`
 	UpdatedAt     time.Time       `json:"updated_at"`
+	ExpiresAt     time.Time       `json:"expires_at"`
 	IsFavorite    bool            `json:"is_favorite"`
 }
 
@@ -1163,7 +1377,89 @@ func (q *Queries) ListMarketplaceOwnListings(ctx context.Context, arg ListMarket
 			&i.Status,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ExpiresAt,
 			&i.IsFavorite,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMarketplaceReports = `-- name: ListMarketplaceReports :many
+SELECT r.id, r.listing_id, r.reporter_user_id, r.reason, r.details,
+       r.status, r.created_at, r.reviewed_at, r.reviewer_user_id,
+       r.review_note, r.resolution,
+       l.title AS listing_title, reporter.username AS reporter_username
+FROM marketplace_reports r
+JOIN marketplace_listings l ON l.id = r.listing_id
+JOIN users reporter ON reporter.id = r.reporter_user_id
+WHERE ($1::text IS NULL OR r.status = $1)
+  AND ($2::timestamptz IS NULL
+       OR (r.created_at, r.id) <
+          ($2::timestamptz, $3::uuid))
+ORDER BY r.created_at DESC, r.id DESC
+LIMIT $4
+`
+
+type ListMarketplaceReportsParams struct {
+	Status          sql.NullString `json:"status"`
+	CursorCreatedAt sql.NullTime   `json:"cursor_created_at"`
+	CursorID        uuid.NullUUID  `json:"cursor_id"`
+	PageSize        int32          `json:"page_size"`
+}
+
+type ListMarketplaceReportsRow struct {
+	ID               uuid.UUID      `json:"id"`
+	ListingID        uuid.UUID      `json:"listing_id"`
+	ReporterUserID   uuid.UUID      `json:"reporter_user_id"`
+	Reason           string         `json:"reason"`
+	Details          string         `json:"details"`
+	Status           string         `json:"status"`
+	CreatedAt        time.Time      `json:"created_at"`
+	ReviewedAt       sql.NullTime   `json:"reviewed_at"`
+	ReviewerUserID   uuid.NullUUID  `json:"reviewer_user_id"`
+	ReviewNote       string         `json:"review_note"`
+	Resolution       sql.NullString `json:"resolution"`
+	ListingTitle     string         `json:"listing_title"`
+	ReporterUsername string         `json:"reporter_username"`
+}
+
+func (q *Queries) ListMarketplaceReports(ctx context.Context, arg ListMarketplaceReportsParams) ([]ListMarketplaceReportsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listMarketplaceReports,
+		arg.Status,
+		arg.CursorCreatedAt,
+		arg.CursorID,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListMarketplaceReportsRow{}
+	for rows.Next() {
+		var i ListMarketplaceReportsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ListingID,
+			&i.ReporterUserID,
+			&i.Reason,
+			&i.Details,
+			&i.Status,
+			&i.CreatedAt,
+			&i.ReviewedAt,
+			&i.ReviewerUserID,
+			&i.ReviewNote,
+			&i.Resolution,
+			&i.ListingTitle,
+			&i.ReporterUsername,
 		); err != nil {
 			return nil, err
 		}
@@ -1234,6 +1530,51 @@ func (q *Queries) RenewExpiredMarketplaceContact(ctx context.Context, arg RenewE
 	return result.RowsAffected()
 }
 
+const reviewMarketplaceReport = `-- name: ReviewMarketplaceReport :one
+UPDATE marketplace_reports r
+SET status = $1::text, reviewer_user_id = $2::uuid,
+    review_note = $3::text,
+    resolution = $4::text, reviewed_at = NOW()
+WHERE r.id = $5::uuid AND r.status = 'open'
+  AND EXISTS (SELECT 1 FROM users reviewer WHERE reviewer.id = $2::uuid AND reviewer.is_active = TRUE)
+RETURNING r.id, r.listing_id, r.reporter_user_id, r.reason, r.details,
+          r.status, r.created_at, r.reviewed_at, r.reviewer_user_id,
+          r.review_note, r.resolution
+`
+
+type ReviewMarketplaceReportParams struct {
+	Status         string    `json:"status"`
+	ReviewerUserID uuid.UUID `json:"reviewer_user_id"`
+	ReviewNote     string    `json:"review_note"`
+	Resolution     string    `json:"resolution"`
+	ID             uuid.UUID `json:"id"`
+}
+
+func (q *Queries) ReviewMarketplaceReport(ctx context.Context, arg ReviewMarketplaceReportParams) (MarketplaceReport, error) {
+	row := q.db.QueryRowContext(ctx, reviewMarketplaceReport,
+		arg.Status,
+		arg.ReviewerUserID,
+		arg.ReviewNote,
+		arg.Resolution,
+		arg.ID,
+	)
+	var i MarketplaceReport
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.ReporterUserID,
+		&i.Reason,
+		&i.Details,
+		&i.Status,
+		&i.CreatedAt,
+		&i.ReviewedAt,
+		&i.ReviewerUserID,
+		&i.ReviewNote,
+		&i.Resolution,
+	)
+	return i, err
+}
+
 const revokeMarketplaceContact = `-- name: RevokeMarketplaceContact :execrows
 UPDATE marketplace_contacts
 SET revoked_at = NOW()
@@ -1255,6 +1596,41 @@ func (q *Queries) RevokeMarketplaceContact(ctx context.Context, arg RevokeMarket
 	return result.RowsAffected()
 }
 
+const setMarketplaceListingImageCover = `-- name: SetMarketplaceListingImageCover :one
+UPDATE marketplace_listing_images i
+SET is_cover = TRUE
+FROM marketplace_listings l
+WHERE i.id = $1 AND i.listing_id = l.id AND l.id = $2
+  AND l.seller_user_id = $3 AND l.status <> 'archived'
+  AND i.status = 'active'
+RETURNING i.id, i.listing_id, i.r2_key, i.content_type, i.sort_order,
+          i.status, i.expires_at, i.created_at, i.size_bytes, i.is_cover
+`
+
+type SetMarketplaceListingImageCoverParams struct {
+	ID           uuid.UUID `json:"id"`
+	ID_2         uuid.UUID `json:"id_2"`
+	SellerUserID uuid.UUID `json:"seller_user_id"`
+}
+
+func (q *Queries) SetMarketplaceListingImageCover(ctx context.Context, arg SetMarketplaceListingImageCoverParams) (MarketplaceListingImage, error) {
+	row := q.db.QueryRowContext(ctx, setMarketplaceListingImageCover, arg.ID, arg.ID_2, arg.SellerUserID)
+	var i MarketplaceListingImage
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.R2Key,
+		&i.ContentType,
+		&i.SortOrder,
+		&i.Status,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.SizeBytes,
+		&i.IsCover,
+	)
+	return i, err
+}
+
 const sweepExpiredMarketplaceListingImages = `-- name: SweepExpiredMarketplaceListingImages :many
 WITH expired AS (
     SELECT i.id
@@ -1268,7 +1644,7 @@ DELETE FROM marketplace_listing_images i
 USING expired
 WHERE i.id = expired.id
 RETURNING i.id, i.listing_id, i.r2_key, i.content_type, i.sort_order,
-          i.status, i.expires_at, i.created_at
+          i.status, i.expires_at, i.created_at, i.size_bytes, i.is_cover
 `
 
 func (q *Queries) SweepExpiredMarketplaceListingImages(ctx context.Context, pageSize int32) ([]MarketplaceListingImage, error) {
@@ -1289,6 +1665,8 @@ func (q *Queries) SweepExpiredMarketplaceListingImages(ctx context.Context, page
 			&i.Status,
 			&i.ExpiresAt,
 			&i.CreatedAt,
+			&i.SizeBytes,
+			&i.IsCover,
 		); err != nil {
 			return nil, err
 		}
@@ -1317,7 +1695,7 @@ SET category_slug = $3,
 WHERE marketplace_listings.id = $1 AND marketplace_listings.seller_user_id = $2 AND marketplace_listings.status <> 'archived'
   AND EXISTS (SELECT 1 FROM users seller WHERE seller.id = $2 AND seller.is_active = TRUE)
 RETURNING id, seller_user_id, category_slug, title, description, price_idr, city,
-          item_condition, status, created_at, updated_at, latitude, longitude
+          item_condition, status, created_at, updated_at, latitude, longitude, expires_at
 `
 
 type UpdateMarketplaceListingParams struct {
@@ -1361,6 +1739,7 @@ func (q *Queries) UpdateMarketplaceListing(ctx context.Context, arg UpdateMarket
 		&i.UpdatedAt,
 		&i.Latitude,
 		&i.Longitude,
+		&i.ExpiresAt,
 	)
 	return i, err
 }
@@ -1371,7 +1750,7 @@ SET status = $3, updated_at = NOW()
 WHERE marketplace_listings.id = $1 AND marketplace_listings.seller_user_id = $2
   AND EXISTS (SELECT 1 FROM users seller WHERE seller.id = $2 AND seller.is_active = TRUE)
 RETURNING id, seller_user_id, category_slug, title, description, price_idr, city,
-          item_condition, status, created_at, updated_at, latitude, longitude
+          item_condition, status, created_at, updated_at, latitude, longitude, expires_at
 `
 
 type UpdateMarketplaceListingStatusParams struct {
@@ -1397,6 +1776,7 @@ func (q *Queries) UpdateMarketplaceListingStatus(ctx context.Context, arg Update
 		&i.UpdatedAt,
 		&i.Latitude,
 		&i.Longitude,
+		&i.ExpiresAt,
 	)
 	return i, err
 }

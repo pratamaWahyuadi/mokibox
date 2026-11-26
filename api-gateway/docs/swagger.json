@@ -846,13 +846,28 @@
         "responses": {"200": {"description": "Seller listing page."}, "401": {"$ref": "#/components/responses/Unauthorized"}}
       }
     },
+    "/api/marketplace/users/{seller_user_id}/listings": {
+      "get": {
+        "tags": ["Marketplace"],
+        "operationId": "listMarketplaceSellerListings",
+        "summary": "List another seller's active, unexpired listings.",
+        "description": "Listings expire 30 days after creation and are removed from browse, favorites, seller pages, reports, and contact grants.",
+        "parameters": [
+          {"name": "seller_user_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+          {"$ref": "#/components/parameters/Limit"},
+          {"$ref": "#/components/parameters/Cursor"}
+        ],
+        "responses": {"200": {"description": "Seller listing page."}, "400": {"$ref": "#/components/responses/Validation"}, "401": {"$ref": "#/components/responses/Unauthorized"}}
+      }
+    },
     "/api/marketplace/listings/{id}/images/upload-intent": {
       "post": {
         "tags": ["Marketplace"],
         "operationId": "createMarketplaceImageUploadIntent",
         "summary": "Create a seller-scoped presigned R2 image upload intent.",
         "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["content_type"], "properties": {"content_type": {"type": "string", "enum": ["image/jpeg", "image/png", "image/webp"]}}}}}},
+         "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["content_type", "size_bytes"], "properties": {"content_type": {"type": "string", "enum": ["image/jpeg", "image/png", "image/webp"]}, "size_bytes": {"type": "integer", "format": "int64", "exclusiveMinimum": 0, "maximum": 10485760}}}}}},
+
         "responses": {"201": {"description": "Upload URL, required headers, image_id, 10 MiB size cap, and expiry."}, "400": {"$ref": "#/components/responses/Validation"}, "404": {"$ref": "#/components/responses/NotFound"}, "409": {"description": "MARKETPLACE_CONFLICT: maximum of 8 photos reached."}, "429": {"$ref": "#/components/responses/RateLimited"}}
       }
     },
@@ -878,6 +893,19 @@
           {"name": "image_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
         ],
         "responses": {"204": {"description": "Photo removed."}, "404": {"$ref": "#/components/responses/NotFound"}, "429": {"$ref": "#/components/responses/RateLimited"}}
+      }
+    },
+    "/api/marketplace/listings/{id}/images/{image_id}/cover": {
+      "post": {
+        "tags": ["Marketplace"],
+        "operationId": "setMarketplaceListingCoverImage",
+        "summary": "Set a published photo as the listing cover.",
+        "description": "Only the seller may set the cover. Replacing the cover clears the previous flag in the same transaction; each listing has at most one cover.",
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+          {"name": "image_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "responses": {"200": {"description": "Cover state."}, "404": {"$ref": "#/components/responses/NotFound"}, "429": {"$ref": "#/components/responses/RateLimited"}}
       }
     },
     "/api/marketplace/listings/{id}/favorite": {
@@ -934,6 +962,30 @@
           {"name": "buyer_id", "in": "query", "required": false, "description": "Target buyer UUID; required when the seller revokes.", "schema": {"type": "string", "format": "uuid"}}
         ],
         "responses": {"200": {"description": "listing_id and whether the grant was revoked."}, "400": {"$ref": "#/components/responses/Validation"}, "403": {"description": "Caller is not a participant of the targeted contact grant.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}}, "404": {"$ref": "#/components/responses/NotFound"}, "429": {"$ref": "#/components/responses/RateLimited"}}
+      }
+    },
+    "/api/marketplace/moderation/reports": {
+      "get": {
+        "tags": ["Marketplace"],
+        "operationId": "listMarketplaceReports",
+        "summary": "List manual-moderation reports (moderator allowlist only).",
+        "description": "Requires the caller's UUID in MARKETPLACE_MODERATOR_USER_IDS. Filters: open, dismissed, resolved.",
+        "parameters": [
+          {"name": "status", "in": "query", "schema": {"type": "string", "enum": ["open", "dismissed", "resolved"]}},
+          {"$ref": "#/components/parameters/Limit"},
+          {"$ref": "#/components/parameters/Cursor"}
+        ],
+        "responses": {"200": {"description": "Report page with reviewer audit metadata."}, "400": {"$ref": "#/components/responses/Validation"}, "401": {"$ref": "#/components/responses/Unauthorized"}, "403": {"description": "Caller is not a Marketplace moderator (FORBIDDEN).", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}}}
+      }
+    },
+    "/api/marketplace/moderation/reports/{id}/review": {
+      "post": {
+        "tags": ["Marketplace"],
+        "operationId": "reviewMarketplaceReport",
+        "summary": "Dismiss or resolve an open report (moderator allowlist only).",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["resolution"], "properties": {"resolution": {"type": "string", "enum": ["dismissed", "resolved"]}, "note": {"type": "string", "maxLength": 1000}}}}}},
+        "responses": {"200": {"description": "Reviewed report."}, "400": {"$ref": "#/components/responses/Validation"}, "401": {"$ref": "#/components/responses/Unauthorized"}, "403": {"description": "Caller is not a Marketplace moderator (FORBIDDEN).", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}}, "404": {"$ref": "#/components/responses/NotFound"}, "429": {"$ref": "#/components/responses/RateLimited"}}
       }
     },
     "/api/dm/messages": {

@@ -140,27 +140,34 @@ type MarketplaceListing struct {
 	UpdatedAt     time.Time       `json:"updated_at"`
 	Latitude      sql.NullFloat64 `json:"latitude"`
 	Longitude     sql.NullFloat64 `json:"longitude"`
+	ExpiresAt     time.Time       `json:"expires_at"`
 }
 
 type MarketplaceListingImage struct {
-	ID          uuid.UUID    `json:"id"`
-	ListingID   uuid.UUID    `json:"listing_id"`
-	R2Key       string       `json:"r2_key"`
-	ContentType string       `json:"content_type"`
-	SortOrder   int16        `json:"sort_order"`
-	Status      string       `json:"status"`
-	ExpiresAt   sql.NullTime `json:"expires_at"`
-	CreatedAt   time.Time    `json:"created_at"`
+	ID          uuid.UUID     `json:"id"`
+	ListingID   uuid.UUID     `json:"listing_id"`
+	R2Key       string        `json:"r2_key"`
+	ContentType string        `json:"content_type"`
+	SortOrder   int16         `json:"sort_order"`
+	Status      string        `json:"status"`
+	ExpiresAt   sql.NullTime  `json:"expires_at"`
+	CreatedAt   time.Time     `json:"created_at"`
+	SizeBytes   sql.NullInt64 `json:"size_bytes"`
+	IsCover     bool          `json:"is_cover"`
 }
 
 type MarketplaceReport struct {
-	ID             uuid.UUID `json:"id"`
-	ListingID      uuid.UUID `json:"listing_id"`
-	ReporterUserID uuid.UUID `json:"reporter_user_id"`
-	Reason         string    `json:"reason"`
-	Details        string    `json:"details"`
-	Status         string    `json:"status"`
-	CreatedAt      time.Time `json:"created_at"`
+	ID             uuid.UUID      `json:"id"`
+	ListingID      uuid.UUID      `json:"listing_id"`
+	ReporterUserID uuid.UUID      `json:"reporter_user_id"`
+	Reason         string         `json:"reason"`
+	Details        string         `json:"details"`
+	Status         string         `json:"status"`
+	CreatedAt      time.Time      `json:"created_at"`
+	ReviewedAt     sql.NullTime   `json:"reviewed_at"`
+	ReviewerUserID uuid.NullUUID  `json:"reviewer_user_id"`
+	ReviewNote     string         `json:"review_note"`
+	Resolution     sql.NullString `json:"resolution"`
 }
 
 type Notification struct {

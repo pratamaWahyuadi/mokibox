@@ -68,6 +68,20 @@ type marketplaceFakeStore struct {
 	lastFavoritesParams     db.ListMarketplaceFavoritesParams
 	lastReportInsert        db.InsertMarketplaceReportParams
 	lastContactLookup       db.GetMarketplaceContactSellerParams
+	sellerRows              []db.ListMarketplaceListingsBySellerRow
+	lastSellerParams        db.ListMarketplaceListingsBySellerParams
+	reportRows              []db.ListMarketplaceReportsRow
+	lastReportListParams    db.ListMarketplaceReportsParams
+	reviewRows              []db.MarketplaceReport
+	lastReviewParams        db.ReviewMarketplaceReportParams
+	coverRow                db.MarketplaceListingImage
+	coverErr                error
+	lastCoverClear          uuid.UUID
+	lastCoverParams         db.SetMarketplaceListingImageCoverParams
+	expiredListingIDs       []uuid.UUID
+	expiredListingKeys      []string
+	archiveRows             int64
+	lastExpiryBatch         int32
 }
 
 func unexpectedMarketplaceCall(name string) error {
@@ -116,6 +130,10 @@ func (s *marketplaceFakeStore) ListMarketplaceListings(_ context.Context, arg db
 func (s *marketplaceFakeStore) ListMarketplaceOwnListings(_ context.Context, arg db.ListMarketplaceOwnListingsParams) ([]db.ListMarketplaceOwnListingsRow, error) {
 	s.lastOwnListingParams = arg
 	return nil, nil
+}
+func (s *marketplaceFakeStore) ListMarketplaceListingsBySeller(_ context.Context, arg db.ListMarketplaceListingsBySellerParams) ([]db.ListMarketplaceListingsBySellerRow, error) {
+	s.lastSellerParams = arg
+	return s.sellerRows, nil
 }
 func (s *marketplaceFakeStore) ListMarketplaceListingImages(context.Context, uuid.UUID) ([]db.MarketplaceListingImage, error) {
 	return nil, unexpectedMarketplaceCall("ListMarketplaceListingImages")
@@ -184,6 +202,17 @@ func (s *marketplaceFakeStore) CountMarketplaceReportsByReporterSince(context.Co
 func (s *marketplaceFakeStore) HasMarketplaceReport(context.Context, db.HasMarketplaceReportParams) (bool, error) {
 	return s.hasReport, nil
 }
+func (s *marketplaceFakeStore) ListMarketplaceReports(_ context.Context, arg db.ListMarketplaceReportsParams) ([]db.ListMarketplaceReportsRow, error) {
+	s.lastReportListParams = arg
+	return s.reportRows, nil
+}
+func (s *marketplaceFakeStore) ReviewMarketplaceReport(_ context.Context, arg db.ReviewMarketplaceReportParams) (db.MarketplaceReport, error) {
+	s.lastReviewParams = arg
+	if len(s.reviewRows) == 0 {
+		return db.MarketplaceReport{}, sql.ErrNoRows
+	}
+	return s.reviewRows[0], nil
+}
 func (s *marketplaceFakeStore) GetMarketplaceListingForUpdate(_ context.Context, id uuid.UUID) (db.GetMarketplaceListingForUpdateRow, error) {
 	s.lastLockedListing = id
 	return s.listingForLock, nil
@@ -197,7 +226,31 @@ func (s *marketplaceFakeStore) GetNextMarketplaceListingImagePosition(context.Co
 func (s *marketplaceFakeStore) CreateMarketplaceListingImage(_ context.Context, arg db.CreateMarketplaceListingImageParams) (db.MarketplaceListingImage, error) {
 	row := s.createdImage
 	row.ListingID, row.R2Key, row.ContentType, row.SortOrder, row.ExpiresAt = arg.ListingID, arg.R2Key, arg.ContentType, arg.SortOrder, arg.ExpiresAt
+	row.SizeBytes = arg.SizeBytes
 	return row, nil
+}
+func (s *marketplaceFakeStore) ClearMarketplaceListingCover(_ context.Context, listingID uuid.UUID) error {
+	s.lastCoverClear = listingID
+	return nil
+}
+func (s *marketplaceFakeStore) SetMarketplaceListingImageCover(_ context.Context, arg db.SetMarketplaceListingImageCoverParams) (db.MarketplaceListingImage, error) {
+	s.lastCoverParams = arg
+	if s.coverErr != nil {
+		return db.MarketplaceListingImage{}, s.coverErr
+	}
+	row := s.coverRow
+	row.ID, row.ListingID, row.IsCover = arg.ID, arg.ID_2, true
+	return row, nil
+}
+func (s *marketplaceFakeStore) ListExpiredMarketplaceListingsForUpdate(_ context.Context, batch int32) ([]uuid.UUID, error) {
+	s.lastExpiryBatch = batch
+	return s.expiredListingIDs, nil
+}
+func (s *marketplaceFakeStore) ArchiveExpiredMarketplaceListings(_ context.Context, ids []uuid.UUID) (int64, error) {
+	return int64(len(ids)), nil
+}
+func (s *marketplaceFakeStore) ListMarketplaceImageKeysByListings(context.Context, []uuid.UUID) ([]string, error) {
+	return s.expiredListingKeys, nil
 }
 func (s *marketplaceFakeStore) GetMarketplaceContactSeller(_ context.Context, arg db.GetMarketplaceContactSellerParams) (uuid.UUID, error) {
 	s.lastContactLookup = arg
@@ -423,7 +476,7 @@ func TestMarketplaceImageIntentIsOwnerScopedAndReturnsImageID(t *testing.T) {
 	h := newMarketplaceHandlerForTest(store, runner, r2, &shared.APIConfig{})
 	e := newDMTestEcho(user, http.MethodPost, "/api/marketplace/listings/:id/images/upload-intent", h.UploadImageIntent)
 	path := "/api/marketplace/listings/" + listingID.String() + "/images/upload-intent"
-	rec := doJSON(e, http.MethodPost, path, `{"content_type":"image/png"}`)
+	rec := doJSON(e, http.MethodPost, path, `{"content_type":"image/png","size_bytes":1234}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -454,6 +507,7 @@ func TestMarketplaceImageConfirmValidatesImageBytes(t *testing.T) {
 			ID: imageID, ListingID: listingID, R2Key: "marketplace/listings/photo.png",
 			ContentType: "image/png", Status: "pending",
 			ExpiresAt: sql.NullTime{Time: time.Now().Add(time.Minute), Valid: true},
+			SizeBytes: sql.NullInt64{Int64: int64(len(avatarTestPNG(t))), Valid: true},
 		},
 		confirmRows: 1,
 	}
@@ -505,6 +559,7 @@ func TestMarketplaceConfirmImageRetryUsesUniqueFinalKey(t *testing.T) {
 			ID: imageID, ListingID: listingID, R2Key: "marketplace/listings/photo.png",
 			ContentType: "image/png", Status: "pending",
 			ExpiresAt: sql.NullTime{Time: time.Now().Add(time.Minute), Valid: true},
+			SizeBytes: sql.NullInt64{Int64: int64(len(avatarTestPNG(t))), Valid: true},
 		},
 		confirmRows: 1,
 	}
@@ -894,7 +949,7 @@ func TestMarketplaceImageMutationsAreScopedToOwnerAndListing(t *testing.T) {
 	h := newMarketplaceHandlerForTest(store, &marketplaceFakeRunner{store: store}, &stubR2{}, &shared.APIConfig{})
 
 	intentEcho := newDMTestEcho(user, http.MethodPost, "/api/marketplace/listings/:id/images/upload-intent", h.UploadImageIntent)
-	rec := doJSON(intentEcho, http.MethodPost, "/api/marketplace/listings/"+listingID.String()+"/images/upload-intent", `{"content_type":"image/png"}`)
+	rec := doJSON(intentEcho, http.MethodPost, "/api/marketplace/listings/"+listingID.String()+"/images/upload-intent", `{"content_type":"image/png","size_bytes":1234}`)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("upload-intent status = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -918,5 +973,165 @@ func TestMarketplaceImageMutationsAreScopedToOwnerAndListing(t *testing.T) {
 	}
 	if store.lastDeletedImage.ID != imageID || store.lastDeletedImage.ID_2 != listingID || store.lastDeletedImage.SellerUserID != user.ID {
 		t.Fatalf("delete image params = %+v", store.lastDeletedImage)
+	}
+}
+
+func TestMarketplaceImageIntentValidatesDeclaredSize(t *testing.T) {
+	user, listingID := viewerUser(), uuid.New()
+	store := &marketplaceFakeStore{
+		listingForLock: db.GetMarketplaceListingForUpdateRow{ID: listingID, SellerUserID: user.ID, Status: "active"},
+	}
+	h := newMarketplaceHandlerForTest(store, &marketplaceFakeRunner{store: store}, &stubR2{}, &shared.APIConfig{})
+	e := newDMTestEcho(user, http.MethodPost, "/api/marketplace/listings/:id/images/upload-intent", h.UploadImageIntent)
+	path := "/api/marketplace/listings/" + listingID.String() + "/images/upload-intent"
+	for _, body := range []string{
+		`{"content_type":"image/png","size_bytes":0}`,
+		fmt.Sprintf(`{"content_type":"image/png","size_bytes":%d}`, marketplaceMaxImageSize+1),
+	} {
+		if rec := doJSON(e, http.MethodPost, path, body); rec.Code != http.StatusBadRequest {
+			t.Fatalf("body %s status = %d, body=%s", body, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestMarketplaceConfirmImageSizeMismatchAndIdempotentRetry(t *testing.T) {
+	user, listingID, imageID := viewerUser(), uuid.New(), uuid.New()
+	pendingKey := "marketplace/listings/pending.png"
+	finalKey := "marketplace/listings/final.png"
+	image := db.MarketplaceListingImage{
+		ID: imageID, ListingID: listingID, R2Key: pendingKey, ContentType: "image/png",
+		Status: "pending", ExpiresAt: sql.NullTime{Time: time.Now().Add(time.Minute), Valid: true},
+		SizeBytes: sql.NullInt64{Int64: int64(len(avatarTestPNG(t))), Valid: true},
+	}
+	store := &marketplaceFakeStore{
+		imageForOwner:   image,
+		deleteImageKeys: []string{pendingKey},
+		confirmRows:     1,
+	}
+	r2 := &stubR2{
+		headObject: func(context.Context, string) (int64, error) { return 7, nil },
+		presignGet: func(context.Context, string, time.Duration) (string, error) {
+			return "https://r2.example/photo", nil
+		},
+	}
+	h := newMarketplaceHandlerForTest(store, &marketplaceFakeRunner{store: store}, r2, &shared.APIConfig{})
+	e := newDMTestEcho(user, http.MethodPost, "/api/marketplace/listings/:id/images/:image_id/confirm", h.ConfirmImage)
+	path := fmt.Sprintf("/api/marketplace/listings/%s/images/%s/confirm", listingID, imageID)
+	if rec := doJSON(e, http.MethodPost, path, ""); rec.Code != http.StatusBadRequest {
+		t.Fatalf("mismatched size status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	active := image
+	active.Status, active.R2Key = "active", finalKey
+	store.imageForOwner = active
+	rec := doJSON(e, http.MethodPost, path, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("idempotent confirm status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Data marketplaceImageObject `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Data.ID != imageID || response.Data.URL != "https://r2.example/photo" || response.Data.IsCover {
+		t.Fatalf("idempotent confirm response = %+v", response.Data)
+	}
+}
+
+func TestMarketplaceSetCoverImage(t *testing.T) {
+	user, listingID, imageID := viewerUser(), uuid.New(), uuid.New()
+	store := &marketplaceFakeStore{
+		listingForLock: db.GetMarketplaceListingForUpdateRow{ID: listingID, SellerUserID: user.ID, Status: "active"},
+		coverRow:       db.MarketplaceListingImage{ID: imageID, ListingID: listingID},
+	}
+	h := newMarketplaceHandlerForTest(store, &marketplaceFakeRunner{store: store}, &stubR2{}, &shared.APIConfig{})
+	e := newDMTestEcho(user, http.MethodPost, "/api/marketplace/listings/:id/images/:image_id/cover", h.SetCoverImage)
+	path := fmt.Sprintf("/api/marketplace/listings/%s/images/%s/cover", listingID, imageID)
+	if rec := doJSON(e, http.MethodPost, path, ""); rec.Code != http.StatusOK {
+		t.Fatalf("set cover status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if store.lastCoverClear != listingID || store.lastCoverParams.ID != imageID || store.lastCoverParams.ID_2 != listingID {
+		t.Fatalf("cover params clear=%s set=%+v", store.lastCoverClear, store.lastCoverParams)
+	}
+}
+
+func TestMarketplaceSellerListingsUsesSellerAndViewer(t *testing.T) {
+	user, sellerID, listingID := viewerUser(), uuid.New(), uuid.New()
+	store := &marketplaceFakeStore{
+		sellerRows: []db.ListMarketplaceListingsBySellerRow{{
+			ID: listingID, SellerUserID: sellerID, Username: "seller", CategorySlug: "other",
+			CategoryName: "Other", Title: "Chair", Status: "active",
+			CreatedAt: time.Now(), UpdatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
+		}},
+	}
+	h := newMarketplaceHandlerForTest(store, &marketplaceFakeRunner{store: store}, &stubR2{}, &shared.APIConfig{})
+	e := newDMTestEcho(user, http.MethodGet, "/api/marketplace/users/:seller_user_id/listings", h.SellerListings)
+	path := "/api/marketplace/users/" + sellerID.String() + "/listings"
+	if rec := doJSON(e, http.MethodGet, path, ""); rec.Code != http.StatusOK {
+		t.Fatalf("seller listings status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if store.lastSellerParams.SellerUserID != sellerID || store.lastSellerParams.ViewerID != user.ID {
+		t.Fatalf("seller listing params = %+v", store.lastSellerParams)
+	}
+}
+
+func TestMarketplaceModerationAllowlist(t *testing.T) {
+	moderator := viewerUser()
+	other := uuid.New()
+	reportID := uuid.New()
+	store := &marketplaceFakeStore{
+		reportRows: []db.ListMarketplaceReportsRow{{
+			ID: reportID, ListingID: uuid.New(), ReporterUserID: other,
+			Reason: "scam", Status: "open", CreatedAt: time.Now(), ListingTitle: "Phone",
+		}},
+		reviewRows: []db.MarketplaceReport{{
+			ID: reportID, ListingID: uuid.New(), ReporterUserID: other,
+			Reason: "scam", Status: "dismissed", CreatedAt: time.Now(),
+			ReviewedAt:     sql.NullTime{Time: time.Now(), Valid: true},
+			ReviewerUserID: uuid.NullUUID{UUID: moderator.ID, Valid: true},
+			ReviewNote:     "reviewed", Resolution: sql.NullString{String: "dismissed", Valid: true},
+		}},
+	}
+	cfg := &shared.APIConfig{MarketplaceModeratorIDs: []uuid.UUID{moderator.ID}}
+	h := newMarketplaceHandlerForTest(store, &marketplaceFakeRunner{store: store}, &stubR2{}, cfg)
+
+	listEcho := newDMTestEcho(moderator, http.MethodGet, "/api/marketplace/moderation/reports", h.ListReports)
+	if rec := doJSON(listEcho, http.MethodGet, "/api/marketplace/moderation/reports", ""); rec.Code != http.StatusOK {
+		t.Fatalf("moderator list status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if store.lastReportListParams.PageSize != marketplaceDefaultLimit+1 {
+		t.Fatalf("report page size = %d", store.lastReportListParams.PageSize)
+	}
+
+	reviewEcho := newDMTestEcho(moderator, http.MethodPost, "/api/marketplace/moderation/reports/:id/review", h.ReviewReport)
+	path := "/api/marketplace/moderation/reports/" + reportID.String() + "/review"
+	if rec := doJSON(reviewEcho, http.MethodPost, path, `{"resolution":"banned"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid review status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := doJSON(reviewEcho, http.MethodPost, path, `{"resolution":"dismissed","note":"reviewed"}`); rec.Code != http.StatusOK {
+		t.Fatalf("valid review status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if store.lastReviewParams.ID != reportID || store.lastReviewParams.ReviewerUserID != moderator.ID ||
+		store.lastReviewParams.Resolution != "dismissed" {
+		t.Fatalf("review params = %+v", store.lastReviewParams)
+	}
+
+	denied := newDMTestEcho(db.User{ID: other, IsActive: true}, http.MethodGet, "/api/marketplace/moderation/reports", h.ListReports)
+	if rec := doJSON(denied, http.MethodGet, "/api/marketplace/moderation/reports", ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("non-moderator status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMarketplaceArchiveExpiredListingsRecordsCleanup(t *testing.T) {
+	ids := []uuid.UUID{uuid.New()}
+	store := &marketplaceFakeStore{expiredListingIDs: ids, expiredListingKeys: []string{"marketplace/listings/old.png"}}
+	h := newMarketplaceHandlerForTest(store, &marketplaceFakeRunner{store: store}, &stubR2{}, &shared.APIConfig{})
+	archived, err := h.ArchiveExpiredListings(context.Background(), 5)
+	if err != nil || archived != 1 {
+		t.Fatalf("ArchiveExpiredListings = %d, err=%v", archived, err)
+	}
+	if store.lastExpiryBatch != 5 || len(store.cleanupOutbox) != 1 || len(store.cleanupOutbox[0]) != 1 {
+		t.Fatalf("batch=%d outbox=%+v", store.lastExpiryBatch, store.cleanupOutbox)
 	}
 }

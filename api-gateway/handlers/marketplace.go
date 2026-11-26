@@ -57,6 +57,7 @@ type marketplaceStore interface {
 	GetMarketplaceListing(context.Context, db.GetMarketplaceListingParams) (db.GetMarketplaceListingRow, error)
 	ListMarketplaceListings(context.Context, db.ListMarketplaceListingsParams) ([]db.ListMarketplaceListingsRow, error)
 	ListMarketplaceOwnListings(context.Context, db.ListMarketplaceOwnListingsParams) ([]db.ListMarketplaceOwnListingsRow, error)
+	ListMarketplaceListingsBySeller(context.Context, db.ListMarketplaceListingsBySellerParams) ([]db.ListMarketplaceListingsBySellerRow, error)
 	ListMarketplaceListingImages(context.Context, uuid.UUID) ([]db.MarketplaceListingImage, error)
 	ListMarketplaceImagesForListings(context.Context, string) ([]db.MarketplaceListingImage, error)
 	GetMarketplaceListingImageForOwner(context.Context, db.GetMarketplaceListingImageForOwnerParams) (db.MarketplaceListingImage, error)
@@ -71,6 +72,8 @@ type marketplaceStore interface {
 	InsertMarketplaceReport(context.Context, db.InsertMarketplaceReportParams) (int64, error)
 	CountMarketplaceReportsByReporterSince(context.Context, db.CountMarketplaceReportsByReporterSinceParams) (int64, error)
 	HasMarketplaceReport(context.Context, db.HasMarketplaceReportParams) (bool, error)
+	ListMarketplaceReports(context.Context, db.ListMarketplaceReportsParams) ([]db.ListMarketplaceReportsRow, error)
+	ReviewMarketplaceReport(context.Context, db.ReviewMarketplaceReportParams) (db.MarketplaceReport, error)
 	CountMarketplaceContactsByBuyerSince(context.Context, db.CountMarketplaceContactsByBuyerSinceParams) (int64, error)
 	InsertMarketplaceCleanupOutbox(context.Context, []string) error
 	SweepExpiredMarketplaceListingImages(context.Context, int32) ([]db.MarketplaceListingImage, error)
@@ -83,6 +86,11 @@ type marketplaceTxStore interface {
 	GetNextMarketplaceListingImagePosition(context.Context, uuid.UUID) (int16, error)
 	CreateMarketplaceListingImage(context.Context, db.CreateMarketplaceListingImageParams) (db.MarketplaceListingImage, error)
 	ConfirmMarketplaceListingImage(context.Context, db.ConfirmMarketplaceListingImageParams) (int64, error)
+	ClearMarketplaceListingCover(context.Context, uuid.UUID) error
+	SetMarketplaceListingImageCover(context.Context, db.SetMarketplaceListingImageCoverParams) (db.MarketplaceListingImage, error)
+	ListExpiredMarketplaceListingsForUpdate(context.Context, int32) ([]uuid.UUID, error)
+	ArchiveExpiredMarketplaceListings(context.Context, []uuid.UUID) (int64, error)
+	ListMarketplaceImageKeysByListings(context.Context, []uuid.UUID) ([]string, error)
 	GetMarketplaceContactSeller(context.Context, db.GetMarketplaceContactSellerParams) (uuid.UUID, error)
 	InsertMarketplaceContact(context.Context, db.InsertMarketplaceContactParams) (int64, error)
 	GetMarketplaceContactParticipants(context.Context, db.GetMarketplaceContactParticipantsParams) (db.GetMarketplaceContactParticipantsRow, error)
@@ -141,6 +149,7 @@ type marketplaceStatusRequest struct {
 
 type marketplaceImageIntentRequest struct {
 	ContentType string `json:"content_type" validate:"required"`
+	SizeBytes   int64  `json:"size_bytes" validate:"required,gt=0,lte=10485760"`
 }
 
 type marketplaceReportRequest struct {
@@ -165,6 +174,7 @@ type marketplaceListingObject struct {
 	IsFavorite  bool                      `json:"is_favorite"`
 	CreatedAt   string                    `json:"created_at"`
 	UpdatedAt   string                    `json:"updated_at"`
+	ExpiresAt   string                    `json:"expires_at"`
 }
 
 type marketplaceSellerObject struct {
@@ -182,6 +192,7 @@ type marketplaceImageObject struct {
 	ID        uuid.UUID `json:"id"`
 	URL       string    `json:"url"`
 	SortOrder int16     `json:"sort_order"`
+	IsCover   bool      `json:"is_cover"`
 }
 
 type marketplaceContactResponse struct {
@@ -200,6 +211,27 @@ type marketplaceReportResponse struct {
 	Created  bool `json:"created"`
 }
 
+type marketplaceReviewRequest struct {
+	Resolution string `json:"resolution" validate:"required,oneof=dismissed resolved"`
+	Note       string `json:"note" validate:"max=1000"`
+}
+
+type marketplaceReportObject struct {
+	ID               uuid.UUID  `json:"id"`
+	ListingID        uuid.UUID  `json:"listing_id"`
+	ListingTitle     string     `json:"listing_title"`
+	ReporterUserID   uuid.UUID  `json:"reporter_user_id"`
+	ReporterUsername string     `json:"reporter_username"`
+	Reason           string     `json:"reason"`
+	Details          string     `json:"details"`
+	Status           string     `json:"status"`
+	CreatedAt        string     `json:"created_at"`
+	ReviewedAt       *string    `json:"reviewed_at,omitempty"`
+	ReviewerUserID   *uuid.UUID `json:"reviewer_user_id,omitempty"`
+	ReviewNote       string     `json:"review_note"`
+	Resolution       *string    `json:"resolution,omitempty"`
+}
+
 type marketplaceListingFields struct {
 	id, sellerID                                uuid.UUID
 	username, categorySlug, categoryName        string
@@ -207,7 +239,7 @@ type marketplaceListingFields struct {
 	title, description, city, condition, status string
 	price                                       int64
 	latitude, longitude, distanceKM             *float64
-	createdAt, updatedAt                        time.Time
+	createdAt, updatedAt, expiresAt             time.Time
 	favorite                                    bool
 }
 
@@ -218,7 +250,7 @@ func marketplaceFieldsFromDetail(row db.GetMarketplaceListingRow) marketplaceLis
 		description: row.Description, city: row.City, condition: row.ItemCondition, status: row.Status,
 		price: row.PriceIdr, latitude: marketplaceNullableFloat(row.Latitude),
 		longitude: marketplaceNullableFloat(row.Longitude),
-		createdAt: row.CreatedAt, updatedAt: row.UpdatedAt, favorite: row.IsFavorite,
+		createdAt: row.CreatedAt, updatedAt: row.UpdatedAt, expiresAt: row.ExpiresAt, favorite: row.IsFavorite,
 	}
 }
 
@@ -229,7 +261,7 @@ func marketplaceFieldsFromBrowse(row db.ListMarketplaceListingsRow) marketplaceL
 		description: row.Description, city: row.City, condition: row.ItemCondition, status: row.Status,
 		price: row.PriceIdr, latitude: marketplaceNullableFloat(row.Latitude),
 		longitude: marketplaceNullableFloat(row.Longitude), distanceKM: marketplaceDistance(row.DistanceKm),
-		createdAt: row.CreatedAt, updatedAt: row.UpdatedAt, favorite: row.IsFavorite,
+		createdAt: row.CreatedAt, updatedAt: row.UpdatedAt, expiresAt: row.ExpiresAt, favorite: row.IsFavorite,
 	}
 }
 
@@ -240,7 +272,7 @@ func marketplaceFieldsFromOwn(row db.ListMarketplaceOwnListingsRow) marketplaceL
 		description: row.Description, city: row.City, condition: row.ItemCondition, status: row.Status,
 		price: row.PriceIdr, latitude: marketplaceNullableFloat(row.Latitude),
 		longitude: marketplaceNullableFloat(row.Longitude),
-		createdAt: row.CreatedAt, updatedAt: row.UpdatedAt, favorite: row.IsFavorite,
+		createdAt: row.CreatedAt, updatedAt: row.UpdatedAt, expiresAt: row.ExpiresAt, favorite: row.IsFavorite,
 	}
 }
 
@@ -251,7 +283,18 @@ func marketplaceFieldsFromFavorite(row db.ListMarketplaceFavoritesRow) marketpla
 		description: row.Description, city: row.City, condition: row.ItemCondition, status: row.Status,
 		price: row.PriceIdr, latitude: marketplaceNullableFloat(row.Latitude),
 		longitude: marketplaceNullableFloat(row.Longitude),
-		createdAt: row.CreatedAt, updatedAt: row.UpdatedAt, favorite: row.IsFavorite,
+		createdAt: row.CreatedAt, updatedAt: row.UpdatedAt, expiresAt: row.ExpiresAt, favorite: row.IsFavorite,
+	}
+}
+
+func marketplaceFieldsFromSeller(row db.ListMarketplaceListingsBySellerRow) marketplaceListingFields {
+	return marketplaceListingFields{
+		id: row.ID, sellerID: row.SellerUserID, username: row.Username, displayName: row.DisplayName,
+		categorySlug: row.CategorySlug, categoryName: row.CategoryName, title: row.Title,
+		description: row.Description, city: row.City, condition: row.ItemCondition, status: row.Status,
+		price: row.PriceIdr, latitude: marketplaceNullableFloat(row.Latitude),
+		longitude: marketplaceNullableFloat(row.Longitude), distanceKM: marketplaceDistance(row.DistanceKm),
+		createdAt: row.CreatedAt, updatedAt: row.UpdatedAt, expiresAt: row.ExpiresAt, favorite: row.IsFavorite,
 	}
 }
 
@@ -580,7 +623,8 @@ func (h *MarketplaceHandler) UploadImageIntent(c echo.Context) error {
 			return fmt.Errorf("find free image position: %w", err)
 		}
 		imageRow, err := q.CreateMarketplaceListingImage(ctx, db.CreateMarketplaceListingImageParams{
-			ListingID: listingID, R2Key: key, ContentType: contentType, SortOrder: position,
+			ListingID: listingID, R2Key: key, ContentType: contentType,
+			SizeBytes: sql.NullInt64{Int64: req.SizeBytes, Valid: true}, SortOrder: position,
 			ExpiresAt: sql.NullTime{Time: expiresAt, Valid: true},
 		})
 		if err != nil {
@@ -639,6 +683,16 @@ func (h *MarketplaceHandler) ConfirmImage(c echo.Context) error {
 		}
 		return marketplaceInternalError(c, "load marketplace image upload", err)
 	}
+	if imageRow.Status == "active" {
+		imageURL, err := h.R2.PresignGet(ctx, imageRow.R2Key, presignTTL(h.Cfg))
+		if err != nil || imageURL == "" {
+			slog.Error("PresignGet for confirmed marketplace image failed", "err", err, "user_id", user.ID, "listing_id", listingID)
+			return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "presign marketplace image URL"))
+		}
+		return shared.RespondOK(c, marketplaceImageObject{
+			ID: imageRow.ID, URL: imageURL, SortOrder: imageRow.SortOrder, IsCover: imageRow.IsCover,
+		})
+	}
 	if imageRow.Status != "pending" || !imageRow.ExpiresAt.Valid || !imageRow.ExpiresAt.Time.After(time.Now()) {
 		return shared.RespondError(c, shared.Wrap(shared.ErrMarketplaceConflict, "image upload intent expired"))
 	}
@@ -649,9 +703,9 @@ func (h *MarketplaceHandler) ConfirmImage(c echo.Context) error {
 		}
 		return marketplaceInternalError(c, "inspect marketplace image upload", err)
 	}
-	if size <= 0 || size > marketplaceMaxImageSize {
+	if size <= 0 || size > marketplaceMaxImageSize || !imageRow.SizeBytes.Valid || size != imageRow.SizeBytes.Int64 {
 		return h.rejectMarketplaceImage(c, user.ID, listingID, imageID,
-			shared.Wrap(shared.ErrUploadSizeInvalid, "image size is outside the 1 byte to 10 MiB range"))
+			shared.Wrap(shared.ErrUploadSizeInvalid, "uploaded image size does not match the presigned request"))
 	}
 	data, err := h.R2.GetObject(ctx, imageRow.R2Key, marketplaceMaxImageSize)
 	if err != nil {
@@ -732,6 +786,45 @@ func (h *MarketplaceHandler) DeleteImage(c echo.Context) error {
 		return marketplaceInternalError(c, "delete marketplace image", err)
 	}
 	return shared.RespondNoContent(c)
+}
+
+func (h *MarketplaceHandler) SetCoverImage(c echo.Context) error {
+	if !h.configuredForImages() || h.Run == nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "marketplace image cover is not configured"))
+	}
+	user, ok := middleware.UserFromContext(c)
+	if !ok || user == nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrUnauthorized, "no authenticated user"))
+	}
+	listingID, imageID, err := marketplaceImageIDs(c)
+	if err != nil {
+		return shared.RespondError(c, err)
+	}
+	ctx := c.Request().Context()
+	var covered db.MarketplaceListingImage
+	err = h.Run.Run(ctx, func(q marketplaceTxStore) error {
+		listing, err := q.GetMarketplaceListingForUpdate(ctx, listingID)
+		if err != nil {
+			return err
+		}
+		if listing.SellerUserID != user.ID || listing.Status == "archived" {
+			return sql.ErrNoRows
+		}
+		if err := q.ClearMarketplaceListingCover(ctx, listingID); err != nil {
+			return err
+		}
+		covered, err = q.SetMarketplaceListingImageCover(ctx, db.SetMarketplaceListingImageCoverParams{
+			ID: imageID, ID_2: listingID, SellerUserID: user.ID,
+		})
+		return err
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "listing image not found"))
+		}
+		return marketplaceInternalError(c, "set marketplace cover image", err)
+	}
+	return shared.RespondOK(c, map[string]any{"image_id": covered.ID, "is_cover": true})
 }
 
 func (h *MarketplaceHandler) Favorite(c echo.Context) error {
@@ -838,6 +931,47 @@ func (h *MarketplaceHandler) MyFavorites(c echo.Context) error {
 	return shared.RespondList(c, items, next)
 }
 
+func (h *MarketplaceHandler) SellerListings(c echo.Context) error {
+	if h.Queries == nil || h.R2 == nil || h.Cfg == nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "marketplace handler not configured"))
+	}
+	user, ok := middleware.UserFromContext(c)
+	if !ok || user == nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrUnauthorized, "no authenticated user"))
+	}
+	sellerID, err := uuid.Parse(c.Param("seller_user_id"))
+	if err != nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrValidation, "invalid seller_user_id"))
+	}
+	params, limit, err := marketplaceSellerListingParams(c, user.ID, sellerID)
+	if err != nil {
+		return shared.RespondError(c, err)
+	}
+	rows, err := h.Queries.ListMarketplaceListingsBySeller(c.Request().Context(), params)
+	if err != nil {
+		return marketplaceInternalError(c, "list seller marketplace listings", err)
+	}
+	hasMore := len(rows) > limit
+	if hasMore {
+		rows = rows[:limit]
+	}
+	fields, ids := make([]marketplaceListingFields, 0, len(rows)), make([]uuid.UUID, 0, len(rows))
+	for _, row := range rows {
+		fields = append(fields, marketplaceFieldsFromSeller(row))
+		ids = append(ids, row.ID)
+	}
+	items, err := h.listingObjects(c.Request().Context(), fields, ids)
+	if err != nil {
+		return marketplaceInternalError(c, "presign marketplace image URLs", err)
+	}
+	var next *string
+	if hasMore && len(rows) > 0 {
+		cursor := shared.EncodeCursor(rows[len(rows)-1].CreatedAt, rows[len(rows)-1].ID)
+		next = &cursor
+	}
+	return shared.RespondList(c, items, next)
+}
+
 func (h *MarketplaceHandler) Report(c echo.Context) error {
 	if h.Queries == nil || h.Run == nil {
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "marketplace handler not configured"))
@@ -919,6 +1053,118 @@ func (h *MarketplaceHandler) Report(c echo.Context) error {
 		return shared.RespondOK(c, marketplaceReportResponse{Reported: true})
 	}
 	return shared.RespondCreated(c, marketplaceReportResponse{Reported: true, Created: true})
+}
+
+func (h *MarketplaceHandler) ListReports(c echo.Context) error {
+	if h.Queries == nil || h.Cfg == nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "marketplace moderation is not configured"))
+	}
+	user, ok := middleware.UserFromContext(c)
+	if !ok || user == nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrUnauthorized, "no authenticated user"))
+	}
+	if !h.isMarketplaceModerator(user.ID) {
+		return shared.RespondError(c, shared.Wrap(shared.ErrForbidden, "marketplace moderator only"))
+	}
+	limit, err := marketplaceLimit(c.QueryParam("limit"))
+	if err != nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrValidation, err.Error()))
+	}
+	cursorTime, cursorID, err := shared.DecodeCursor(c.QueryParam("cursor"))
+	if err != nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrValidation, "invalid cursor"))
+	}
+	params := db.ListMarketplaceReportsParams{PageSize: int32(limit + 1)}
+	if status := c.QueryParam("status"); status != "" {
+		if status != "open" && status != "dismissed" && status != "resolved" {
+			return shared.RespondError(c, marketplaceValidationError("status", "must be open, dismissed, or resolved"))
+		}
+		params.Status = sql.NullString{String: status, Valid: true}
+	}
+	if !cursorTime.IsZero() {
+		params.CursorCreatedAt = sql.NullTime{Time: cursorTime, Valid: true}
+		params.CursorID = uuid.NullUUID{UUID: cursorID, Valid: true}
+	}
+	rows, err := h.Queries.ListMarketplaceReports(c.Request().Context(), params)
+	if err != nil {
+		return marketplaceInternalError(c, "list marketplace reports", err)
+	}
+	hasMore := len(rows) > limit
+	if hasMore {
+		rows = rows[:limit]
+	}
+	items := make([]marketplaceReportObject, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, marketplaceReportObject{
+			ID: row.ID, ListingID: row.ListingID, ListingTitle: row.ListingTitle,
+			ReporterUserID: row.ReporterUserID, ReporterUsername: row.ReporterUsername,
+			Reason: row.Reason, Details: row.Details, Status: row.Status,
+			CreatedAt: formatVideoTime(row.CreatedAt), ReviewedAt: marketplaceNullableTime(row.ReviewedAt),
+			ReviewerUserID: marketplaceNullableUUID(row.ReviewerUserID), ReviewNote: row.ReviewNote,
+			Resolution: marketplaceNullableString(row.Resolution),
+		})
+	}
+	var next *string
+	if hasMore && len(rows) > 0 {
+		cursor := shared.EncodeCursor(rows[len(rows)-1].CreatedAt, rows[len(rows)-1].ID)
+		next = &cursor
+	}
+	return shared.RespondList(c, items, next)
+}
+
+func (h *MarketplaceHandler) ReviewReport(c echo.Context) error {
+	if h.Queries == nil || h.Cfg == nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "marketplace moderation is not configured"))
+	}
+	user, ok := middleware.UserFromContext(c)
+	if !ok || user == nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrUnauthorized, "no authenticated user"))
+	}
+	if !h.isMarketplaceModerator(user.ID) {
+		return shared.RespondError(c, shared.Wrap(shared.ErrForbidden, "marketplace moderator only"))
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrValidation, "invalid report id"))
+	}
+	var req marketplaceReviewRequest
+	if err := bindMarketplaceJSON(c, &req); err != nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrValidation, "invalid JSON body"))
+	}
+	req.Resolution = strings.TrimSpace(req.Resolution)
+	req.Note = strings.TrimSpace(req.Note)
+	if err := c.Validate(&req); err != nil {
+		return shared.RespondError(c, err)
+	}
+	row, err := h.Queries.ReviewMarketplaceReport(c.Request().Context(), db.ReviewMarketplaceReportParams{
+		ID: id, Status: req.Resolution, ReviewerUserID: user.ID,
+		ReviewNote: req.Note, Resolution: req.Resolution,
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "open report not found"))
+		}
+		return marketplaceInternalError(c, "review marketplace report", err)
+	}
+	return shared.RespondOK(c, marketplaceReportObject{
+		ID: row.ID, ListingID: row.ListingID, Reason: row.Reason, Details: row.Details,
+		Status: row.Status, CreatedAt: formatVideoTime(row.CreatedAt),
+		ReviewedAt:     marketplaceNullableTime(row.ReviewedAt),
+		ReviewerUserID: marketplaceNullableUUID(row.ReviewerUserID), ReviewNote: row.ReviewNote,
+		Resolution: marketplaceNullableString(row.Resolution),
+	})
+}
+
+func (h *MarketplaceHandler) isMarketplaceModerator(userID uuid.UUID) bool {
+	if h.Cfg == nil {
+		return false
+	}
+	for _, id := range h.Cfg.MarketplaceModeratorIDs {
+		if id == userID {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *MarketplaceHandler) ContactSeller(c echo.Context) error {
@@ -1128,6 +1374,39 @@ func (h *MarketplaceHandler) SweepExpiredImages(ctx context.Context, batchSize i
 	return swept, err
 }
 
+func (h *MarketplaceHandler) ArchiveExpiredListings(ctx context.Context, batchSize int32) (int, error) {
+	if h.Queries == nil || h.Run == nil {
+		return 0, fmt.Errorf("marketplace listing expiry sweeper is not configured")
+	}
+	if batchSize <= 0 {
+		return 0, fmt.Errorf("marketplace expiry batch size must be > 0")
+	}
+	archived := 0
+	err := h.Run.Run(ctx, func(q marketplaceTxStore) error {
+		ids, err := q.ListExpiredMarketplaceListingsForUpdate(ctx, batchSize)
+		if err != nil {
+			return err
+		}
+		if len(ids) == 0 {
+			return nil
+		}
+		keys, err := q.ListMarketplaceImageKeysByListings(ctx, ids)
+		if err != nil {
+			return err
+		}
+		rows, err := q.ArchiveExpiredMarketplaceListings(ctx, ids)
+		if err != nil {
+			return err
+		}
+		archived = int(rows)
+		if archived == 0 {
+			return nil
+		}
+		return recordMarketplaceCleanup(ctx, q, keys)
+	})
+	return archived, err
+}
+
 func (h *MarketplaceHandler) listingObject(ctx context.Context, fields marketplaceListingFields, rows []db.MarketplaceListingImage) (marketplaceListingObject, error) {
 	items, err := h.imageObjects(ctx, rows)
 	if err != nil {
@@ -1145,6 +1424,7 @@ func (h *MarketplaceHandler) listingObject(ctx context.Context, fields marketpla
 		Latitude: fields.latitude, Longitude: fields.longitude, DistanceKM: fields.distanceKM,
 		Condition: fields.condition, Status: fields.status, Images: items, IsFavorite: fields.favorite,
 		CreatedAt: formatVideoTime(fields.createdAt), UpdatedAt: formatVideoTime(fields.updatedAt),
+		ExpiresAt: formatVideoTime(fields.expiresAt),
 	}, nil
 }
 
@@ -1185,7 +1465,7 @@ func (h *MarketplaceHandler) imageObjects(ctx context.Context, rows []db.Marketp
 		if url == "" {
 			return nil, fmt.Errorf("presign image %s returned an empty URL", row.ID)
 		}
-		items = append(items, marketplaceImageObject{ID: row.ID, URL: url, SortOrder: row.SortOrder})
+		items = append(items, marketplaceImageObject{ID: row.ID, URL: url, SortOrder: row.SortOrder, IsCover: row.IsCover})
 	}
 	return items, nil
 }
@@ -1328,6 +1608,23 @@ func marketplaceOwnListingParams(c echo.Context, userID uuid.UUID) (db.ListMarke
 	return params, limit, nil
 }
 
+func marketplaceSellerListingParams(c echo.Context, viewerID, sellerID uuid.UUID) (db.ListMarketplaceListingsBySellerParams, int, error) {
+	limit, err := marketplaceLimit(c.QueryParam("limit"))
+	if err != nil {
+		return db.ListMarketplaceListingsBySellerParams{}, 0, shared.Wrap(shared.ErrValidation, err.Error())
+	}
+	cursorTime, cursorID, err := shared.DecodeCursor(c.QueryParam("cursor"))
+	if err != nil {
+		return db.ListMarketplaceListingsBySellerParams{}, 0, shared.Wrap(shared.ErrValidation, "invalid cursor")
+	}
+	params := db.ListMarketplaceListingsBySellerParams{ViewerID: viewerID, SellerUserID: sellerID, PageSize: int32(limit + 1)}
+	if !cursorTime.IsZero() {
+		params.CursorCreatedAt = sql.NullTime{Time: cursorTime, Valid: true}
+		params.CursorID = uuid.NullUUID{UUID: cursorID, Valid: true}
+	}
+	return params, limit, nil
+}
+
 func marketplaceLimit(raw string) (int, error) {
 	if raw == "" {
 		return marketplaceDefaultLimit, nil
@@ -1387,6 +1684,28 @@ func marketplaceNullableFloat(value sql.NullFloat64) *float64 {
 	}
 	coordinate := value.Float64
 	return &coordinate
+}
+
+func marketplaceNullableTime(value sql.NullTime) *string {
+	if !value.Valid {
+		return nil
+	}
+	formatted := formatVideoTime(value.Time)
+	return &formatted
+}
+
+func marketplaceNullableUUID(value uuid.NullUUID) *uuid.UUID {
+	if !value.Valid {
+		return nil
+	}
+	return &value.UUID
+}
+
+func marketplaceNullableString(value sql.NullString) *string {
+	if !value.Valid {
+		return nil
+	}
+	return &value.String
 }
 
 func marketplaceDistance(value any) *float64 {

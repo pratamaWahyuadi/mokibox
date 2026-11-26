@@ -5,7 +5,7 @@ persistent state in PostgreSQL. It does not upload objects to R2.
 
 ## Prerequisites
 
-- PostgreSQL with migrations `001`-`014` applied.
+- PostgreSQL with migrations `001`-`016` applied.
 - A running API Gateway connected to that database with
   `MARKETPLACE_ENABLED=true`.
 - Two existing active users: one seller and one buyer, with valid bearer tokens.
@@ -38,7 +38,7 @@ Optional:
   ordinary tagged suites.
 
 `make smoke-marketplace-live` sources the gitignored `.env.live.local` and
-requires the six `MARKETPLACE_*` variables above. Set
+requires the `MARKETPLACE_*` variables above. Set
 `MARKETPLACE_SMOKE_MODE=local-simulation` only when pointing it at the local
 stub gateway; the target prints a warning for that mode.
 
@@ -56,7 +56,7 @@ local environment.
 ## Smoke gates
 
 - Local: run `go test -tags=integration ./shared/db -count=1` with `DATABASE_URL`
-  against migrations `001`-`014`, then run this script against a gateway with
+  against migrations `001`-`016`, then run this script against a gateway with
   `MARKETPLACE_ENABLED=true`. Confirm expired image-intent keys land in
   `marketplace_cleanup_outbox`.
 - Live/staging: repeat against a disposable staging database with real R2 and

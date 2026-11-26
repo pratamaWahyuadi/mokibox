@@ -81,7 +81,8 @@ jobs:
             migrations/012_marketplace.sql \
             migrations/013_marketplace_cleanup_outbox.sql \
             migrations/014_marketplace_location.sql \
-            migrations/015_dm_authorization_hardening.sql
+            migrations/015_dm_authorization_hardening.sql \
+            migrations/016_marketplace_extensions.sql
           do
             psql -h 127.0.0.1 -U postgres -d mokibox_dm_ci -v ON_ERROR_STOP=1 -f "$migration" >/dev/null
           done
@@ -106,13 +107,21 @@ jobs:
                             WHERE table_name = 'marketplace_cleanup_outbox' AND column_name = 'next_attempt_at')
                  AND EXISTS (SELECT 1 FROM information_schema.columns
                              WHERE table_name = 'marketplace_cleanup_outbox' AND column_name = 'r2_keys')
-                 AND EXISTS (SELECT 1 FROM information_schema.columns
-                             WHERE table_name = 'marketplace_listings' AND column_name = 'latitude')
-                 AND EXISTS (SELECT 1 FROM information_schema.columns
-                             WHERE table_name = 'marketplace_listings' AND column_name = 'longitude')")"
-
+                  AND EXISTS (SELECT 1 FROM information_schema.columns
+                              WHERE table_name = 'marketplace_listings' AND column_name = 'latitude')
+                  AND EXISTS (SELECT 1 FROM information_schema.columns
+                              WHERE table_name = 'marketplace_listings' AND column_name = 'longitude')
+                  AND EXISTS (SELECT 1 FROM information_schema.columns
+                              WHERE table_name = 'marketplace_listings' AND column_name = 'expires_at')
+                  AND EXISTS (SELECT 1 FROM information_schema.columns
+                              WHERE table_name = 'marketplace_listing_images' AND column_name = 'size_bytes')
+                  AND EXISTS (SELECT 1 FROM information_schema.columns
+                              WHERE table_name = 'marketplace_listing_images' AND column_name = 'is_cover')
+                  AND EXISTS (SELECT 1 FROM information_schema.columns
+                              WHERE table_name = 'marketplace_reports' AND column_name = 'reviewed_at')")"
 
           test "$result" = t
+
       - name: Integration tests
         env:
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/mokibox_dm_ci?sslmode=disable

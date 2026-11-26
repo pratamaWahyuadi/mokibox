@@ -62,10 +62,11 @@ Redis (Asynq).
 
 Go gateway menyediakan key/device endpoints dan relay ciphertext opaque
 (`DM_E2EE_ENABLED=false` secara default). Terapkan migrasi DM dengan
-`make db-migrate-dm` (009–011: relay, sender FK, fallback key) dan migrasi
-Marketplace dengan `make db-migrate-marketplace` (012–014: kontak DM, expiry,
-revocation, cleanup outbox, dan radius lokasi). Untuk DB yang sudah punya 009,
-pakai `make db-migrate-dm-existing` (010–011). Migrasi 009–014 harus diterapkan di semua
+`make db-migrate-dm` (009–011: relay, sender FK, fallback key, plus 015: block)
+dan migrasi Marketplace dengan `make db-migrate-marketplace` (012–014: kontak DM,
+expiry, revocation, cleanup outbox, radius lokasi, plus 016: expiry listing,
+cover photo, dan audit moderasi). Untuk DB yang sudah punya 009,
+pakai `make db-migrate-dm-existing` (010–011 dan 015). Migrasi 009–016 harus diterapkan di semua
 deploy walaupun flag DM mati, karena penghapusan akun selalu membersihkan data
 DM/Marketplace dan eligibility DM membaca tabel kontak. Ini adalah gate deploy:
 jalankan migrasi sebelum binary baru melayani traffic; kalau tidak,
@@ -78,7 +79,7 @@ ingin rapi. Lihat [desain backend DM E2EE](./planning/13_dm_e2ee_design.md),
 [gate rilis DM](./planning/14_dm_e2ee_release_gate.md), dan
 [smoke DM](./scripts/smoketest/dm/README.md).
 
-CI menjalankan build, vet, test, race test, verifikasi modul, migrasi 009–014
+CI menjalankan build, vet, test, race test, verifikasi modul, migrasi 009–016
 pada PostgreSQL 16, dan integration test bertanda `integration` untuk setiap
 PR; definisinya ada di `.github/workflows/ci.yml`.
 
@@ -86,10 +87,10 @@ PR; definisinya ada di `.github/workflows/ci.yml`.
 
 Backend Marketplace v1 menyediakan listing, pencarian/filter termasuk radius
 lokasi ala Facebook Marketplace, foto lewat presigned R2, favorit, laporan
-manual, dan izin kontak ke DM E2EE yang ada. Transaksi/pembayaran disepakati
-pembeli dan penjual di luar backend. Checkout, shipping, dashboard moderasi,
-dan UI belum termasuk. Lihat [scope Marketplace](./planning/15_marketplace_v1.md).
-Sebelum menjalankan gateway versi ini, terapkan migration 012–014 satu kali
+manual dengan endpoint tinjau moderator, dan izin kontak ke DM E2EE yang ada.
+Transaksi/pembayaran disepakati pembeli dan penjual di luar backend. Checkout,
+shipping, dan UI belum termasuk. Lihat [scope Marketplace](./planning/15_marketplace_v1.md).
+Sebelum menjalankan gateway versi ini, terapkan migration 012–014 dan 016 satu kali
 pada database lokal yang sudah memiliki schema 001–011 dengan
 `make db-migrate-marketplace`; semuanya forward-only dan diperlukan juga oleh
 account deletion serta izin DM.
@@ -97,7 +98,9 @@ Route Marketplace dikontrol `MARKETPLACE_ENABLED` (default false di config,
 `.env.example`, dan docker-compose; aktifkan hanya untuk smoke lokal/setelah
 review selesai), dengan janitor
 `MARKETPLACE_SWEEP_INTERVAL=1m` dan `MARKETPLACE_SWEEP_BATCH=100` untuk
-menyapu image intent kedaluwarsa dan retry cleanup R2 dari outbox.
+menyapu image intent dan listing kedaluwarsa serta retry cleanup R2 dari outbox.
+Endpoint `/api/marketplace/moderation/*` hanya untuk UUID di
+`MARKETPLACE_MODERATOR_USER_IDS` (daftar kosong berarti tidak ada moderator).
 Jangan terapkan pada production dalam scope lokal ini. Semua write Marketplace
 memakai limiter 12/minute burst 10; pembuatan listing, laporan, dan kontak
 juga dibatasi 20 per user per 24 jam dengan kunci advisory lock di database.

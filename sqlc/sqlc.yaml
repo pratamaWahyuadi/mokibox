@@ -11,6 +11,7 @@ sql:
       - "../migrations/013_marketplace_cleanup_outbox.sql"
       - "../migrations/014_marketplace_location.sql"
       - "../migrations/015_dm_authorization_hardening.sql"
+      - "../migrations/016_marketplace_extensions.sql"
     # Queries live in per-table files under sqlc/queries/.
     # sqlc picks up every *.sql file in the directory in
     # alphabetical order; split was introduced in phase-1.5

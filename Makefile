@@ -103,8 +103,8 @@ db-migrate-dm-existing: ## Apply DM 010-011 and 015 to a database that already h
 	done
 
 .PHONY: db-migrate-marketplace
-db-migrate-marketplace: ## Apply Marketplace migrations 012-014 (forward-only).
-	@for migration in 012_marketplace.sql 013_marketplace_cleanup_outbox.sql 014_marketplace_location.sql; do \
+db-migrate-marketplace: ## Apply Marketplace migrations 012-014 and 016 (forward-only).
+	@for migration in 012_marketplace.sql 013_marketplace_cleanup_outbox.sql 014_marketplace_location.sql 016_marketplace_extensions.sql; do \
 		if [ ! -f $(MIGRATIONS)/$$migration ]; then \
 			echo "ERROR: $(MIGRATIONS)/$$migration not found."; \
 			exit 1; \

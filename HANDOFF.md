@@ -63,7 +63,7 @@ Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
 - Tes baru: outbox retry identik, karantina + lanjut, fallback upload/bundle,
   fallback encrypt/decrypt, dan re-register tidak menghapus inbox terkirim.
   `make db-migrate-dm` menerapkan 009–011 + 015; `make db-migrate-marketplace`
-  menerapkan 012–014.
+  menerapkan 012–014 + 016.
 
 ## Security follow-up — DM authorization hardening
 
@@ -76,17 +76,33 @@ Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
   idempotency pasangan saat blok dipasang. Limiter key bundle dihitung per
   `(caller, target)` agar satu klien tidak menguras one-time key korban.
 
-## Review follow-up — QA verdict (2026-11-25)
+## Review follow-up — Marketplace extensions
 
+- `migrations/016_marketplace_extensions.sql` menambah `expires_at` pada listing
+  (default 30 hari), `size_bytes`/`is_cover` pada foto, dan kolom audit review
+  pada laporan. Migrasi ini wajib sebelum binary baru melayani traffic.
+- Upload intent meminta `size_bytes`; R2 tidak mendukung `content-length-range`
+  pada presigned PUT, jadi ukuran divalidasi ulang lewat `HeadObject` di
+  `/confirm`. `ConfirmImage` sekarang idempoten untuk foto yang sudah aktif.
+- Endpoint baru: `GET /api/marketplace/users/:seller_user_id/listings`,
+  `POST /api/marketplace/listings/:id/images/:image_id/cover`,
+  `GET /api/marketplace/moderation/reports`, dan
+  `POST /api/marketplace/moderation/reports/:id/review`. Moderasi hanya untuk
+  UUID di `MARKETPLACE_MODERATOR_USER_IDS`.
+- Janitor menyapu listing kedaluwarsa ke `archived`, menghapus objek R2-nya lewat
+  cleanup outbox, dan filter browse/favorit/laporan/kontak mengabaikan listing
+  yang sudah kedaluwarsa.
+
+## Review follow-up — QA verdict (2026-11-25)
 
 - `DeleteUserData` sekarang menghapus semua inbox DM where user sebagai sender
   atau recipient, lalu `DeleteDMDevicesByUser` menghapus device, one-time/fallback
   key, dan idempotency dalam tx yang sama dengan tombstone. Ini berjalan walau
-  `DM_E2EE_ENABLED=false`; migrasi 001–015 wajib untuk semua deploy.
+  `DM_E2EE_ENABLED=false`; migrasi 001–016 wajib untuk semua deploy.
 - Tes `TestDeleteMe_HappyPathCascadeAndEnqueue` memverifikasi urutan pembersihan
   DM; `TestDeleteMe_DMCleanupFailureIs500` memverifikasi rollback.
 - `scripts/smoketest/dm` menjalankan alur register, upload key, send, poll, ack
-  terhadap HTTP + PostgreSQL asli, termasuk schema 009–011 + 015, `FOR UPDATE SKIP
+  terhadap HTTP + PostgreSQL asli, termasuk schema 009–011 + 015 + 016, `FOR UPDATE SKIP
   LOCKED`, `ON CONFLICT ... WHERE`, dan ciphertext-only storage. Bukti ada di
   `scripts/smoketest/dm/README.md`.
 - `apiDelivery` hanya dibuat saat flag DM aktif; tes route memeriksa enam route
@@ -103,11 +119,11 @@ Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
 - Smoke concurrent claim diperkuat: transaksi pertama menahan lock, transaksi
   kedua harus mengambil key berbeda dalam 3 detik; cleanup dipindah ke `defer`
   agar gagal di tengah tidak menyisakan data.
-- Deploy gate didokumentasikan: migrasi 001–015 wajib sebelum binary baru
+- Deploy gate didokumentasikan: migrasi 001–016 wajib sebelum binary baru
   melayani traffic. Keputusan v1 penghapusan sepihak dan drift index 010 lama
   juga dicatat.
 - CI ditambahkan di `.github/workflows/ci.yml`: build/vet/test/race/mod verify
-  dengan Go dari `go.mod` (1.25.5), job migrasi 001–015 pada PostgreSQL 16, dan
+  dengan Go dari `go.mod` (1.25.5), job migrasi 001–016 pada PostgreSQL 16, dan
   integration test bertanda `integration`.
 - Gate rilis DM, template keputusan produk, dan template persetujuan
   lisensi/audit dirangkum di
@@ -739,7 +755,7 @@ HANDOFF.md                               MODIFIED — this section
   revocation denies both directions, quota violations return
   `429 RATE_LIMITED`, expired grants renew, revoked grants stay denied, and
   revocation only purges when no other authorization remains.
-- CI now applies migrations 012-014, asserts the new contact, cleanup outbox,
+- CI now applies migrations 012-014 and 016, asserts the new contact, cleanup outbox,
   and coordinate columns, and runs the tagged SQL integration tests against the service
   PostgreSQL, including a concurrent 21-request quota test that must commit
   exactly 20 listings.

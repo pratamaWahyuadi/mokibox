@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 func TestMarketplaceQueriesIntegration(t *testing.T) {
@@ -378,4 +380,163 @@ func TestMarketplaceVisibilitySweepAndCleanupOutboxIntegration(t *testing.T) {
 		t.Fatalf("swept key outbox = %+v, err=%v", due, err)
 	}
 	outboxIDs = append(outboxIDs, due[0].ID)
+}
+
+func TestMarketplaceExtensionsIntegration(t *testing.T) {
+	sqlDB, q := newIntegrationDB(t)
+	ctx := context.Background()
+	seller := newTempUser(t, sqlDB, q)
+	buyer := newTempUser(t, sqlDB, q)
+	moderator := newTempUser(t, sqlDB, q)
+	t.Cleanup(func() {
+		if err := q.DeleteMarketplaceReportsByUser(ctx, buyer.ID); err != nil {
+			t.Errorf("cleanup: delete temp reports: %v", err)
+		}
+		if err := q.DeleteMarketplaceListingsBySeller(ctx, seller.ID); err != nil {
+			t.Errorf("cleanup: delete temp listings: %v", err)
+		}
+	})
+
+	listingTitle := "extension-" + uuid.NewString()
+	listing, err := q.CreateMarketplaceListing(ctx, CreateMarketplaceListingParams{
+		SellerUserID: seller.ID, CategorySlug: "electronics", Title: listingTitle,
+		Description: "Temporary SQL integration listing", PriceIdr: 750000,
+		City: "Bandung", ItemCondition: "good",
+	})
+	if err != nil {
+		t.Fatalf("CreateMarketplaceListing: %v", err)
+	}
+
+	firstKey := "marketplace/integration/cover-first-" + listing.ID.String() + ".png"
+	secondKey := "marketplace/integration/cover-second-" + listing.ID.String() + ".png"
+	var firstImage, secondImage MarketplaceListingImage
+	for _, image := range []struct {
+		key       string
+		sortOrder int16
+		dest      *MarketplaceListingImage
+	}{
+		{key: firstKey, sortOrder: 0, dest: &firstImage},
+		{key: secondKey, sortOrder: 1, dest: &secondImage},
+	} {
+		created, err := q.CreateMarketplaceListingImage(ctx, CreateMarketplaceListingImageParams{
+			ListingID: listing.ID, R2Key: image.key, ContentType: "image/png",
+			SizeBytes: sql.NullInt64{Int64: 2048, Valid: true}, SortOrder: image.sortOrder,
+			ExpiresAt: sql.NullTime{Time: time.Now().Add(time.Hour), Valid: true},
+		})
+		if err != nil {
+			t.Fatalf("CreateMarketplaceListingImage: %v", err)
+		}
+		rows, err := q.ConfirmMarketplaceListingImage(ctx, ConfirmMarketplaceListingImageParams{
+			ID: created.ID, ID_2: listing.ID, SellerUserID: seller.ID, R2Key: image.key,
+		})
+		if err != nil || rows != 1 {
+			t.Fatalf("ConfirmMarketplaceListingImage rows = %d, err=%v", rows, err)
+		}
+		*image.dest = created
+	}
+
+	if err := q.ClearMarketplaceListingCover(ctx, listing.ID); err != nil {
+		t.Fatalf("ClearMarketplaceListingCover: %v", err)
+	}
+	cover, err := q.SetMarketplaceListingImageCover(ctx, SetMarketplaceListingImageCoverParams{
+		ID: firstImage.ID, ID_2: listing.ID, SellerUserID: seller.ID,
+	})
+	if err != nil || cover.ID != firstImage.ID || !cover.IsCover {
+		t.Fatalf("SetMarketplaceListingImageCover first = %+v, err=%v", cover, err)
+	}
+	if err := q.ClearMarketplaceListingCover(ctx, listing.ID); err != nil {
+		t.Fatalf("ClearMarketplaceListingCover before switch: %v", err)
+	}
+	cover, err = q.SetMarketplaceListingImageCover(ctx, SetMarketplaceListingImageCoverParams{
+		ID: secondImage.ID, ID_2: listing.ID, SellerUserID: seller.ID,
+	})
+	if err != nil || cover.ID != secondImage.ID || !cover.IsCover {
+		t.Fatalf("SetMarketplaceListingImageCover second = %+v, err=%v", cover, err)
+	}
+	var coverCount int
+	if err := sqlDB.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM marketplace_listing_images
+		WHERE listing_id = $1 AND is_cover = TRUE`, listing.ID).Scan(&coverCount); err != nil || coverCount != 1 {
+		t.Fatalf("cover count = %d, err=%v; want 1", coverCount, err)
+	}
+
+	sellerRows, err := q.ListMarketplaceListingsBySeller(ctx, ListMarketplaceListingsBySellerParams{
+		ViewerID: buyer.ID, SellerUserID: seller.ID, PageSize: 10,
+	})
+	if err != nil || len(sellerRows) != 1 || sellerRows[0].ID != listing.ID {
+		t.Fatalf("seller listing rows = %+v, err=%v", sellerRows, err)
+	}
+
+	if _, err := q.InsertMarketplaceReport(ctx, InsertMarketplaceReportParams{
+		UserID: buyer.ID, Reason: "scam", ListingID: listing.ID,
+	}); err != nil {
+		t.Fatalf("InsertMarketplaceReport: %v", err)
+	}
+	var reportID uuid.UUID
+	if err := sqlDB.QueryRowContext(ctx, `
+		SELECT id FROM marketplace_reports
+		WHERE listing_id = $1 AND reporter_user_id = $2`, listing.ID, buyer.ID).Scan(&reportID); err != nil {
+		t.Fatalf("find marketplace report: %v", err)
+	}
+	reviewed, err := q.ReviewMarketplaceReport(ctx, ReviewMarketplaceReportParams{
+		ID: reportID, Status: "dismissed", ReviewerUserID: moderator.ID,
+		ReviewNote: "no action", Resolution: "dismissed",
+	})
+	if err != nil || reviewed.Status != "dismissed" || !reviewed.ReviewedAt.Valid || reviewed.ReviewerUserID.UUID != moderator.ID {
+		t.Fatalf("ReviewMarketplaceReport = %+v, err=%v", reviewed, err)
+	}
+	reports, err := q.ListMarketplaceReports(ctx, ListMarketplaceReportsParams{
+		Status: sql.NullString{String: "dismissed", Valid: true}, PageSize: 10,
+	})
+	if err != nil || len(reports) == 0 {
+		t.Fatalf("ListMarketplaceReports = %+v, err=%v", reports, err)
+	}
+
+	if _, err := sqlDB.ExecContext(ctx, `
+		UPDATE marketplace_listings
+		SET expires_at = NOW() - INTERVAL '1 second'
+		WHERE id = $1`, listing.ID); err != nil {
+		t.Fatalf("expire listing: %v", err)
+	}
+	browse, err := q.ListMarketplaceListings(ctx, ListMarketplaceListingsParams{
+		ViewerID: buyer.ID, QueryText: sql.NullString{String: listingTitle, Valid: true}, PageSize: 10,
+	})
+	if err != nil || len(browse) != 0 {
+		t.Fatalf("expired browse rows = %+v, err=%v; want empty", browse, err)
+	}
+	sellerRows, err = q.ListMarketplaceListingsBySeller(ctx, ListMarketplaceListingsBySellerParams{
+		ViewerID: buyer.ID, SellerUserID: seller.ID, PageSize: 10,
+	})
+	if err != nil || len(sellerRows) != 0 {
+		t.Fatalf("expired seller rows = %+v, err=%v; want empty", sellerRows, err)
+	}
+	eligible, err := q.IsMarketplaceFavoriteEligible(ctx, IsMarketplaceFavoriteEligibleParams{
+		UserID: buyer.ID, ListingID: listing.ID,
+	})
+	if err != nil || eligible {
+		t.Fatalf("expired favorite eligibility = %v, err=%v; want false", eligible, err)
+	}
+
+	expiredIDs, err := q.ListExpiredMarketplaceListingsForUpdate(ctx, 100)
+	if err != nil {
+		t.Fatalf("ListExpiredMarketplaceListingsForUpdate: %v", err)
+	}
+	found := false
+	for _, id := range expiredIDs {
+		if id == listing.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expired ids = %v, want listing %s", expiredIDs, listing.ID)
+	}
+	keys, err := q.ListMarketplaceImageKeysByListings(ctx, []uuid.UUID{listing.ID})
+	if err != nil || len(keys) != 2 {
+		t.Fatalf("expired listing keys = %v, err=%v; want two keys", keys, err)
+	}
+	archived, err := q.ArchiveExpiredMarketplaceListings(ctx, []uuid.UUID{listing.ID})
+	if err != nil || archived != 1 {
+		t.Fatalf("ArchiveExpiredMarketplaceListings rows = %d, err=%v", archived, err)
+	}
 }

@@ -61,6 +61,9 @@ func (s *marketplaceJanitorFakeSweeper) SweepExpiredImages(_ context.Context, ba
 	s.batch = batch
 	return s.rows, s.err
 }
+func (s *marketplaceJanitorFakeSweeper) ArchiveExpiredListings(context.Context, int32) (int, error) {
+	return 0, nil
+}
 
 type marketplaceJanitorFakeEnqueuer struct {
 	payloads []shared.CleanupObjectsPayload

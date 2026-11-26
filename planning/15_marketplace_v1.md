@@ -124,8 +124,8 @@ collect listing photo R2 keys before deleting marketplace rows and record the
 cleanup keys in the outbox inside the same transaction.
 
 The migrations must grant the required table privileges to `tiktok_api`.
-`db-migrate-marketplace` applies migrations 012–014 to a database that already
-has migrations 001–011. Never rerun them where already applied.
+`db-migrate-marketplace` applies migrations 012–014 and 016 to a database that
+already has migrations 001–011 and 015. Never rerun them where already applied.
 
 
 ## Anti-abuse controls
@@ -142,10 +142,16 @@ has migrations 001–011. Never rerun them where already applied.
 - Revoking a contact purges queued ciphertext and matching DM idempotency rows
   for the pair only if no other active grant or mutual-follow still authorizes
   that pair; a pair lock prevents a concurrent grant from racing the purge.
-- Upload intents use a temporary R2 key. After validating the bytes, the
+- Upload intents declare `size_bytes` and use a temporary R2 key. R2 presigned
+  PUT cannot enforce a content-length range, so `/confirm` rechecks the object
+  size with `HeadObject` and rejects mismatches. After validating the bytes, the
   server promotes them to a unique immutable final key that the client never
-  had a presigned URL for; the temporary object and any losing retry key are
-  queued for cleanup.
+  had a presigned URL for; confirmation is idempotent, and the temporary object
+  and any losing retry key are queued for cleanup.
+- Listings expire 30 days after creation; the janitor archives expired rows and
+  enqueues their images for R2 cleanup. At most one active image per listing is
+  a cover. Report review is restricted to `MARKETPLACE_MODERATOR_USER_IDS` and
+  writes reviewer/timestamp/resolution/note audit fields.
 
 ## Verification
 
@@ -164,10 +170,10 @@ has migrations 001–011. Never rerun them where already applied.
 - Build, vet, and unit tests pass locally. Added the handler
   ownership/visibility matrix, pending image-intent sweeper, and durable
   cleanup outbox with retry/backoff/quarantine, plus location radius filtering.
-  Migrations 012–014 are required together; CI applies all three and verifies
-  the outbox and coordinate columns.
+  Migrations 012–014 and 016 are required together; CI applies them and verifies
+  the outbox, coordinate, expiry, cover, and moderation columns.
 - Smoke gates: the local HTTP/PostgreSQL smoke was rerun against migrations
-  `001`-`014` after the janitor/outbox and location changes. A live/staging
+  `001`-`016` after the janitor/outbox and location changes. A live/staging
   smoke with real R2+Redis is still required before production to prove cleanup
   objects are deleted and failed enqueues back off.
 - Pending work before production: full SQL keyset/unique-constraint matrix and

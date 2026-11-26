@@ -429,15 +429,19 @@ func NewRouter(d RouterDeps) *echo.Echo {
 		marketplace.PATCH("/listings/:id/status", mh.UpdateListingStatus, marketplaceWriteLimit)
 		marketplace.DELETE("/listings/:id", mh.DeleteListing, marketplaceWriteLimit)
 		marketplace.GET("/me/listings", mh.MyListings)
+		marketplace.GET("/users/:seller_user_id/listings", mh.SellerListings)
 		marketplace.POST("/listings/:id/images/upload-intent", mh.UploadImageIntent, marketplaceImageLimit)
 		marketplace.POST("/listings/:id/images/:image_id/confirm", mh.ConfirmImage, marketplaceImageLimit)
 		marketplace.DELETE("/listings/:id/images/:image_id", mh.DeleteImage, marketplaceImageLimit)
+		marketplace.POST("/listings/:id/images/:image_id/cover", mh.SetCoverImage, marketplaceImageLimit)
 		marketplace.POST("/listings/:id/favorite", mh.Favorite, marketplaceWriteLimit)
 		marketplace.DELETE("/listings/:id/favorite", mh.Unfavorite, marketplaceWriteLimit)
 		marketplace.GET("/me/favorites", mh.MyFavorites)
 		marketplace.POST("/listings/:id/report", mh.Report, marketplaceWriteLimit)
 		marketplace.POST("/listings/:id/contact", mh.ContactSeller, marketplaceWriteLimit)
 		marketplace.DELETE("/listings/:id/contact", mh.RevokeContact, marketplaceWriteLimit)
+		marketplace.GET("/moderation/reports", mh.ListReports)
+		marketplace.POST("/moderation/reports/:id/review", mh.ReviewReport, marketplaceWriteLimit)
 	}
 
 	// Public API-contract docs: the raw OpenAPI spec and a

@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // PoolSize is the maximum number of pgxpool connections.
@@ -72,6 +75,7 @@ type APIConfig struct {
 	// Marketplace cleanup janitor cadence and maximum rows swept per tick.
 	MarketplaceSweepInterval time.Duration
 	MarketplaceSweepBatch    int
+	MarketplaceModeratorIDs  []uuid.UUID
 }
 
 // WorkerConfig is the configuration consumed by transcoder-worker.
@@ -171,6 +175,10 @@ func LoadAPI() (*APIConfig, error) {
 		return nil, err
 	}
 	c.MarketplaceSweepBatch, err = envInt("MARKETPLACE_SWEEP_BATCH", 100)
+	if err != nil {
+		return nil, err
+	}
+	c.MarketplaceModeratorIDs, err = envUUIDs("MARKETPLACE_MODERATOR_USER_IDS")
 	if err != nil {
 		return nil, err
 	}
@@ -280,6 +288,27 @@ func envInt(name string, def int) (int, error) {
 		return 0, fmt.Errorf("invalid int for %s=%q: must be > 0", name, v)
 	}
 	return n, nil
+}
+
+func envUUIDs(name string) ([]uuid.UUID, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return nil, nil
+	}
+	parts := strings.Split(raw, ",")
+	ids := make([]uuid.UUID, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		id, err := uuid.Parse(part)
+		if err != nil {
+			return nil, fmt.Errorf("invalid UUID in %s=%q: %w", name, part, err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
 }
 
 // requireFields returns the first missing field as a wrapped
