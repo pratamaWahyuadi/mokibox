@@ -76,11 +76,11 @@ SELECT l.id, l.seller_user_id, u.username, u.display_name,
        l.price_idr, l.city, l.item_condition, l.latitude, l.longitude,
        l.status, l.created_at, l.updated_at,
        CASE WHEN sqlc.narg(radius_km)::double precision IS NULL THEN NULL
-            ELSE 6371.0088 * 2 * asin(sqrt(
+            ELSE 6371.0088 * 2 * asin(sqrt(LEAST(1.0,
                 power(sin(radians(l.latitude - sqlc.narg(latitude)::double precision) / 2), 2) +
                 cos(radians(sqlc.narg(latitude)::double precision)) * cos(radians(l.latitude)) *
                 power(sin(radians(l.longitude - sqlc.narg(longitude)::double precision) / 2), 2)
-            ))
+            )))
        END AS distance_km,
        EXISTS (
            SELECT 1 FROM marketplace_favorites f
@@ -100,11 +100,17 @@ WHERE l.status = 'active'
   AND (sqlc.narg(radius_km)::double precision IS NULL OR (
       l.latitude IS NOT NULL
       AND l.longitude IS NOT NULL
-      AND 6371.0088 * 2 * asin(sqrt(
+      AND l.latitude BETWEEN sqlc.narg(latitude)::double precision - sqlc.narg(radius_km)::double precision / 111.32
+                        AND sqlc.narg(latitude)::double precision + sqlc.narg(radius_km)::double precision / 111.32
+      AND l.longitude BETWEEN sqlc.narg(longitude)::double precision
+                               - sqlc.narg(radius_km)::double precision / (111.32 * GREATEST(cos(radians(sqlc.narg(latitude)::double precision)), 0.01))
+                          AND sqlc.narg(longitude)::double precision
+                               + sqlc.narg(radius_km)::double precision / (111.32 * GREATEST(cos(radians(sqlc.narg(latitude)::double precision)), 0.01))
+      AND 6371.0088 * 2 * asin(sqrt(LEAST(1.0,
           power(sin(radians(l.latitude - sqlc.narg(latitude)::double precision) / 2), 2) +
           cos(radians(sqlc.narg(latitude)::double precision)) * cos(radians(l.latitude)) *
           power(sin(radians(l.longitude - sqlc.narg(longitude)::double precision) / 2), 2)
-      )) <= sqlc.narg(radius_km)::double precision
+      ))) <= sqlc.narg(radius_km)::double precision
   ))
   AND (sqlc.narg(cursor_created_at)::timestamptz IS NULL
        OR (l.created_at, l.id) <
@@ -305,13 +311,13 @@ WHERE buyer_user_id = $1 AND created_at >= $2;
 -- name: GetMarketplaceContactParticipants :one
 SELECT buyer_user_id, seller_user_id
 FROM marketplace_contacts
-WHERE listing_id = $1 AND (buyer_user_id = $2 OR seller_user_id = $2)
+WHERE listing_id = $1 AND buyer_user_id = $2
   AND revoked_at IS NULL;
 
 -- name: RevokeMarketplaceContact :execrows
 UPDATE marketplace_contacts
 SET revoked_at = NOW()
-WHERE listing_id = $1 AND (buyer_user_id = $2 OR seller_user_id = $2)
+WHERE listing_id = $1 AND buyer_user_id = $2 AND seller_user_id = $3
   AND revoked_at IS NULL;
 
 -- name: DeleteMarketplaceContactsByUser :exec
@@ -354,7 +360,8 @@ SELECT id, r2_keys, attempts
 FROM marketplace_cleanup_outbox
 WHERE status = 'pending' AND next_attempt_at <= NOW()
 ORDER BY id
-LIMIT sqlc.arg(page_size);
+LIMIT sqlc.arg(page_size)
+FOR UPDATE SKIP LOCKED;
 
 -- name: MarkMarketplaceCleanupOutboxDone :exec
 UPDATE marketplace_cleanup_outbox
@@ -372,3 +379,8 @@ SET status = CASE
     last_error = sqlc.arg(last_error),
     updated_at = NOW()
 WHERE id = sqlc.arg(id) AND status = 'pending';
+
+-- name: PruneMarketplaceCleanupOutbox :execrows
+DELETE FROM marketplace_cleanup_outbox
+WHERE status = 'done'
+  AND updated_at < NOW() - (sqlc.arg(retention_seconds)::bigint || ' seconds')::interval;

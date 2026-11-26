@@ -33,9 +33,9 @@ type APIConfig struct {
 	RedisPassword string
 
 	// Zitadel (OIDC resource server)
-	ZitadelIssuerURL    string
-	ZitadelClientID     string // Web/OIDC client (used by login UI)
-	ZitadelAPIClientID  string // API client (audience for access tokens)
+	ZitadelIssuerURL   string
+	ZitadelClientID    string // Web/OIDC client (used by login UI)
+	ZitadelAPIClientID string // API client (audience for access tokens)
 	// ZitadelTargetSigningKey is the signingKey returned
 	// by Zitadel when an Actions V2 Target was created.
 	// The api-gateway webhook uses it to verify the
@@ -64,9 +64,9 @@ type APIConfig struct {
 	DME2EEEnabled bool
 	DMInboxTTL    time.Duration
 
-	// Marketplace routes and its cleanup janitor are enabled by default
-	// for the local backend. Set MARKETPLACE_ENABLED=false to keep them
-	// unregistered until the independent security review is done.
+	// Marketplace routes and its cleanup janitor stay disabled unless
+	// MARKETPLACE_ENABLED=true. They must remain unregistered until the
+	// independent security review is done.
 	MarketplaceEnabled bool
 
 	// Marketplace cleanup janitor cadence and maximum rows swept per tick.
@@ -112,20 +112,20 @@ type WorkerConfig struct {
 // required is absent; never panics.
 func LoadAPI() (*APIConfig, error) {
 	c := &APIConfig{
-		APIBaseURL:          os.Getenv("API_BASE_URL"),
-		DatabaseURL:         os.Getenv("DATABASE_URL"),
-		RedisAddr:           os.Getenv("REDIS_ADDR"),
-		RedisPassword:       os.Getenv("REDIS_PASSWORD"),
-		ZitadelIssuerURL:    os.Getenv("ZITADEL_ISSUER_URL"),
-		ZitadelClientID:     os.Getenv("ZITADEL_CLIENT_ID"),
-		ZitadelAPIClientID:  os.Getenv("ZITADEL_API_CLIENT_ID"),
+		APIBaseURL:              os.Getenv("API_BASE_URL"),
+		DatabaseURL:             os.Getenv("DATABASE_URL"),
+		RedisAddr:               os.Getenv("REDIS_ADDR"),
+		RedisPassword:           os.Getenv("REDIS_PASSWORD"),
+		ZitadelIssuerURL:        os.Getenv("ZITADEL_ISSUER_URL"),
+		ZitadelClientID:         os.Getenv("ZITADEL_CLIENT_ID"),
+		ZitadelAPIClientID:      os.Getenv("ZITADEL_API_CLIENT_ID"),
 		ZitadelTargetSigningKey: os.Getenv("ZITADEL_TARGET_SIGNING_KEY"),
-		R2AccountID:         os.Getenv("R2_ACCOUNT_ID"),
-		R2AccessKeyID:       os.Getenv("R2_ACCESS_KEY_ID"),
-		R2SecretAccessKey:   os.Getenv("R2_SECRET_ACCESS_KEY"),
-		R2Bucket:            os.Getenv("R2_BUCKET"),
-		R2Endpoint:          os.Getenv("R2_ENDPOINT"),
-		MediaTokenSecret:    os.Getenv("MEDIA_TOKEN_SECRET"),
+		R2AccountID:             os.Getenv("R2_ACCOUNT_ID"),
+		R2AccessKeyID:           os.Getenv("R2_ACCESS_KEY_ID"),
+		R2SecretAccessKey:       os.Getenv("R2_SECRET_ACCESS_KEY"),
+		R2Bucket:                os.Getenv("R2_BUCKET"),
+		R2Endpoint:              os.Getenv("R2_ENDPOINT"),
+		MediaTokenSecret:        os.Getenv("MEDIA_TOKEN_SECRET"),
 	}
 
 	ttl, err := envDuration("MEDIA_TOKEN_TTL", 15*time.Minute)
@@ -157,7 +157,7 @@ func LoadAPI() (*APIConfig, error) {
 		return nil, fmt.Errorf("DM_INBOX_TTL must be 168h when DM_E2EE_ENABLED=true")
 	}
 
-	marketplaceEnabled := true
+	marketplaceEnabled := false
 	if raw := os.Getenv("MARKETPLACE_ENABLED"); raw != "" {
 		marketplaceEnabled, err = strconv.ParseBool(raw)
 		if err != nil {
@@ -201,14 +201,14 @@ func LoadAPI() (*APIConfig, error) {
 // transcoder-worker.
 func LoadWorker() (*WorkerConfig, error) {
 	c := &WorkerConfig{
-		WorkerDatabaseURL:  os.Getenv("WORKER_DATABASE_URL"),
-		RedisAddr:          os.Getenv("REDIS_ADDR"),
-		RedisPassword:      os.Getenv("REDIS_PASSWORD"),
-		R2AccountID:        os.Getenv("R2_ACCOUNT_ID"),
-		R2AccessKeyID:      os.Getenv("R2_ACCESS_KEY_ID"),
-		R2SecretAccessKey:  os.Getenv("R2_SECRET_ACCESS_KEY"),
-		R2Bucket:           os.Getenv("R2_BUCKET"),
-		R2Endpoint:         os.Getenv("R2_ENDPOINT"),
+		WorkerDatabaseURL: os.Getenv("WORKER_DATABASE_URL"),
+		RedisAddr:         os.Getenv("REDIS_ADDR"),
+		RedisPassword:     os.Getenv("REDIS_PASSWORD"),
+		R2AccountID:       os.Getenv("R2_ACCOUNT_ID"),
+		R2AccessKeyID:     os.Getenv("R2_ACCESS_KEY_ID"),
+		R2SecretAccessKey: os.Getenv("R2_SECRET_ACCESS_KEY"),
+		R2Bucket:          os.Getenv("R2_BUCKET"),
+		R2Endpoint:        os.Getenv("R2_ENDPOINT"),
 	}
 
 	timeout, err := envDuration("TRANSCODE_TIMEOUT", 5*time.Minute)

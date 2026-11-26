@@ -44,8 +44,9 @@ stub gateway; the target prints a warning for that mode.
 
 The script checks categories, listing creation and filtered browse (including a
 near radius hit with `distance_km` and a far radius miss), favorites,
-idempotent reports, seller contact grants, expiry/renewal, revocation, and the
-corresponding SQL state. It does not call the E2EE DM endpoints; contact
+idempotent reports, seller contact grants, expiry/renewal, revocation (seller
+sends `buyer_id` so other buyers are not affected), and the corresponding SQL
+state. It does not call the E2EE DM endpoints; contact
 authorization is verified through the persisted grant, expiry, and revocation
 columns, and DM routes also require `DM_E2EE_ENABLED=true`. It creates a uniquely titled listing and
 deletes that exact listing in a deferred cleanup; related favorites, reports,

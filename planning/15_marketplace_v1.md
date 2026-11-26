@@ -171,5 +171,6 @@ has migrations 001–011. Never rerun them where already applied.
   smoke with real R2+Redis is still required before production to prove cleanup
   objects are deleted and failed enqueues back off.
 - Pending work before production: full SQL keyset/unique-constraint matrix and
-  independent security review. Set `MARKETPLACE_ENABLED=false` until those
-  gates pass; keep the local default true for compatibility.
+  independent security review. `MARKETPLACE_ENABLED` defaults to false in
+  config, `.env.example`, and docker-compose; enable only for local smoke or
+  after those gates pass.

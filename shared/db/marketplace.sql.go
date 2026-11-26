@@ -336,7 +336,7 @@ func (q *Queries) FailMarketplaceCleanupOutbox(ctx context.Context, arg FailMark
 const getMarketplaceContactParticipants = `-- name: GetMarketplaceContactParticipants :one
 SELECT buyer_user_id, seller_user_id
 FROM marketplace_contacts
-WHERE listing_id = $1 AND (buyer_user_id = $2 OR seller_user_id = $2)
+WHERE listing_id = $1 AND buyer_user_id = $2
   AND revoked_at IS NULL
 `
 
@@ -682,6 +682,7 @@ FROM marketplace_cleanup_outbox
 WHERE status = 'pending' AND next_attempt_at <= NOW()
 ORDER BY id
 LIMIT $1
+FOR UPDATE SKIP LOCKED
 `
 
 type ListDueMarketplaceCleanupOutboxRow struct {
@@ -950,11 +951,11 @@ SELECT l.id, l.seller_user_id, u.username, u.display_name,
        l.price_idr, l.city, l.item_condition, l.latitude, l.longitude,
        l.status, l.created_at, l.updated_at,
        CASE WHEN $1::double precision IS NULL THEN NULL
-            ELSE 6371.0088 * 2 * asin(sqrt(
+            ELSE 6371.0088 * 2 * asin(sqrt(LEAST(1.0,
                 power(sin(radians(l.latitude - $2::double precision) / 2), 2) +
                 cos(radians($2::double precision)) * cos(radians(l.latitude)) *
                 power(sin(radians(l.longitude - $3::double precision) / 2), 2)
-            ))
+            )))
        END AS distance_km,
        EXISTS (
            SELECT 1 FROM marketplace_favorites f
@@ -974,11 +975,17 @@ WHERE l.status = 'active'
   AND ($1::double precision IS NULL OR (
       l.latitude IS NOT NULL
       AND l.longitude IS NOT NULL
-      AND 6371.0088 * 2 * asin(sqrt(
+      AND l.latitude BETWEEN $2::double precision - $1::double precision / 111.32
+                        AND $2::double precision + $1::double precision / 111.32
+      AND l.longitude BETWEEN $3::double precision
+                               - $1::double precision / (111.32 * GREATEST(cos(radians($2::double precision)), 0.01))
+                          AND $3::double precision
+                               + $1::double precision / (111.32 * GREATEST(cos(radians($2::double precision)), 0.01))
+      AND 6371.0088 * 2 * asin(sqrt(LEAST(1.0,
           power(sin(radians(l.latitude - $2::double precision) / 2), 2) +
           cos(radians($2::double precision)) * cos(radians(l.latitude)) *
           power(sin(radians(l.longitude - $3::double precision) / 2), 2)
-      )) <= $1::double precision
+      ))) <= $1::double precision
   ))
   AND ($10::timestamptz IS NULL
        OR (l.created_at, l.id) <
@@ -1191,6 +1198,20 @@ func (q *Queries) MarkMarketplaceCleanupOutboxDone(ctx context.Context, id int64
 	return err
 }
 
+const pruneMarketplaceCleanupOutbox = `-- name: PruneMarketplaceCleanupOutbox :execrows
+DELETE FROM marketplace_cleanup_outbox
+WHERE status = 'done'
+  AND updated_at < NOW() - ($1::bigint || ' seconds')::interval
+`
+
+func (q *Queries) PruneMarketplaceCleanupOutbox(ctx context.Context, retentionSeconds int64) (int64, error) {
+	result, err := q.db.ExecContext(ctx, pruneMarketplaceCleanupOutbox, retentionSeconds)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const renewExpiredMarketplaceContact = `-- name: RenewExpiredMarketplaceContact :execrows
 UPDATE marketplace_contacts
 SET expires_at = NOW() + INTERVAL '30 days'
@@ -1216,17 +1237,18 @@ func (q *Queries) RenewExpiredMarketplaceContact(ctx context.Context, arg RenewE
 const revokeMarketplaceContact = `-- name: RevokeMarketplaceContact :execrows
 UPDATE marketplace_contacts
 SET revoked_at = NOW()
-WHERE listing_id = $1 AND (buyer_user_id = $2 OR seller_user_id = $2)
+WHERE listing_id = $1 AND buyer_user_id = $2 AND seller_user_id = $3
   AND revoked_at IS NULL
 `
 
 type RevokeMarketplaceContactParams struct {
-	ListingID   uuid.UUID `json:"listing_id"`
-	BuyerUserID uuid.UUID `json:"buyer_user_id"`
+	ListingID    uuid.UUID `json:"listing_id"`
+	BuyerUserID  uuid.UUID `json:"buyer_user_id"`
+	SellerUserID uuid.UUID `json:"seller_user_id"`
 }
 
 func (q *Queries) RevokeMarketplaceContact(ctx context.Context, arg RevokeMarketplaceContactParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, revokeMarketplaceContact, arg.ListingID, arg.BuyerUserID)
+	result, err := q.db.ExecContext(ctx, revokeMarketplaceContact, arg.ListingID, arg.BuyerUserID, arg.SellerUserID)
 	if err != nil {
 		return 0, err
 	}

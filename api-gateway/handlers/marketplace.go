@@ -1000,22 +1000,32 @@ func (h *MarketplaceHandler) RevokeContact(c echo.Context) error {
 	if err != nil {
 		return shared.RespondError(c, shared.Wrap(shared.ErrValidation, "invalid listing id"))
 	}
-	var buyerID, sellerID uuid.UUID
+	buyerID := user.ID
+	if raw := c.QueryParam("buyer_id"); raw != "" {
+		buyerID, err = uuid.Parse(raw)
+		if err != nil {
+			return shared.RespondError(c, shared.Wrap(shared.ErrValidation, "invalid buyer_id"))
+		}
+	}
+	var sellerID uuid.UUID
 	var revoked bool
 	ctx := c.Request().Context()
 	err = h.Run.Run(ctx, func(q marketplaceTxStore) error {
 		participants, err := q.GetMarketplaceContactParticipants(ctx, db.GetMarketplaceContactParticipantsParams{
-			ListingID: listingID, BuyerUserID: user.ID,
+			ListingID: listingID, BuyerUserID: buyerID,
 		})
 		if err != nil {
 			return err
 		}
 		buyerID, sellerID = participants.BuyerUserID, participants.SellerUserID
+		if user.ID != buyerID && user.ID != sellerID {
+			return shared.Wrap(shared.ErrForbidden, "caller is not a participant of this contact")
+		}
 		if err := q.LockMarketplaceQuota(ctx, marketplacePairLockKey(buyerID, sellerID)); err != nil {
 			return err
 		}
 		rows, err := q.RevokeMarketplaceContact(ctx, db.RevokeMarketplaceContactParams{
-			ListingID: listingID, BuyerUserID: user.ID,
+			ListingID: listingID, BuyerUserID: buyerID, SellerUserID: sellerID,
 		})
 		if err != nil {
 			return err
@@ -1044,10 +1054,14 @@ func (h *MarketplaceHandler) RevokeContact(c echo.Context) error {
 		return err
 	})
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		switch {
+		case errors.Is(err, shared.ErrForbidden):
+			return shared.RespondError(c, err)
+		case errors.Is(err, sql.ErrNoRows):
 			return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "active contact not found"))
+		default:
+			return marketplaceInternalError(c, "revoke marketplace contact", err)
 		}
-		return marketplaceInternalError(c, "revoke marketplace contact", err)
 	}
 	return shared.RespondOK(c, marketplaceContactRevokeResponse{ListingID: listingID, Revoked: revoked})
 }

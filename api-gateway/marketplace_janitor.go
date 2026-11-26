@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hibiken/asynq"
 
@@ -17,12 +18,14 @@ const (
 	marketplaceCleanupRetryBase   time.Duration = 30 * time.Second
 	marketplaceCleanupRetryCap    time.Duration = time.Hour
 	marketplaceCleanupErrorLimit  int           = 500
+	marketplaceCleanupRetention   time.Duration = 24 * time.Hour
 )
 
 type marketplaceCleanupStore interface {
 	ListDueMarketplaceCleanupOutbox(context.Context, int32) ([]db.ListDueMarketplaceCleanupOutboxRow, error)
 	MarkMarketplaceCleanupOutboxDone(context.Context, int64) error
 	FailMarketplaceCleanupOutbox(context.Context, db.FailMarketplaceCleanupOutboxParams) error
+	PruneMarketplaceCleanupOutbox(context.Context, int64) (int64, error)
 }
 
 type marketplaceImageSweeper interface {
@@ -49,6 +52,12 @@ func runMarketplaceJanitor(ctx context.Context, store marketplaceCleanupStore, s
 			slog.Error("marketplace cleanup outbox dispatch failed", "err", err)
 		} else if dispatched > 0 {
 			slog.Info("marketplace cleanup outbox dispatch", "rows", dispatched)
+		}
+		pruned, err := pruneMarketplaceCleanupOutbox(ctx, store)
+		if err != nil {
+			slog.Error("marketplace cleanup outbox prune failed", "err", err)
+		} else if pruned > 0 {
+			slog.Info("marketplace cleanup outbox prune", "rows", pruned)
 		}
 	}
 	tick()
@@ -95,14 +104,19 @@ func dispatchMarketplaceCleanup(ctx context.Context, store marketplaceCleanupSto
 			continue
 		}
 		if _, err := enqueuer.EnqueueCleanupObjects(shared.CleanupObjectsPayload{Keys: row.R2Keys}); err != nil {
+			lastError := truncateMarketplaceCleanupError(err.Error())
 			failErr := store.FailMarketplaceCleanupOutbox(ctx, db.FailMarketplaceCleanupOutboxParams{
 				ID:            row.ID,
 				MaxAttempts:   marketplaceCleanupMaxAttempts,
 				NextAttemptAt: marketplaceCleanupRetryAt(row.Attempts + 1),
-				LastError:     truncateMarketplaceCleanupError(err.Error()),
+				LastError:     lastError,
 			})
 			if failErr != nil {
 				return dispatched, fmt.Errorf("record marketplace cleanup enqueue failure for %d: %w", row.ID, failErr)
+			}
+			if row.Attempts+1 >= marketplaceCleanupMaxAttempts {
+				slog.Error("marketplace cleanup outbox quarantined", "outbox_id", row.ID,
+					"attempts", row.Attempts+1, "last_error", lastError)
 			}
 			continue
 		}
@@ -112,6 +126,13 @@ func dispatchMarketplaceCleanup(ctx context.Context, store marketplaceCleanupSto
 		dispatched++
 	}
 	return dispatched, nil
+}
+
+func pruneMarketplaceCleanupOutbox(ctx context.Context, store marketplaceCleanupStore) (int64, error) {
+	if store == nil {
+		return 0, fmt.Errorf("marketplace cleanup store is nil")
+	}
+	return store.PruneMarketplaceCleanupOutbox(ctx, int64(marketplaceCleanupRetention/time.Second))
 }
 
 func marketplaceCleanupRetryAt(attempt int32) time.Time {
@@ -130,8 +151,8 @@ func marketplaceCleanupRetryAt(attempt int32) time.Time {
 }
 
 func truncateMarketplaceCleanupError(message string) string {
-	if len(message) <= marketplaceCleanupErrorLimit {
+	if utf8.RuneCountInString(message) <= marketplaceCleanupErrorLimit {
 		return message
 	}
-	return message[:marketplaceCleanupErrorLimit]
+	return string([]rune(message)[:marketplaceCleanupErrorLimit])
 }

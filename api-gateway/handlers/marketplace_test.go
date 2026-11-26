@@ -38,7 +38,9 @@ type marketplaceFakeStore struct {
 	contactCount            int64
 	hasReport               bool
 	participants            db.GetMarketplaceContactParticipantsRow
+	participantsParams      db.GetMarketplaceContactParticipantsParams
 	revokeRows              int64
+	revokeParams            db.RevokeMarketplaceContactParams
 	renewRows               int64
 	pairStillAllowed        bool
 	lockKeys                []string
@@ -217,7 +219,8 @@ func (s *marketplaceFakeStore) InsertMarketplaceContact(_ context.Context, arg d
 func (s *marketplaceFakeStore) CountMarketplaceContactsByBuyerSince(context.Context, db.CountMarketplaceContactsByBuyerSinceParams) (int64, error) {
 	return s.contactCount, nil
 }
-func (s *marketplaceFakeStore) GetMarketplaceContactParticipants(context.Context, db.GetMarketplaceContactParticipantsParams) (db.GetMarketplaceContactParticipantsRow, error) {
+func (s *marketplaceFakeStore) GetMarketplaceContactParticipants(_ context.Context, arg db.GetMarketplaceContactParticipantsParams) (db.GetMarketplaceContactParticipantsRow, error) {
+	s.participantsParams = arg
 	if s.participants == (db.GetMarketplaceContactParticipantsRow{}) {
 		return db.GetMarketplaceContactParticipantsRow{}, sql.ErrNoRows
 	}
@@ -226,7 +229,8 @@ func (s *marketplaceFakeStore) GetMarketplaceContactParticipants(context.Context
 func (s *marketplaceFakeStore) RenewExpiredMarketplaceContact(context.Context, db.RenewExpiredMarketplaceContactParams) (int64, error) {
 	return s.renewRows, nil
 }
-func (s *marketplaceFakeStore) RevokeMarketplaceContact(context.Context, db.RevokeMarketplaceContactParams) (int64, error) {
+func (s *marketplaceFakeStore) RevokeMarketplaceContact(_ context.Context, arg db.RevokeMarketplaceContactParams) (int64, error) {
+	s.revokeParams = arg
 	return s.revokeRows, nil
 }
 func (s *marketplaceFakeStore) IsDMRecipientAllowed(context.Context, db.IsDMRecipientAllowedParams) (bool, error) {
@@ -654,6 +658,53 @@ func TestMarketplaceRevokeContactKeepsInboxWhenPairStillAllowed(t *testing.T) {
 	}
 	if store.pairInboxDeletes != 0 || store.pairIdempotencyDeletes != 0 {
 		t.Fatalf("purges = inbox:%d idempotency:%d; want 0", store.pairInboxDeletes, store.pairIdempotencyDeletes)
+	}
+}
+
+func TestMarketplaceRevokeContactBySellerTargetsSelectedBuyer(t *testing.T) {
+	buyer, seller := uuid.New(), viewerUser()
+	store := &marketplaceFakeStore{
+		participants: db.GetMarketplaceContactParticipantsRow{BuyerUserID: buyer, SellerUserID: seller.ID},
+		revokeRows:   1,
+	}
+	runner := &marketplaceFakeRunner{store: store}
+	h := newMarketplaceHandlerForTest(store, runner, &stubR2{}, &shared.APIConfig{})
+	e := newDMTestEcho(seller, http.MethodDelete, "/api/marketplace/listings/:id/contact", h.RevokeContact)
+	listingID := uuid.New()
+	rec := doJSON(e, http.MethodDelete,
+		"/api/marketplace/listings/"+listingID.String()+"/contact?buyer_id="+buyer.String(), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if store.participantsParams.ListingID != listingID || store.participantsParams.BuyerUserID != buyer {
+		t.Fatalf("participant lookup = %+v, want buyer %s", store.participantsParams, buyer)
+	}
+	if store.revokeParams.ListingID != listingID || store.revokeParams.BuyerUserID != buyer ||
+		store.revokeParams.SellerUserID != seller.ID {
+		t.Fatalf("revoke params = %+v", store.revokeParams)
+	}
+	if store.pairInboxDeletes != 1 || store.lastPairInboxParams.SenderID != buyer ||
+		store.lastPairInboxParams.RecipientID != seller.ID {
+		t.Fatalf("inbox purge = %d, params=%+v", store.pairInboxDeletes, store.lastPairInboxParams)
+	}
+}
+
+func TestMarketplaceRevokeContactRejectsOtherBuyersGrant(t *testing.T) {
+	caller, otherBuyer, seller := viewerUser(), uuid.New(), uuid.New()
+	store := &marketplaceFakeStore{
+		participants: db.GetMarketplaceContactParticipantsRow{BuyerUserID: otherBuyer, SellerUserID: seller},
+		revokeRows:   1,
+	}
+	runner := &marketplaceFakeRunner{store: store}
+	h := newMarketplaceHandlerForTest(store, runner, &stubR2{}, &shared.APIConfig{})
+	e := newDMTestEcho(caller, http.MethodDelete, "/api/marketplace/listings/:id/contact", h.RevokeContact)
+	rec := doJSON(e, http.MethodDelete,
+		"/api/marketplace/listings/"+uuid.NewString()+"/contact?buyer_id="+otherBuyer.String(), "")
+	assertErrCode(t, rec, http.StatusForbidden, shared.CodeForbidden)
+	if runner.committed || store.revokeParams != (db.RevokeMarketplaceContactParams{}) ||
+		store.pairInboxDeletes != 0 {
+		t.Fatalf("committed=%v, revoke=%+v, inbox deletes=%d",
+			runner.committed, store.revokeParams, store.pairInboxDeletes)
 	}
 }
 

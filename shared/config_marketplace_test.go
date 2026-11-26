@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func TestLoadAPI_MarketplaceDefaultsEnabledWithOneMinuteSweep(t *testing.T) {
+func TestLoadAPI_MarketplaceDefaultsDisabledWithOneMinuteSweep(t *testing.T) {
 	setRequiredAPIEnv(t)
 	t.Setenv("MARKETPLACE_ENABLED", "")
 	t.Setenv("MARKETPLACE_SWEEP_INTERVAL", "")
@@ -15,8 +15,8 @@ func TestLoadAPI_MarketplaceDefaultsEnabledWithOneMinuteSweep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadAPI() error = %v", err)
 	}
-	if !cfg.MarketplaceEnabled {
-		t.Fatal("marketplace must default enabled")
+	if cfg.MarketplaceEnabled {
+		t.Fatal("marketplace must default disabled")
 	}
 	if cfg.MarketplaceSweepInterval != time.Minute {
 		t.Fatalf("sweep interval = %s, want 1m", cfg.MarketplaceSweepInterval)

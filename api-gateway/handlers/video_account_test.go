@@ -508,6 +508,8 @@ func TestUploadIntent_ReusesPendingRowAndRotatesKey(t *testing.T) {
 type stubAccountTx struct {
 	listVideoKeys        func(ctx context.Context, userID uuid.UUID) ([]db.ListVideoKeysByUserRow, error)
 	marketplaceImageKeys []string
+	marketplaceOutbox    [][]string
+	marketplaceOutboxErr error
 	avatarKeys           db.GetUserAvatarKeysRow
 	dmInboxDeleteErr     error
 	dmDeviceDeleteErr    error
@@ -600,6 +602,14 @@ func (s *stubAccountTx) DeleteMarketplaceListingsBySeller(ctx context.Context, u
 	s.calls = append(s.calls, "DeleteMarketplaceListingsBySeller")
 	return nil
 }
+func (s *stubAccountTx) InsertMarketplaceCleanupOutbox(_ context.Context, keys []string) error {
+	s.calls = append(s.calls, "InsertMarketplaceCleanupOutbox")
+	if s.marketplaceOutboxErr != nil {
+		return s.marketplaceOutboxErr
+	}
+	s.marketplaceOutbox = append(s.marketplaceOutbox, keys)
+	return nil
+}
 func (s *stubAccountTx) TombstoneUser(ctx context.Context, id uuid.UUID) (db.User, error) {
 	s.calls = append(s.calls, "TombstoneUser")
 	if s.tombstoneErr != nil {
@@ -665,7 +675,7 @@ func TestDeleteMe_HappyPathCascadeAndEnqueue(t *testing.T) {
 		"DeleteNotificationsByActor", "DeleteDMInboxByUser", "DeleteDMDevicesByUser",
 		"DeleteMarketplaceContactsByUser", "DeleteMarketplaceReportsByUser",
 		"DeleteMarketplaceFavoritesByUser", "DeleteMarketplaceListingsBySeller",
-		"TombstoneUser",
+		"InsertMarketplaceCleanupOutbox", "TombstoneUser",
 	}
 	if len(tx.calls) != len(wantOrder) {
 		t.Fatalf("cascade calls = %v, want %v", tx.calls, wantOrder)
@@ -678,9 +688,14 @@ func TestDeleteMe_HappyPathCascadeAndEnqueue(t *testing.T) {
 	if !runner.committed {
 		t.Error("successful delete must commit")
 	}
-	// Video and current/pending avatar keys are all removed.
-	if len(enq.cleanupObjectsKeys) != 1 || len(enq.cleanupObjectsKeys[0]) != 6 {
-		t.Errorf("cleanup keys = %+v, want 1 batch with 6 keys", enq.cleanupObjectsKeys)
+	// Video and current/pending avatar keys use the legacy enqueue path.
+	if len(enq.cleanupObjectsKeys) != 1 || len(enq.cleanupObjectsKeys[0]) != 5 {
+		t.Errorf("cleanup keys = %+v, want 1 batch with 5 keys", enq.cleanupObjectsKeys)
+	}
+	// Marketplace image keys are recorded atomically in the outbox instead.
+	if len(tx.marketplaceOutbox) != 1 || len(tx.marketplaceOutbox[0]) != 1 ||
+		tx.marketplaceOutbox[0][0] != "marketplace/listings/1/photo.webp" {
+		t.Errorf("marketplace outbox = %+v", tx.marketplaceOutbox)
 	}
 	user := viewerUser()
 	if len(tx.dmInboxDeletedFor) != 1 || tx.dmInboxDeletedFor[0] != user.ID {
@@ -752,6 +767,39 @@ func TestDeleteMe_CascadeFailureIs500(t *testing.T) {
 	assertErrCode(t, rec, http.StatusInternalServerError, shared.CodeInternalError)
 	if runner.committed {
 		t.Error("cascade failure must not commit")
+	}
+}
+
+func TestDeleteMe_MarketplaceCleanupOutboxFailureIs500(t *testing.T) {
+	tx := &stubAccountTx{
+		listVideoKeys: func(ctx context.Context, userID uuid.UUID) ([]db.ListVideoKeysByUserRow, error) {
+			return nil, nil
+		},
+		marketplaceImageKeys: []string{"marketplace/listings/1/photo.webp"},
+		marketplaceOutboxErr: errors.New("outbox down"),
+	}
+	runner := &stubAccountRunner{tx: tx}
+	enq := &stubEnqueuer{}
+	ah := newAccountHandlerForTest(runner, enq)
+
+	e := echo.New()
+	e.Use(middleware.Authenticate(middleware.AuthenticateConfig{
+		Verifier: testVerifier{sub: "test-sub"},
+		Queries:  testUserStore{user: viewerUser()},
+	}))
+	e.DELETE("/api/users/me", ah.DeleteMe)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/users/me", nil)
+	req.Header.Set(echo.HeaderAuthorization, "Bearer t")
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	assertErrCode(t, rec, http.StatusInternalServerError, shared.CodeInternalError)
+	if runner.committed {
+		t.Error("outbox failure must roll back the cascade")
+	}
+	if len(enq.cleanupObjectsKeys) != 0 {
+		t.Errorf("outbox failure must not enqueue cleanup, got %+v", enq.cleanupObjectsKeys)
 	}
 }
 

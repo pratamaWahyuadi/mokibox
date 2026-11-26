@@ -18,6 +18,7 @@ func TestMarketplaceQueriesIntegration(t *testing.T) {
 	ctx := context.Background()
 	seller := newTempUser(t, sqlDB, q)
 	buyer := newTempUser(t, sqlDB, q)
+	buyer2 := newTempUser(t, sqlDB, q)
 
 	categories, err := q.ListMarketplaceCategories(ctx)
 	if err != nil {
@@ -101,6 +102,11 @@ func TestMarketplaceQueriesIntegration(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("InsertMarketplaceContact: %v", err)
 	}
+	if _, err := q.InsertMarketplaceContact(ctx, InsertMarketplaceContactParams{
+		ID: listing.ID, BuyerUserID: buyer2.ID, SellerUserID: sellerID,
+	}); err != nil {
+		t.Fatalf("InsertMarketplaceContact buyer2: %v", err)
+	}
 	for _, pair := range []IsDMRecipientAllowedParams{
 		{ID: buyer.ID, ID_2: seller.ID},
 		{ID: seller.ID, ID_2: buyer.ID},
@@ -144,7 +150,7 @@ func TestMarketplaceQueriesIntegration(t *testing.T) {
 	}
 
 	revoked, err := q.RevokeMarketplaceContact(ctx, RevokeMarketplaceContactParams{
-		ListingID: listing.ID, BuyerUserID: seller.ID,
+		ListingID: listing.ID, BuyerUserID: buyer.ID, SellerUserID: seller.ID,
 	})
 	if err != nil || revoked != 1 {
 		t.Fatalf("RevokeMarketplaceContact rows = %d, err=%v", revoked, err)
@@ -152,6 +158,10 @@ func TestMarketplaceQueriesIntegration(t *testing.T) {
 	allowed, err = q.IsDMRecipientAllowed(ctx, IsDMRecipientAllowedParams{ID: buyer.ID, ID_2: seller.ID})
 	if err != nil || allowed {
 		t.Fatalf("revoked contact DM permission = %v, err=%v; want false", allowed, err)
+	}
+	allowed, err = q.IsDMRecipientAllowed(ctx, IsDMRecipientAllowedParams{ID: buyer2.ID, ID_2: seller.ID})
+	if err != nil || !allowed {
+		t.Fatalf("second buyer DM permission = %v, err=%v; want retained", allowed, err)
 	}
 	image, err := q.CreateMarketplaceListingImage(ctx, CreateMarketplaceListingImageParams{
 		ListingID: listing.ID, R2Key: "marketplace/integration/" + listing.ID.String() + ".png",

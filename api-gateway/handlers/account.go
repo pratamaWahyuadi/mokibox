@@ -75,6 +75,7 @@ type accountTxStore interface {
 	DeleteMarketplaceReportsByUser(ctx context.Context, reporterUserID uuid.UUID) error
 	DeleteMarketplaceFavoritesByUser(ctx context.Context, userID uuid.UUID) error
 	DeleteMarketplaceListingsBySeller(ctx context.Context, sellerUserID uuid.UUID) error
+	InsertMarketplaceCleanupOutbox(ctx context.Context, keys []string) error
 	TombstoneUser(ctx context.Context, id uuid.UUID) (db.User, error)
 }
 
@@ -256,8 +257,7 @@ func collectUserR2Keys(ctx context.Context, runner txRunner[accountTxStore], use
 		if err != nil {
 			return shared.Wrap(shared.ErrInternal, fmt.Sprintf("list Marketplace image keys: %v", err))
 		}
-		r2Keys = make([]string, 0, 3*len(rows)+2+len(marketplaceKeys))
-		r2Keys = append(r2Keys, marketplaceKeys...)
+		r2Keys = make([]string, 0, 3*len(rows)+2)
 		if avatarKeys.AvatarKey.Valid && avatarKeys.AvatarKey.String != "" {
 			r2Keys = append(r2Keys, avatarKeys.AvatarKey.String)
 		}
@@ -356,6 +356,9 @@ func collectUserR2Keys(ctx context.Context, runner txRunner[accountTxStore], use
 		}
 		if err := qtx.DeleteMarketplaceListingsBySeller(ctx, userID); err != nil {
 			return shared.Wrap(shared.ErrInternal, fmt.Sprintf("delete Marketplace listings: %v", err))
+		}
+		if err := qtx.InsertMarketplaceCleanupOutbox(ctx, marketplaceKeys); err != nil {
+			return shared.Wrap(shared.ErrInternal, fmt.Sprintf("record Marketplace image cleanup: %v", err))
 		}
 
 		// Step 10: tombstone. Username placeholder is

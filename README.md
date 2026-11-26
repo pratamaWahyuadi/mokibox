@@ -93,9 +93,9 @@ Sebelum menjalankan gateway versi ini, terapkan migration 012–014 satu kali
 pada database lokal yang sudah memiliki schema 001–011 dengan
 `make db-migrate-marketplace`; semuanya forward-only dan diperlukan juga oleh
 account deletion serta izin DM.
-Route Marketplace dikontrol `MARKETPLACE_ENABLED` (default binary true untuk
-kompatibilitas lokal, tetapi `.env.example` sudah false; aktifkan hanya untuk
-smoke lokal/setelah review selesai), dengan janitor
+Route Marketplace dikontrol `MARKETPLACE_ENABLED` (default false di config,
+`.env.example`, dan docker-compose; aktifkan hanya untuk smoke lokal/setelah
+review selesai), dengan janitor
 `MARKETPLACE_SWEEP_INTERVAL=1m` dan `MARKETPLACE_SWEEP_BATCH=100` untuk
 menyapu image intent kedaluwarsa dan retry cleanup R2 dari outbox.
 Jangan terapkan pada production dalam scope lokal ini. Semua write Marketplace

@@ -686,9 +686,9 @@ HANDOFF.md                               MODIFIED — this section
   janitor retries with capped exponential backoff, quarantines rows after 10
   attempts, and sweeps expired pending image intents on the same interval
   (`MARKETPLACE_SWEEP_INTERVAL`, `MARKETPLACE_SWEEP_BATCH`).
-- Routes are gated by `MARKETPLACE_ENABLED` (binary defaults to true for local
-  compatibility, but `.env.example` ships false; enable only for local smoke or
-  after security review). Marketplace
+- Routes are gated by `MARKETPLACE_ENABLED` (defaults to false in config,
+  `.env.example`, and docker-compose; enable only for local smoke or after
+  security review). Marketplace
   request bodies now use the central validator while keeping explicit
   cross-field checks for `reason=other`.
 

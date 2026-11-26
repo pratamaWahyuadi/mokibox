@@ -376,7 +376,7 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	}
 	api.DELETE("/users/me", ah.DeleteMe)
 
-	marketplaceEnabled := d.Cfg == nil || d.Cfg.MarketplaceEnabled
+	marketplaceEnabled := d.Cfg != nil && d.Cfg.MarketplaceEnabled
 	if marketplaceEnabled {
 		mh, err := handlers.NewMarketplaceHandler(d.Queries, d.DB, d.R2, d.Cfg)
 		if err != nil {
@@ -391,6 +391,15 @@ func NewRouter(d RouterDeps) *echo.Echo {
 		if err != nil {
 			panic(fmt.Sprintf("api-gateway: NewRateLimitAuth for marketplace writes: %v", err))
 		}
+		marketplaceImageLimit, err := middleware.NewRateLimitAuth(middleware.RateLimitConfig{
+			Rate:          rate.Limit(1), // 60 per minute; one listing can need 16+ image calls
+			Burst:         30,
+			TTL:           10 * time.Minute,
+			SweepInterval: 5 * time.Minute,
+		})
+		if err != nil {
+			panic(fmt.Sprintf("api-gateway: NewRateLimitAuth for marketplace images: %v", err))
+		}
 		marketplace := api.Group("/marketplace")
 		marketplace.GET("/categories", mh.Categories)
 		marketplace.POST("/listings", mh.CreateListing, marketplaceWriteLimit)
@@ -400,9 +409,9 @@ func NewRouter(d RouterDeps) *echo.Echo {
 		marketplace.PATCH("/listings/:id/status", mh.UpdateListingStatus, marketplaceWriteLimit)
 		marketplace.DELETE("/listings/:id", mh.DeleteListing, marketplaceWriteLimit)
 		marketplace.GET("/me/listings", mh.MyListings)
-		marketplace.POST("/listings/:id/images/upload-intent", mh.UploadImageIntent, marketplaceWriteLimit)
-		marketplace.POST("/listings/:id/images/:image_id/confirm", mh.ConfirmImage, marketplaceWriteLimit)
-		marketplace.DELETE("/listings/:id/images/:image_id", mh.DeleteImage, marketplaceWriteLimit)
+		marketplace.POST("/listings/:id/images/upload-intent", mh.UploadImageIntent, marketplaceImageLimit)
+		marketplace.POST("/listings/:id/images/:image_id/confirm", mh.ConfirmImage, marketplaceImageLimit)
+		marketplace.DELETE("/listings/:id/images/:image_id", mh.DeleteImage, marketplaceImageLimit)
 		marketplace.POST("/listings/:id/favorite", mh.Favorite, marketplaceWriteLimit)
 		marketplace.DELETE("/listings/:id/favorite", mh.Unfavorite, marketplaceWriteLimit)
 		marketplace.GET("/me/favorites", mh.MyFavorites)

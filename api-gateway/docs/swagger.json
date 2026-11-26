@@ -928,8 +928,12 @@
         "tags": ["Marketplace"],
         "operationId": "revokeMarketplaceContact",
         "summary": "Revoke an active contact grant and purge queued ciphertext if no other grant or mutual-follow still permits the pair.",
-        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
-        "responses": {"200": {"description": "listing_id and whether the grant was revoked."}, "404": {"$ref": "#/components/responses/NotFound"}, "429": {"$ref": "#/components/responses/RateLimited"}}
+        "description": "Buyers omit buyer_id; sellers must send buyer_id because revoking without it would affect every buyer on the listing.",
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}},
+          {"name": "buyer_id", "in": "query", "required": false, "description": "Target buyer UUID; required when the seller revokes.", "schema": {"type": "string", "format": "uuid"}}
+        ],
+        "responses": {"200": {"description": "listing_id and whether the grant was revoked."}, "400": {"$ref": "#/components/responses/Validation"}, "403": {"description": "Caller is not a participant of the targeted contact grant.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}}, "404": {"$ref": "#/components/responses/NotFound"}, "429": {"$ref": "#/components/responses/RateLimited"}}
       }
     },
     "/api/dm/messages": {

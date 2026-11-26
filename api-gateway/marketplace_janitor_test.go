@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hibiken/asynq"
 
@@ -14,12 +15,15 @@ import (
 )
 
 type marketplaceJanitorFakeStore struct {
-	rows      []db.ListDueMarketplaceCleanupOutboxRow
-	listErr   error
-	doneIDs   []int64
-	doneErr   error
-	failCalls []db.FailMarketplaceCleanupOutboxParams
-	failErr   error
+	rows       []db.ListDueMarketplaceCleanupOutboxRow
+	listErr    error
+	doneIDs    []int64
+	doneErr    error
+	failCalls  []db.FailMarketplaceCleanupOutboxParams
+	failErr    error
+	pruneCalls []int64
+	pruneRows  int64
+	pruneErr   error
 }
 
 func (s *marketplaceJanitorFakeStore) ListDueMarketplaceCleanupOutbox(context.Context, int32) ([]db.ListDueMarketplaceCleanupOutboxRow, error) {
@@ -40,6 +44,11 @@ func (s *marketplaceJanitorFakeStore) FailMarketplaceCleanupOutbox(_ context.Con
 	}
 	s.failCalls = append(s.failCalls, arg)
 	return nil
+}
+
+func (s *marketplaceJanitorFakeStore) PruneMarketplaceCleanupOutbox(_ context.Context, retention int64) (int64, error) {
+	s.pruneCalls = append(s.pruneCalls, retention)
+	return s.pruneRows, s.pruneErr
 }
 
 type marketplaceJanitorFakeSweeper struct {
@@ -169,6 +178,21 @@ func TestSweepMarketplaceImagesValidatesInputs(t *testing.T) {
 	}
 }
 
+func TestPruneMarketplaceCleanupOutbox(t *testing.T) {
+	ctx := context.Background()
+	store := &marketplaceJanitorFakeStore{pruneRows: 3}
+	rows, err := pruneMarketplaceCleanupOutbox(ctx, store)
+	if err != nil || rows != 3 {
+		t.Fatalf("rows=%d err=%v", rows, err)
+	}
+	if len(store.pruneCalls) != 1 || store.pruneCalls[0] != int64(marketplaceCleanupRetention/time.Second) {
+		t.Fatalf("prune calls = %v", store.pruneCalls)
+	}
+	if _, err := pruneMarketplaceCleanupOutbox(ctx, nil); err == nil {
+		t.Fatal("nil store must fail")
+	}
+}
+
 func TestMarketplaceCleanupRetryAtCapsBackoff(t *testing.T) {
 	first := marketplaceCleanupRetryAt(1)
 	if first.Before(time.Now().Add(29*time.Second)) || first.After(time.Now().Add(31*time.Second)) {
@@ -180,5 +204,9 @@ func TestMarketplaceCleanupRetryAtCapsBackoff(t *testing.T) {
 	}
 	if got := truncateMarketplaceCleanupError(strings.Repeat("x", marketplaceCleanupErrorLimit+1)); len(got) != marketplaceCleanupErrorLimit {
 		t.Fatalf("truncated length = %d", len(got))
+	}
+	multibyte := truncateMarketplaceCleanupError(strings.Repeat("é", marketplaceCleanupErrorLimit+1))
+	if utf8.RuneCountInString(multibyte) != marketplaceCleanupErrorLimit || !utf8.ValidString(multibyte) {
+		t.Fatalf("multibyte truncate = %q (%d runes)", multibyte, utf8.RuneCountInString(multibyte))
 	}
 }

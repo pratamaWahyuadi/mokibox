@@ -296,7 +296,8 @@ func run() (retErr error) {
 	}
 
 	var revoke envelope[contactRevokeResponse]
-	status, err = requestJSON(ctx, http.MethodDelete, contactURL, sellerToken, nil, &revoke)
+	status, err = requestJSON(ctx, http.MethodDelete,
+		contactURL+"?buyer_id="+buyerID.String(), sellerToken, nil, &revoke)
 	if err != nil {
 		return fmt.Errorf("revoke contact: %w", err)
 	}
