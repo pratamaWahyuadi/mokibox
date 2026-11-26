@@ -572,6 +572,10 @@ func (s *stubAccountTx) DeleteDMDevicesByUser(ctx context.Context, userID uuid.U
 	}
 	return 1, nil
 }
+func (s *stubAccountTx) DeleteDMBlocksByUser(ctx context.Context, userID uuid.UUID) (int64, error) {
+	s.calls = append(s.calls, "DeleteDMBlocksByUser")
+	return 1, nil
+}
 func (s *stubAccountTx) TombstoneUser(ctx context.Context, id uuid.UUID) (db.User, error) {
 	s.calls = append(s.calls, "TombstoneUser")
 	if s.tombstoneErr != nil {
@@ -634,7 +638,7 @@ func TestDeleteMe_HappyPathCascadeAndEnqueue(t *testing.T) {
 		"DeleteVideosByUser", "DeleteFollowsByFollower", "DeleteFollowsByFollowee",
 		"DeleteLikesByUser", "DeleteCommentsByUser", "DeleteNotificationsForUser",
 		"DeleteNotificationsByActor", "DeleteDMInboxByUser", "DeleteDMDevicesByUser",
-		"TombstoneUser",
+		"DeleteDMBlocksByUser", "TombstoneUser",
 	}
 	if len(tx.calls) != len(wantOrder) {
 		t.Fatalf("cascade calls = %v, want %v", tx.calls, wantOrder)

@@ -70,6 +70,7 @@ type accountTxStore interface {
 	DeleteNotificationsByActor(ctx context.Context, actorID uuid.UUID) error
 	DeleteDMInboxByUser(ctx context.Context, userID uuid.UUID) (int64, error)
 	DeleteDMDevicesByUser(ctx context.Context, userID uuid.UUID) (int64, error)
+	DeleteDMBlocksByUser(ctx context.Context, userID uuid.UUID) (int64, error)
 	TombstoneUser(ctx context.Context, id uuid.UUID) (db.User, error)
 }
 
@@ -319,7 +320,7 @@ func collectUserR2Keys(ctx context.Context, runner txRunner[accountTxStore], use
 			return shared.Wrap(shared.ErrInternal, fmt.Sprintf("delete notifications (actor): %v", err))
 		}
 
-		// Step 8: E2EE DM relay data. Migrations 009-011 are
+		// Step 8: E2EE DM relay data. Migrations 009-011 and 015 are
 		// applied unconditionally, so this runs even when the
 		// DM feature flag is off. The inbox delete covers rows
 		// where the user is sender or recipient;
@@ -330,6 +331,9 @@ func collectUserR2Keys(ctx context.Context, runner txRunner[accountTxStore], use
 		}
 		if _, err := qtx.DeleteDMDevicesByUser(ctx, userID); err != nil {
 			return shared.Wrap(shared.ErrInternal, fmt.Sprintf("delete DM devices: %v", err))
+		}
+		if _, err := qtx.DeleteDMBlocksByUser(ctx, userID); err != nil {
+			return shared.Wrap(shared.ErrInternal, fmt.Sprintf("delete DM blocks: %v", err))
 		}
 
 		// Step 9: tombstone. Username placeholder is

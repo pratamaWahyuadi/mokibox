@@ -41,6 +41,34 @@ WHERE user_id = $1;
 DELETE FROM dm_inbox
 WHERE sender_user_id = sqlc.arg(user_id) OR recipient_user_id = sqlc.arg(user_id);
 
+-- name: DeleteDMInboxForPair :execrows
+DELETE FROM dm_inbox
+WHERE sender_user_id = sqlc.arg(sender_id) AND recipient_user_id = sqlc.arg(recipient_id);
+
+-- name: DeleteDMIdempotencyForPairMessages :execrows
+DELETE FROM dm_idempotency
+WHERE sender_device_id IN (
+    SELECT device_id FROM dm_devices WHERE user_id = sqlc.arg(sender_id)
+)
+AND EXISTS (
+    SELECT 1 FROM dm_inbox
+    WHERE dm_inbox.message_id = dm_idempotency.message_id
+      AND dm_inbox.recipient_user_id = sqlc.arg(recipient_id)
+);
+
+-- name: InsertDMBlock :execrows
+INSERT INTO dm_blocks (blocker_id, blocked_id)
+VALUES (sqlc.arg(blocker_id), sqlc.arg(blocked_id))
+ON CONFLICT DO NOTHING;
+
+-- name: DeleteDMBlock :execrows
+DELETE FROM dm_blocks
+WHERE blocker_id = sqlc.arg(blocker_id) AND blocked_id = sqlc.arg(blocked_id);
+
+-- name: DeleteDMBlocksByUser :execrows
+DELETE FROM dm_blocks
+WHERE blocker_id = sqlc.arg(user_id) OR blocked_id = sqlc.arg(user_id);
+
 -- name: CreateDMDevice :one
 INSERT INTO dm_devices (
     device_id, user_id, identity_curve25519, identity_ed25519
@@ -57,6 +85,11 @@ SELECT EXISTS (
     WHERE sender.id = $1
       AND sender.is_active = TRUE
       AND recipient.is_active = TRUE
+      AND NOT EXISTS (
+          SELECT 1 FROM dm_blocks
+          WHERE (blocker_id = sender.id AND blocked_id = recipient.id)
+             OR (blocker_id = recipient.id AND blocked_id = sender.id)
+      )
       AND EXISTS (
           SELECT 1 FROM follows
           WHERE follower_id = sender.id AND followee_id = recipient.id

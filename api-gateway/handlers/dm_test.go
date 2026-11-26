@@ -29,6 +29,8 @@ type dmFakeStore struct {
 	idempotency  map[dmFakeIdemKey]db.GetDMIdempotencyRow
 	inbox        map[uuid.UUID]db.ListPendingDMInboxRow
 	acknowledged map[uuid.UUID]bool
+	blocks       map[uuid.UUID]map[uuid.UUID]bool
+	pairPurges   int
 	eligible     bool
 	pending      int64
 }
@@ -47,6 +49,7 @@ func newDMFakeStore() *dmFakeStore {
 		idempotency:  make(map[dmFakeIdemKey]db.GetDMIdempotencyRow),
 		inbox:        make(map[uuid.UUID]db.ListPendingDMInboxRow),
 		acknowledged: make(map[uuid.UUID]bool),
+		blocks:       make(map[uuid.UUID]map[uuid.UUID]bool),
 	}
 }
 
@@ -162,6 +165,57 @@ func (s *dmFakeStore) GetDMInboxMessageForDevice(_ context.Context, arg db.GetDM
 		return uuid.Nil, sql.ErrNoRows
 	}
 	return row.MessageID, nil
+}
+
+func (s *dmFakeStore) InsertDMBlock(_ context.Context, arg db.InsertDMBlockParams) (int64, error) {
+	if s.blocks[arg.BlockerID] == nil {
+		s.blocks[arg.BlockerID] = make(map[uuid.UUID]bool)
+	}
+	if s.blocks[arg.BlockerID][arg.BlockedID] {
+		return 0, nil
+	}
+	s.blocks[arg.BlockerID][arg.BlockedID] = true
+	return 1, nil
+}
+
+func (s *dmFakeStore) DeleteDMBlock(_ context.Context, arg db.DeleteDMBlockParams) (int64, error) {
+	if !s.blocks[arg.BlockerID][arg.BlockedID] {
+		return 0, nil
+	}
+	delete(s.blocks[arg.BlockerID], arg.BlockedID)
+	return 1, nil
+}
+
+func (s *dmFakeStore) DeleteDMInboxForPair(_ context.Context, arg db.DeleteDMInboxForPairParams) (int64, error) {
+	var rows int64
+	for messageID, row := range s.inbox {
+		if row.SenderUserID == arg.SenderID && row.RecipientUserID == arg.RecipientID {
+			delete(s.inbox, messageID)
+			delete(s.acknowledged, messageID)
+			rows++
+		}
+	}
+	return rows, nil
+}
+
+func (s *dmFakeStore) DeleteDMIdempotencyForPairMessages(_ context.Context, arg db.DeleteDMIdempotencyForPairMessagesParams) (int64, error) {
+	var rows int64
+	for key, record := range s.idempotency {
+		for userID, device := range s.devices {
+			if userID != arg.SenderID || device.DeviceID != key.deviceID {
+				continue
+			}
+			for _, inbox := range s.inbox {
+				if inbox.MessageID == record.MessageID && inbox.RecipientUserID == arg.RecipientID {
+					delete(s.idempotency, key)
+					s.pairPurges++
+					rows++
+					break
+				}
+			}
+		}
+	}
+	return rows, nil
 }
 
 func (s *dmFakeStore) LockActiveDMUser(_ context.Context, userID uuid.UUID) (uuid.UUID, error) {
@@ -453,7 +507,7 @@ func TestGetDMKeyBundleClaimsOneTimeKeyOnce(t *testing.T) {
 		Signature: base64.StdEncoding.EncodeToString(bytesOf(4, 64)),
 	}}
 	handler := newDMHandlerForTest(store, dmFakeRunner{store: store}, 168*time.Hour)
-	path := fmt.Sprintf("/api/dm/users/%s/key-bundle?device_id=%s", targetID, requesterDeviceID)
+	path := fmt.Sprintf("/api/dm/users/%s/key-bundle?device_id=%s&include_one_time_key=true", targetID, requesterDeviceID)
 	e := newDMTestEcho(user, http.MethodGet, "/api/dm/users/:id/key-bundle", handler.GetKeyBundle)
 
 	first := doJSON(e, http.MethodGet, path, "")
@@ -477,6 +531,88 @@ func TestGetDMKeyBundleClaimsOneTimeKeyOnce(t *testing.T) {
 	}
 	second := doJSON(e, http.MethodGet, path, "")
 	assertErrCode(t, second, http.StatusConflict, shared.CodeDMKeyUnavailable)
+}
+
+func TestGetDMKeyBundleDoesNotClaimOneTimeKeyByDefault(t *testing.T) {
+	user := viewerUser()
+	targetID := uuid.New()
+	requesterDeviceID, targetDeviceID := uuid.New(), uuid.New()
+	store := newDMFakeStore()
+	store.eligible = true
+	store.devices[user.ID] = db.DmDevice{DeviceID: requesterDeviceID, UserID: user.ID}
+	store.devices[targetID] = db.DmDevice{
+		DeviceID: targetDeviceID, UserID: targetID,
+		IdentityCurve25519: base64.StdEncoding.EncodeToString(bytesOf(1, 32)),
+		IdentityEd25519:    base64.StdEncoding.EncodeToString(bytesOf(2, 32)),
+	}
+	store.keys[targetDeviceID] = []db.ClaimDMOneTimeKeyRow{{
+		KeyID: "one", PublicKey: base64.StdEncoding.EncodeToString(bytesOf(3, 32)),
+		Signature: base64.StdEncoding.EncodeToString(bytesOf(4, 64)),
+	}}
+	handler := newDMHandlerForTest(store, dmFakeRunner{store: store}, 168*time.Hour)
+	path := fmt.Sprintf("/api/dm/users/%s/key-bundle?device_id=%s", targetID, requesterDeviceID)
+	e := newDMTestEcho(user, http.MethodGet, "/api/dm/users/:id/key-bundle", handler.GetKeyBundle)
+
+	rec := doJSON(e, http.MethodGet, path, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bundle status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var bundleResponse dmRequestEnvelope[dmKeyBundle]
+	if err := json.Unmarshal(rec.Body.Bytes(), &bundleResponse); err != nil {
+		t.Fatalf("decode bundle response: %v", err)
+	}
+	if bundleResponse.Data.OneTimeKey != nil || bundleResponse.Data.FallbackKey != nil {
+		t.Fatalf("default bundle must not claim a key, got %+v", bundleResponse.Data)
+	}
+	if len(store.keys[targetDeviceID]) != 1 {
+		t.Fatalf("one-time keys remaining = %d, want 1", len(store.keys[targetDeviceID]))
+	}
+}
+
+func TestBlockUserPurgesPairStateAndUnblockClearsBlock(t *testing.T) {
+	user := viewerUser()
+	targetID := uuid.New()
+	senderDeviceID, recipientDeviceID, messageID := uuid.New(), uuid.New(), uuid.New()
+	store := newDMFakeStore()
+	store.devices[user.ID] = db.DmDevice{DeviceID: senderDeviceID, UserID: user.ID}
+	store.devices[targetID] = db.DmDevice{DeviceID: recipientDeviceID, UserID: targetID}
+	store.inbox[messageID] = db.ListPendingDMInboxRow{
+		MessageID: messageID, SenderUserID: user.ID, SenderDeviceID: senderDeviceID,
+		RecipientUserID: targetID, RecipientDeviceID: recipientDeviceID,
+	}
+	store.idempotency[dmFakeIdemKey{deviceID: senderDeviceID, clientID: uuid.New()}] = db.GetDMIdempotencyRow{
+		MessageID: messageID,
+	}
+	handler := newDMHandlerForTest(store, dmFakeRunner{store: store}, 168*time.Hour)
+	path := fmt.Sprintf("/api/dm/blocks/%s", targetID)
+	blockEcho := newDMTestEcho(user, http.MethodPost, "/api/dm/blocks/:id", handler.BlockUser)
+
+	blocked := doJSON(blockEcho, http.MethodPost, path, "")
+	if blocked.Code != http.StatusOK {
+		t.Fatalf("block status = %d, body=%s", blocked.Code, blocked.Body.String())
+	}
+	var blockResponse dmRequestEnvelope[dmBlockResponse]
+	if err := json.Unmarshal(blocked.Body.Bytes(), &blockResponse); err != nil {
+		t.Fatalf("decode block response: %v", err)
+	}
+	if !blockResponse.Data.Blocked || blockResponse.Data.UserID != targetID {
+		t.Fatalf("block response = %+v", blockResponse.Data)
+	}
+	if !store.blocks[user.ID][targetID] {
+		t.Fatal("block was not stored")
+	}
+	if len(store.inbox) != 0 || store.pairPurges == 0 {
+		t.Fatalf("pair state not purged: inbox=%d purges=%d", len(store.inbox), store.pairPurges)
+	}
+
+	unblockEcho := newDMTestEcho(user, http.MethodDelete, "/api/dm/blocks/:id", handler.UnblockUser)
+	unblocked := doJSON(unblockEcho, http.MethodDelete, path, "")
+	if unblocked.Code != http.StatusOK {
+		t.Fatalf("unblock status = %d, body=%s", unblocked.Code, unblocked.Body.String())
+	}
+	if store.blocks[user.ID][targetID] {
+		t.Fatal("block was not removed")
+	}
 }
 
 func TestUploadFallbackKeyAndServeItWhenOneTimeKeysAreDrained(t *testing.T) {
