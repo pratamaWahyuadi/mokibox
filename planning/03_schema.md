@@ -276,7 +276,8 @@ Menyimpan data profil minimal. **Email dari Zitadel tidak disimpan.**
 |---|---|---|---|---|
 | `id` | `UUID` | Primary Key | `gen_random_uuid()` | ID internal. Tidak dijadikan mekanisme keamanan. |
 | `zitadel_id` | `TEXT` | NOT NULL, UNIQUE | – | `sub` dari JWT Zitadel. Dipakai untuk get-or-create user. |
-| `username` | `TEXT` | NOT NULL, UNIQUE | – | Username publik. Saat tombstone, diganti placeholder unik `deleted_<uuid>`. |
+| `username` | `TEXT` | NOT NULL, UNIQUE | – | Username publik. Saat tombstone, diganti placeholder unik `deleted_<uuid>`. Bisa diubah pemiliknya via `PUT /api/users/me/username` (cooldown 7 hari). |
+| `username_changed_at` | `TIMESTAMPTZ` | NULL | – | Waktu perubahan username terakhir (migrasi 016). NULL = belum pernah ganti; cooldown 7 hari dihitung dari `now()` database. |
 | `display_name` | `TEXT` | NULL | – | Nama tampilan. |
 | `bio` | `TEXT` | NULL | – | Bio profil. |
 | `avatar_url` | `TEXT` | NULL | – | URL avatar eksternal lama (kompatibilitas); file upload baru direferensikan oleh `avatar_key`. |
@@ -291,6 +292,7 @@ Menyimpan data profil minimal. **Email dari Zitadel tidak disimpan.**
 **Index:**  
 - `UNIQUE (zitadel_id)` → B-Tree unique, untuk get-or-create by `sub`.
 - `UNIQUE (username)` → B-Tree unique, untuk menjamin username tidak duplikat.
+- `uq_users_username_lower` → B-Tree unique pada `lower(username)` (migrasi 016), melengkapi UNIQUE biasa agar keunikan case-insensitive.
 
 ---
 

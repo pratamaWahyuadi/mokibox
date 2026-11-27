@@ -756,9 +756,45 @@ Demo web lama (`deploy/demo/index.html`) dihapus; dokumentasi API +
 
 ## Next work (belum dikerjakan) — HANYA catatan analisis, belum implementasi
 
-### a. Ubah username maksimal sekali per 7 hari
+### a. Ubah username maksimal sekali per 7 hari — ✅ TERIMPLEMENTASI (Fitur B, migrasi 016)
 
-Temuan kode (fakta, belum ada implementasi):
+Catatan historis analisis di bawah dipertahankan; status kini:
+
+- Kolom `users.username_changed_at TIMESTAMPTZ NULL` + unique index
+  `uq_users_username_lower (lower(username))` ditambahkan oleh
+  `migrations/016_username_change.sql` (rencana awal menamai 009;
+  nomor 009 sudah dipakai `009_dm_e2ee.sql`, jadi nomor mengikuti urutan
+  migrasi yang ada). **Migrasi 016 wajib diterapkan SEBELUM gateway baru
+  naik** — pelajaran yang sama dengan fase avatar (schema-first).
+- **Keputusan GRANT tunggal (K12): TIDAK ADA GRANT baru.** `tiktok_api`
+  sudah punya UPDATE table-level dari `001_init.sql` (ALTER DEFAULT
+  PRIVILEGES); `tiktok_worker` sengaja tidak boleh membaca kolom username
+  (pola column-level `002_reconcile_users_grant.sql`). Verifikasi
+  operator setelah migrasi:
+  `SELECT has_column_privilege('tiktok_api','users','username_changed_at','UPDATE');`
+  → harus `t`.
+- Validasi: 3–30 karakter, charset `a-z0-9._`, tanpa titik awal/akhir/
+  berurutan, reserved words (`admin, support, mokibox, api, me, system,
+  root, official, help, security`), awalan `deleted_` dilarang
+  (namespace tombstone `TombstoneUser`). Programatik di handler
+  (`changeUsernameRules`, `handlers/user.go`) + tag validator dasar.
+- Error code baru di `shared/errors.go`: `USERNAME_CHANGE_COOLDOWN`
+  (429, dengan header `Retry-After` dan detail `next_change_at` — semua
+  dihitung dari waktu DB) dan `USERNAME_TAKEN` (409, SQLSTATE 23505).
+- Cooldown atomik: satu `UPDATE` bersyarat `UpdateUsername` (sqlc) yang
+  memakai `now()` database + `RowsAffected`; read-only
+  `GetUsernameChangedAt` hanya untuk membedakan 404 vs 429 setelah
+  update nihil. Cooldown tidak terkonsumsi bila username baru sama
+  dengan yang sekarang (ditolak sebelum menyentuh store).
+- Snapshot username di payload notifikasi lama TIDAK di-rewrite —
+  acceptable (keputusan K8, konsisten pola snapshot existing).
+- **Dokumen sudah diperbarui**: `planning/04_api_contracts.md` (klaim
+  immutable dihapus), `planning/03_schema.md` (kolom + index), 
+  `SECURITY.md`, dan swagger.json (`SelfUserProfile` vs `UserProfile`
+  — `username_changed_at` hanya di endpoint self, K11).
+- Smoke test: `scripts/smoketest/phase14_username_change`.
+
+Temuan kode (fakta historis saat analisis, sebelum implementasi):
 
 - Kolom: tabel `users` belum punya penanda waktu perubahan username.
   Dibutuhkan mis. `username_changed_at TIMESTAMPTZ NULL` — NULL = belum

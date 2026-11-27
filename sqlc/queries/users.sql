@@ -49,6 +49,7 @@ WHERE users.id = previous.id
 RETURNING users.id,
           users.zitadel_id,
           users.username,
+          users.username_changed_at,
           users.display_name,
           users.bio,
           users.avatar_url,
@@ -125,6 +126,37 @@ SET is_active  = FALSE,
     deleted_at = COALESCE(deleted_at, NOW())
 WHERE id = $1
 RETURNING *;
+
+-- name: UpdateUsername :one
+-- Fitur B: penggantian username sendiri. SATU statement
+-- atomik tahan race: kondisi cooldown dievaluasi oleh
+-- Postgres dengan now() database (BUKAN jam aplikasi),
+-- jadi tidak ada jendela TOCTOU. RowsAffected == 0
+-- (sql.ErrNoRows dengan :one) berarti user tidak ada /
+-- tidak aktif / masih cooldown — handler membedakannya
+-- via GetUsernameChangedAt SETELAH update nihil
+-- (read-only, keputusan tulis tetap di UPDATE atomik ini).
+-- Pelanggaran unique lower(username) (SQLSTATE 23505)
+-- dipetakan handler menjadi 409 USERNAME_TAKEN.
+UPDATE users
+SET username = sqlc.arg('new_username'), username_changed_at = now()
+WHERE id = sqlc.arg('user_id')
+  AND is_active = TRUE
+  AND (username_changed_at IS NULL OR username_changed_at <= now() - interval '7 days')
+RETURNING id, username, username_changed_at;
+
+-- name: GetUsernameChangedAt :one
+-- Dipakai SETELAH UpdateUsername nihil (0 rows) untuk
+-- membedakan "user tidak ada/tidak aktif" (404) dari
+-- "masih cooldown" (429). next_change_at dan
+-- retry_after_seconds dihitung dari now() DATABASE, bukan
+-- jam aplikasi — dipakai untuk details next_change_at dan
+-- header Retry-After (K6).
+SELECT username_changed_at,
+       (username_changed_at + interval '7 days')::timestamptz AS next_change_at,
+       GREATEST(EXTRACT(EPOCH FROM (username_changed_at + interval '7 days' - now()))::int, 0)::bigint AS retry_after_seconds
+FROM users
+WHERE id = $1;
 
 -- name: TombstoneUser :one
 -- Triggered by user.removed. Username is replaced with a

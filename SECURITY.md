@@ -127,6 +127,43 @@ so it drops the full docker-recommended list except those.
 - **No automated security scanning** (trivy/dependabot) in
   CI yet - candidate for a follow-up issue.
 
+## Username change (Fitur B — `PUT /api/users/me/username`)
+
+Endpoint baru bagi user terautentikasi untuk mengganti username miliknya
+sendiri. Catatan keamanan:
+
+- **Cooldown anti-abuse**: maksimal sekali per 7 hari, ditegakkan oleh
+  SATU statement `UPDATE` bersyarat (`UpdateUsername`, sqlc) yang memakai
+  `now()` database — atomik, tahan race (tidak ada jendela TOCTOU).
+  Cooldown hanya terkonsumsi bila perubahan berhasil; no-op (username
+  sama dengan milik sendiri) ditolak 400 sebelum menyentuh store.
+- **Reserved words + namespace tombstone**: `admin, support, mokibox,
+  api, me, system, root, official, help, security` ditolak; awalan
+  `deleted_` dilarang agar tidak bentrok dengan tombstone
+  `TombstoneUser` (`username = 'deleted_' || id`). Validasi programatik
+  `changeUsernameRules` di `handlers/user.go` (charset `a-z0-9._`,
+  3–30 karakter, tanpa titik awal/akhir/berurutan).
+- **Keunikan case-insensitive**: unique index `uq_users_username_lower
+  (lower(username))` (migrasi 016, atomik bersama ADD COLUMN via
+  BEGIN/COMMIT). Pelanggaran → 409 `USERNAME_TAKEN`.
+- **Risiko impersonasi (keputusan K7)**: username lama LANGSUNG bebas
+  diambil orang lain (tanpa tabel riwayat). Risiko diterima karena akun
+  asal tetap aktif dan profil publik menunjukkan riwayat; opsi tabel
+  riwayat penahanan N hari = follow-up terpisah.
+- **Enumerasi username**: 409 `USERNAME_TAKEN` mengkonfirmasi keberadaan
+  username — mitigasi: rate limiter per-user (`authRateLimit`, 60/min)
+  di grup auth, validasi ketat, dan cooldown 7 hari.
+- **GRANT (keputusan K12)**: TIDAK ada GRANT baru di migrasi 016.
+  `tiktok_api` sudah punya UPDATE table-level dari `001_init.sql`;
+  `tiktok_worker` tidak boleh membaca kolom username (pola column-level
+  `002_reconcile_users_grant.sql`). Verifikasi:
+  `SELECT has_column_privilege('tiktok_api','users','username_changed_at','UPDATE');`
+  → `t`.
+- **Privacy field (K11)**: `username_changed_at` hanya dikembalikan di
+  endpoint self (`GET/PUT /api/users/me`, `PUT /api/users/me/username`);
+  profil publik tidak memuatnya.
+- **Log**: hanya `user_id` — username tidak pernah ditulis ke log.
+
 ## Reporting a vulnerability
 
 Please report privately to the repository owner (GitHub

@@ -26,10 +26,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/labstack/echo/v4"
 
 	"github.com/pratamaWahyuadi/mokibox/api-gateway/middleware"
@@ -51,6 +54,8 @@ type userStore interface {
 	ListFollowers(ctx context.Context, arg db.ListFollowersParams) ([]db.ListFollowersRow, error)
 	ListFollowing(ctx context.Context, arg db.ListFollowingParams) ([]db.ListFollowingRow, error)
 	InsertNotification(ctx context.Context, arg db.InsertNotificationParams) (db.Notification, error)
+	UpdateUsername(ctx context.Context, arg db.UpdateUsernameParams) (db.UpdateUsernameRow, error)
+	GetUsernameChangedAt(ctx context.Context, userID uuid.UUID) (db.GetUsernameChangedAtRow, error)
 }
 
 // UserHandler holds the dependencies for the user
@@ -108,6 +113,71 @@ type userProfileResponse struct {
 	CreatedAt   string    `json:"created_at"`
 }
 
+// selfUserProfileResponse adds the username-change bookkeeping
+// field that MUST only appear on self endpoints (K11):
+// GET /api/users/me, PUT /api/users/me and
+// PUT /api/users/me/username. The public profile
+// (GET /api/users/:id) keeps returning plain
+// userProfileResponse, so other viewers never see
+// username_changed_at (the cooldown timestamp is private
+// state; it also leaks the account's recent username-change
+// activity if exposed publicly).
+type selfUserProfileResponse struct {
+	userProfileResponse
+	UsernameChangedAt *string `json:"username_changed_at"`
+}
+
+// usernameCooldown is the fixed 7-day cooldown between
+// username changes (product decision Q3: hard-coded, not
+// configurable via env). The enforcement itself lives in
+// the SQL of UpdateUsername using now() from the DATABASE;
+// this constant is documentation-only on the Go side.
+const usernameCooldown = 7 * 24 * time.Hour
+
+// reservedUsernames are rejected as new usernames (K5,
+// final list owned by the repo owner). "user_" is
+// deliberately NOT reserved so the existing auto-generated
+// usernames (newUsername() in middleware/auth.go) stay
+// valid values.
+var reservedUsernames = map[string]bool{
+	"admin": true, "support": true, "mokibox": true, "api": true,
+	"me": true, "system": true, "root": true, "official": true,
+	"help": true, "security": true,
+}
+
+// changeUsernameRules validates a lowercase-normalized
+// username (K5). Programmatic (not struct-tag) so every
+// rule is unit-testable. Rules:
+//   - 3-30 characters
+//   - only a-z, 0-9, dot, underscore
+//   - no leading/trailing dot, no consecutive dots
+//   - not a reserved word
+//   - no "deleted_" prefix (tombstone namespace,
+//     TombstoneUser writes username = 'deleted_' || id)
+func changeUsernameRules(s string) error {
+	if len(s) < 3 || len(s) > 30 {
+		return fmt.Errorf("username must be 3-30 characters")
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '.' || r == '_') {
+			return fmt.Errorf("username may only contain lowercase letters, digits, dot and underscore")
+		}
+	}
+	if strings.HasPrefix(s, ".") || strings.HasSuffix(s, ".") {
+		return fmt.Errorf("username must not start or end with a dot")
+	}
+	if strings.Contains(s, "..") {
+		return fmt.Errorf("username must not contain consecutive dots")
+	}
+	if strings.HasPrefix(s, "deleted_") {
+		return fmt.Errorf("username must not start with deleted_")
+	}
+	if reservedUsernames[s] {
+		return fmt.Errorf("username is reserved")
+	}
+	return nil
+}
+
 // userProfileWithStats adds the follow-graph fields that
 // only /api/users/:id returns (per API contract section 3).
 type userProfileWithStats struct {
@@ -141,15 +211,36 @@ func userProfileFromDB(ctx context.Context, r2 r2ObjectStore, cfg *shared.APICon
 	return out, nil
 }
 
+// rfc3339 formats t the way every timestamp field in this
+// API is serialized.
+func rfc3339(t time.Time) string { return t.UTC().Format(time.RFC3339) }
+
+// selfProfileFromDB builds the self-view profile (K11):
+// the shared userProfileResponse plus username_changed_at
+// when the user has changed their username before.
+func selfProfileFromDB(ctx context.Context, r2 r2ObjectStore, cfg *shared.APIConfig, u db.User) (selfUserProfileResponse, error) {
+	base, err := userProfileFromDB(ctx, r2, cfg, u)
+	if err != nil {
+		return selfUserProfileResponse{}, err
+	}
+	out := selfUserProfileResponse{userProfileResponse: base}
+	if u.UsernameChangedAt.Valid {
+		v := rfc3339(u.UsernameChangedAt.Time)
+		out.UsernameChangedAt = &v
+	}
+	return out, nil
+}
+
 // GetMe returns the profile of the authenticated user.
 // The auth middleware has already placed *db.User on
-// the context; we just reserialize it.
+// the context; we just reserialize it. Self view: includes
+// username_changed_at (K11).
 func (h *UserHandler) GetMe(c echo.Context) error {
 	user, ok := middleware.UserFromContext(c)
 	if !ok || user == nil {
 		return shared.RespondError(c, shared.Wrap(shared.ErrUnauthorized, "no authenticated user"))
 	}
-	resp, err := userProfileFromDB(c.Request().Context(), h.R2, h.Cfg, *user)
+	resp, err := selfProfileFromDB(c.Request().Context(), h.R2, h.Cfg, *user)
 	if err != nil {
 		slog.Error("presign current user avatar failed", "err", err, "user_id", user.ID)
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load avatar URL"))
@@ -235,8 +326,117 @@ func (h *UserHandler) UpdateMe(c echo.Context) error {
 		AvatarKey:              updated.AvatarKey,
 		PendingAvatarKey:       updated.PendingAvatarKey,
 		PendingAvatarExpiresAt: updated.PendingAvatarExpiresAt,
+		UsernameChangedAt:      updated.UsernameChangedAt,
 	}
-	resp, err := userProfileFromDB(c.Request().Context(), h.R2, h.Cfg, updatedUser)
+	resp, err := selfProfileFromDB(c.Request().Context(), h.R2, h.Cfg, updatedUser)
+	if err != nil {
+		slog.Error("presign updated user avatar failed", "err", err, "user_id", user.ID)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load avatar URL"))
+	}
+	return shared.RespondOK(c, resp)
+}
+
+// changeUsernameRequest is the body of
+// PUT /api/users/me/username. Basic bounds run through
+// validator/v10; the charset/reserved/tombstone rules run
+// programmatically via changeUsernameRules (K5).
+type changeUsernameRequest struct {
+	Username *string `json:"username" validate:"required,min=3,max=30"`
+}
+
+// UpdateUsername implements PUT /api/users/me/username
+// (Fitur B): the authenticated user changes their own
+// username, at most once per 7 days.
+//
+// Ordering guarantees:
+//   - Same-as-current is rejected BEFORE the store is
+//     touched, so the cooldown timestamp is NOT consumed
+//     for a no-op change.
+//   - The cooldown itself is enforced by the single
+//     conditional UPDATE (UpdateUsername) using now() from
+//     the DATABASE (K3) - atomic, race-free; RowsAffected
+//     decides the outcome, never a read-then-write.
+//   - A unique-index violation (SQLSTATE 23505 on
+//     uq_users_username_lower) becomes 409 USERNAME_TAKEN
+//     (K6b); a zero-row UPDATE becomes either 404 (user
+//     missing/inactive) or 429 USERNAME_CHANGE_COOLDOWN
+//     with next_change_at + Retry-After computed from DB
+//     time (K6). Logs carry user_id only - never the
+//     username.
+func (h *UserHandler) UpdateUsername(c echo.Context) error {
+	user, ok := middleware.UserFromContext(c)
+	if !ok || user == nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrUnauthorized, "no authenticated user"))
+	}
+
+	var req changeUsernameRequest
+	if err := c.Bind(&req); err != nil {
+		return shared.RespondError(c, shared.Wrap(shared.ErrValidation, "invalid JSON body"))
+	}
+	if err := c.Validate(&req); err != nil {
+		return shared.RespondError(c, err)
+	}
+
+	newName := strings.ToLower(*req.Username)
+	if err := changeUsernameRules(newName); err != nil {
+		return shared.RespondError(c, shared.NewAPIError(shared.CodeValidationError, err.Error()).
+			WithDetails(shared.FieldError{Field: "username", Message: err.Error()}))
+	}
+	// Same-as-current: reject BEFORE the store so the
+	// cooldown is not consumed (K item 4b).
+	if strings.EqualFold(newName, user.Username) {
+		const msg = "username is already yours"
+		return shared.RespondError(c, shared.NewAPIError(shared.CodeValidationError, msg).
+			WithDetails(shared.FieldError{Field: "username", Message: msg}))
+	}
+
+	row, err := h.Queries.UpdateUsername(c.Request().Context(), db.UpdateUsernameParams{
+		UserID:      user.ID,
+		NewUsername: newName,
+	})
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return shared.RespondError(c, shared.Wrap(shared.ErrUsernameTaken, "username already taken"))
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			// Zero-row UPDATE: distinguish "missing/inactive"
+			// (404) from "still cooling down" (429). The
+			// follow-up read is read-only; the write decision
+			// stays in the atomic UPDATE (K3).
+			probe, gerr := h.Queries.GetUsernameChangedAt(c.Request().Context(), user.ID)
+			if gerr != nil {
+				if errors.Is(gerr, sql.ErrNoRows) {
+					return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "user not found"))
+				}
+				slog.Error("get username_changed_at failed", "err", gerr, "user_id", user.ID)
+				return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load username cooldown"))
+			}
+			if !probe.UsernameChangedAt.Valid || probe.RetryAfterSeconds <= 0 {
+				return shared.RespondError(c, shared.Wrap(shared.ErrNotFound, "user not found"))
+			}
+			// 429 USERNAME_CHANGE_COOLDOWN (K6): details carry
+			// next_change_at (DB time), header carries
+			// Retry-After seconds (DB time).
+			c.Response().Header().Set("Retry-After", strconv.FormatInt(probe.RetryAfterSeconds, 10))
+			return shared.RespondError(c, shared.NewAPIError(shared.CodeUsernameChangeCooldown,
+				"username can only be changed once every 7 days").
+				WithDetails(shared.FieldError{
+					Field:   "next_change_at",
+					Message: rfc3339(probe.NextChangeAt),
+				}))
+		}
+		slog.Error("update username failed", "err", err, "user_id", user.ID)
+		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "update username"))
+	}
+
+	// Success: refetch-free response from RETURNING. Only the
+	// username/username_changed_at fields changed - rebuild
+	// the self profile from the middleware user + the row.
+	updated := *user
+	updated.Username = row.Username
+	updated.UsernameChangedAt = row.UsernameChangedAt
+	resp, err := selfProfileFromDB(c.Request().Context(), h.R2, h.Cfg, updated)
 	if err != nil {
 		slog.Error("presign updated user avatar failed", "err", err, "user_id", user.ID)
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load avatar URL"))

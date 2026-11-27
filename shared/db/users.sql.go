@@ -84,7 +84,7 @@ const createUser = `-- name: CreateUser :one
 INSERT INTO users (zitadel_id, username, display_name)
 VALUES ($1, $2, $3)
 ON CONFLICT (zitadel_id) DO NOTHING
-RETURNING id, zitadel_id, username, display_name, bio, avatar_url, is_private, is_active, deleted_at, created_at, avatar_key, pending_avatar_key, pending_avatar_expires_at
+RETURNING id, zitadel_id, username, display_name, bio, avatar_url, is_private, is_active, deleted_at, created_at, avatar_key, pending_avatar_key, pending_avatar_expires_at, username_changed_at
 `
 
 type CreateUserParams struct {
@@ -112,6 +112,7 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&i.AvatarKey,
 		&i.PendingAvatarKey,
 		&i.PendingAvatarExpiresAt,
+		&i.UsernameChangedAt,
 	)
 	return i, err
 }
@@ -121,7 +122,7 @@ UPDATE users
 SET is_active  = FALSE,
     deleted_at = COALESCE(deleted_at, NOW())
 WHERE id = $1
-RETURNING id, zitadel_id, username, display_name, bio, avatar_url, is_private, is_active, deleted_at, created_at, avatar_key, pending_avatar_key, pending_avatar_expires_at
+RETURNING id, zitadel_id, username, display_name, bio, avatar_url, is_private, is_active, deleted_at, created_at, avatar_key, pending_avatar_key, pending_avatar_expires_at, username_changed_at
 `
 
 // Triggered by webhook event user.deactivated.
@@ -142,6 +143,7 @@ func (q *Queries) DeactivateUser(ctx context.Context, id uuid.UUID) (User, error
 		&i.AvatarKey,
 		&i.PendingAvatarKey,
 		&i.PendingAvatarExpiresAt,
+		&i.UsernameChangedAt,
 	)
 	return i, err
 }
@@ -166,7 +168,7 @@ func (q *Queries) GetUserAvatarKeys(ctx context.Context, id uuid.UUID) (GetUserA
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, zitadel_id, username, display_name, bio, avatar_url, is_private, is_active, deleted_at, created_at, avatar_key, pending_avatar_key, pending_avatar_expires_at
+SELECT id, zitadel_id, username, display_name, bio, avatar_url, is_private, is_active, deleted_at, created_at, avatar_key, pending_avatar_key, pending_avatar_expires_at, username_changed_at
 FROM users
 WHERE users.id = $1
 LIMIT 1
@@ -189,13 +191,14 @@ func (q *Queries) GetUserByID(ctx context.Context, id uuid.UUID) (User, error) {
 		&i.AvatarKey,
 		&i.PendingAvatarKey,
 		&i.PendingAvatarExpiresAt,
+		&i.UsernameChangedAt,
 	)
 	return i, err
 }
 
 const getUserByZitadelID = `-- name: GetUserByZitadelID :one
 
-SELECT id, zitadel_id, username, display_name, bio, avatar_url, is_private, is_active, deleted_at, created_at, avatar_key, pending_avatar_key, pending_avatar_expires_at
+SELECT id, zitadel_id, username, display_name, bio, avatar_url, is_private, is_active, deleted_at, created_at, avatar_key, pending_avatar_key, pending_avatar_expires_at, username_changed_at
 FROM users
 WHERE zitadel_id = $1
 LIMIT 1
@@ -227,13 +230,14 @@ func (q *Queries) GetUserByZitadelID(ctx context.Context, zitadelID string) (Use
 		&i.AvatarKey,
 		&i.PendingAvatarKey,
 		&i.PendingAvatarExpiresAt,
+		&i.UsernameChangedAt,
 	)
 	return i, err
 }
 
 const getUserProfileWithStats = `-- name: GetUserProfileWithStats :one
 SELECT
-    u.id, u.zitadel_id, u.username, u.display_name, u.bio, u.avatar_url, u.is_private, u.is_active, u.deleted_at, u.created_at, u.avatar_key, u.pending_avatar_key, u.pending_avatar_expires_at,
+    u.id, u.zitadel_id, u.username, u.display_name, u.bio, u.avatar_url, u.is_private, u.is_active, u.deleted_at, u.created_at, u.avatar_key, u.pending_avatar_key, u.pending_avatar_expires_at, u.username_changed_at,
     (SELECT COUNT(*) FROM follows f WHERE f.followee_id = u.id) AS follower_count,
     (SELECT COUNT(*) FROM follows f WHERE f.follower_id = u.id) AS following_count,
     EXISTS (
@@ -265,6 +269,7 @@ type GetUserProfileWithStatsRow struct {
 	AvatarKey              sql.NullString `json:"avatar_key"`
 	PendingAvatarKey       sql.NullString `json:"pending_avatar_key"`
 	PendingAvatarExpiresAt sql.NullTime   `json:"pending_avatar_expires_at"`
+	UsernameChangedAt      sql.NullTime   `json:"username_changed_at"`
 	FollowerCount          int64          `json:"follower_count"`
 	FollowingCount         int64          `json:"following_count"`
 	IsFollowing            bool           `json:"is_following"`
@@ -291,10 +296,38 @@ func (q *Queries) GetUserProfileWithStats(ctx context.Context, arg GetUserProfil
 		&i.AvatarKey,
 		&i.PendingAvatarKey,
 		&i.PendingAvatarExpiresAt,
+		&i.UsernameChangedAt,
 		&i.FollowerCount,
 		&i.FollowingCount,
 		&i.IsFollowing,
 	)
+	return i, err
+}
+
+const getUsernameChangedAt = `-- name: GetUsernameChangedAt :one
+SELECT username_changed_at,
+       (username_changed_at + interval '7 days')::timestamptz AS next_change_at,
+       GREATEST(EXTRACT(EPOCH FROM (username_changed_at + interval '7 days' - now()))::int, 0)::bigint AS retry_after_seconds
+FROM users
+WHERE id = $1
+`
+
+type GetUsernameChangedAtRow struct {
+	UsernameChangedAt sql.NullTime `json:"username_changed_at"`
+	NextChangeAt      time.Time    `json:"next_change_at"`
+	RetryAfterSeconds int64        `json:"retry_after_seconds"`
+}
+
+// Dipakai SETELAH UpdateUsername nihil (0 rows) untuk
+// membedakan "user tidak ada/tidak aktif" (404) dari
+// "masih cooldown" (429). next_change_at dan
+// retry_after_seconds dihitung dari now() DATABASE, bukan
+// jam aplikasi — dipakai untuk details next_change_at dan
+// header Retry-After (K6).
+func (q *Queries) GetUsernameChangedAt(ctx context.Context, id uuid.UUID) (GetUsernameChangedAtRow, error) {
+	row := q.db.QueryRowContext(ctx, getUsernameChangedAt, id)
+	var i GetUsernameChangedAtRow
+	err := row.Scan(&i.UsernameChangedAt, &i.NextChangeAt, &i.RetryAfterSeconds)
 	return i, err
 }
 
@@ -393,7 +426,7 @@ SET is_active     = FALSE,
     pending_avatar_key = NULL,
     pending_avatar_expires_at = NULL
 WHERE id = $1
-RETURNING id, zitadel_id, username, display_name, bio, avatar_url, is_private, is_active, deleted_at, created_at, avatar_key, pending_avatar_key, pending_avatar_expires_at
+RETURNING id, zitadel_id, username, display_name, bio, avatar_url, is_private, is_active, deleted_at, created_at, avatar_key, pending_avatar_key, pending_avatar_expires_at, username_changed_at
 `
 
 // Triggered by user.removed. Username is replaced with a
@@ -416,6 +449,7 @@ func (q *Queries) TombstoneUser(ctx context.Context, id uuid.UUID) (User, error)
 		&i.AvatarKey,
 		&i.PendingAvatarKey,
 		&i.PendingAvatarExpiresAt,
+		&i.UsernameChangedAt,
 	)
 	return i, err
 }
@@ -440,6 +474,7 @@ WHERE users.id = previous.id
 RETURNING users.id,
           users.zitadel_id,
           users.username,
+          users.username_changed_at,
           users.display_name,
           users.bio,
           users.avatar_url,
@@ -466,6 +501,7 @@ type UpdateUserProfileRow struct {
 	ID                       uuid.UUID      `json:"id"`
 	ZitadelID                string         `json:"zitadel_id"`
 	Username                 string         `json:"username"`
+	UsernameChangedAt        sql.NullTime   `json:"username_changed_at"`
 	DisplayName              sql.NullString `json:"display_name"`
 	Bio                      sql.NullString `json:"bio"`
 	AvatarUrl                sql.NullString `json:"avatar_url"`
@@ -494,6 +530,7 @@ func (q *Queries) UpdateUserProfile(ctx context.Context, arg UpdateUserProfilePa
 		&i.ID,
 		&i.ZitadelID,
 		&i.Username,
+		&i.UsernameChangedAt,
 		&i.DisplayName,
 		&i.Bio,
 		&i.AvatarUrl,
@@ -507,5 +544,42 @@ func (q *Queries) UpdateUserProfile(ctx context.Context, arg UpdateUserProfilePa
 		&i.PreviousAvatarKey,
 		&i.PreviousPendingAvatarKey,
 	)
+	return i, err
+}
+
+const updateUsername = `-- name: UpdateUsername :one
+UPDATE users
+SET username = $1, username_changed_at = now()
+WHERE id = $2
+  AND is_active = TRUE
+  AND (username_changed_at IS NULL OR username_changed_at <= now() - interval '7 days')
+RETURNING id, username, username_changed_at
+`
+
+type UpdateUsernameParams struct {
+	NewUsername string    `json:"new_username"`
+	UserID      uuid.UUID `json:"user_id"`
+}
+
+type UpdateUsernameRow struct {
+	ID                uuid.UUID    `json:"id"`
+	Username          string       `json:"username"`
+	UsernameChangedAt sql.NullTime `json:"username_changed_at"`
+}
+
+// Fitur B: penggantian username sendiri. SATU statement
+// atomik tahan race: kondisi cooldown dievaluasi oleh
+// Postgres dengan now() database (BUKAN jam aplikasi),
+// jadi tidak ada jendela TOCTOU. RowsAffected == 0
+// (sql.ErrNoRows dengan :one) berarti user tidak ada /
+// tidak aktif / masih cooldown — handler membedakannya
+// via GetUsernameChangedAt SETELAH update nihil
+// (read-only, keputusan tulis tetap di UPDATE atomik ini).
+// Pelanggaran unique lower(username) (SQLSTATE 23505)
+// dipetakan handler menjadi 409 USERNAME_TAKEN.
+func (q *Queries) UpdateUsername(ctx context.Context, arg UpdateUsernameParams) (UpdateUsernameRow, error) {
+	row := q.db.QueryRowContext(ctx, updateUsername, arg.NewUsername, arg.UserID)
+	var i UpdateUsernameRow
+	err := row.Scan(&i.ID, &i.Username, &i.UsernameChangedAt)
 	return i, err
 }

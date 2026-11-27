@@ -21,6 +21,7 @@
 //     signature verified inside the handler)
 //   - GET  /api/users/me                     (auth)
 //   - PUT  /api/users/me                     (auth)
+//   - PUT  /api/users/me/username            (auth; 7d cooldown)
 //   - POST /api/users/me/avatar/upload-intent (auth)
 //   - POST /api/users/me/avatar/confirm       (auth)
 //   - GET  /api/users/:id                    (auth)
@@ -246,6 +247,7 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	}
 	api.GET("/users/me", uh.GetMe)
 	api.PUT("/users/me", uh.UpdateMe)
+	api.PUT("/users/me/username", uh.UpdateUsername)
 	api.GET("/users/:id", uh.GetUserProfile)
 	api.GET("/users/:id/videos", uh.GetUserVideos)
 

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -44,6 +45,10 @@ type stubUserStore struct {
 	listFollowers       func(ctx context.Context, arg db.ListFollowersParams) ([]db.ListFollowersRow, error)
 	listFollowing       func(ctx context.Context, arg db.ListFollowingParams) ([]db.ListFollowingRow, error)
 	insertNotification  func(ctx context.Context, arg db.InsertNotificationParams) (db.Notification, error)
+	// username-change surface (Fitur B).
+	updateUsername        func(ctx context.Context, arg db.UpdateUsernameParams) (db.UpdateUsernameRow, error)
+	getUsernameChangedAt  func(ctx context.Context, userID uuid.UUID) (db.GetUsernameChangedAtRow, error)
+	updateUsernameCalls   int32 // atomic counter for the race test
 	// videoStore surface (satisfied alongside userStore so the
 	// video-detail tests can reuse this stub).
 	getVideoDetail func(ctx context.Context, arg db.GetVideoDetailParams) (db.GetVideoDetailRow, error)
@@ -147,6 +152,19 @@ func (s *stubUserStore) InsertNotification(ctx context.Context, arg db.InsertNot
 	}
 	s.notifCalls = append(s.notifCalls, arg)
 	return s.insertNotification(ctx, arg)
+}
+func (s *stubUserStore) UpdateUsername(ctx context.Context, arg db.UpdateUsernameParams) (db.UpdateUsernameRow, error) {
+	atomic.AddInt32(&s.updateUsernameCalls, 1)
+	if s.updateUsername == nil {
+		return db.UpdateUsernameRow{}, errors.New("stubUserStore: updateUsername not scripted")
+	}
+	return s.updateUsername(ctx, arg)
+}
+func (s *stubUserStore) GetUsernameChangedAt(ctx context.Context, userID uuid.UUID) (db.GetUsernameChangedAtRow, error) {
+	if s.getUsernameChangedAt == nil {
+		return db.GetUsernameChangedAtRow{}, errors.New("stubUserStore: getUsernameChangedAt not scripted")
+	}
+	return s.getUsernameChangedAt(ctx, userID)
 }
 
 // stubNotificationStore scripts the inbox.

@@ -118,6 +118,7 @@ type User struct {
 	AvatarKey              sql.NullString `json:"avatar_key"`
 	PendingAvatarKey       sql.NullString `json:"pending_avatar_key"`
 	PendingAvatarExpiresAt sql.NullTime   `json:"pending_avatar_expires_at"`
+	UsernameChangedAt      sql.NullTime   `json:"username_changed_at"`
 }
 
 type Video struct {

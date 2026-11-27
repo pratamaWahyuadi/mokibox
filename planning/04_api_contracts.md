@@ -32,7 +32,7 @@
 
 4. **Avatar privat di R2:** `avatar_url` response adalah presigned GET URL untuk `avatar_key`; avatar tetap dapat dilihat siapa pun yang memiliki URL, termasuk dari akun privat.
 
-5. **Username dianggap immutable** melalui API. `PUT /api/users/me` mengubah `display_name`, `bio`, `avatar_url` eksternal (kompatibilitas), dan `is_private`; bila `avatar_url` diberikan, avatar R2 aktif dan intent upload tertunda dibersihkan.
+5. **Username** kini **bisa diubah oleh pemiliknya** melalui endpoint baru `PUT /api/users/me/username` (maksimal sekali per 7 hari, lihat bagian "Username change"). `PUT /api/users/me` TETAP tidak menerima `username` — field itu immutable lewat endpoint profil (kompatibilitas lama dipertahankan). `PUT /api/users/me` mengubah `display_name`, `bio`, `avatar_url` eksternal (kompatibilitas), dan `is_private`; bila `avatar_url` diberikan, avatar R2 aktif dan intent upload tertunda dibersihkan.
 
 6. **Visibility**:
    - User non-aktif (`is_active = false`) tidak bisa diakses publik.
@@ -157,6 +157,46 @@ Contoh per status:
   }
 }
 ```
+
+```json
+{
+  "error": {
+    "code": "USERNAME_TAKEN",
+    "message": "Username already taken",
+    "status": 409
+  }
+}
+```
+
+```json
+{
+  "error": {
+    "code": "USERNAME_CHANGE_COOLDOWN",
+    "message": "Username can only be changed once every 7 days",
+    "details": [
+      {
+        "field": "next_change_at",
+        "message": "2026-12-02T07:53:09Z"
+      }
+    ]
+  }
+}
+```
+
+Respons `USERNAME_CHANGE_COOLDOWN` (429) juga memuat header **`Retry-After`** (detik, dihitung dari waktu database).
+
+### Username change — `PUT /api/users/me/username`
+
+Endpoint bagi user terautentikasi untuk mengubah username miliknya sendiri:
+
+- **Aturan validasi** (400 `VALIDATION_ERROR`): 3–30 karakter; hanya `a-z`, `0-9`, `.`, `_`; tidak diawali/diakhiri titik; tanpa titik berurutan; bukan reserved word (`admin, support, mokibox, api, me, system, root, official, help, security`); awalan `deleted_` dilarang (namespace tombstone). Input dinormalisasi ke lowercase sebelum divalidasi/disimpan.
+- **Ganti ke username sendiri yang sama** → 400 `VALIDATION_ERROR` tanpa mengonsumsi cooldown.
+- **Cooldown 7 hari** ditegakkan oleh SATU statement `UPDATE` bersyarat yang memakai `now()` database (atomik, tahan race). Cooldown hanya terkonsumsi saat perubahan berhasil. `username_changed_at` NULL = belum pernah ganti → perubahan pertama langsung boleh.
+- **Keunikan case-insensitive** via unique index `uq_users_username_lower (lower(username))`; pelanggaran → 409 `USERNAME_TAKEN`.
+- **Username lama langsung bebas diambil orang lain** (tanpa tabel riwayat) — risiko impersonasi diterima (keputusan produk; opsi tabel riwayat = follow-up).
+- **Snapshot username pada payload notifikasi lama TIDAK di-rewrite** — notifikasi historis tetap menampilkan username saat kejadian (konsisten dengan pola snapshot existing).
+- **Visibility field (K11):** `username_changed_at` HANYA muncul di `GET /api/users/me`, `PUT /api/users/me`, dan `PUT /api/users/me/username` (schema `SelfUserProfile`). Profil publik `GET /api/users/{id}` (`UserProfile`) TIDAK memuat field ini.
+- Migrasi `016_username_change.sql` wajib diterapkan SEBELUM gateway baru naik.
 
 ```json
 {
