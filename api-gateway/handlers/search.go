@@ -76,10 +76,13 @@ func (h *SearchHandler) Search(c echo.Context) error {
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "search handler not configured"))
 	}
 
-	viewer, ok := middleware.UserFromContext(c)
-	if !ok || viewer == nil {
-		return shared.RespondError(c, shared.Wrap(shared.ErrUnauthorized, "no authenticated user"))
-	}
+	viewerID, hasViewer := middleware.UserIDFromContext(c)
+
+	// K8: the response depends on the Authorization header
+	// (anonymous vs personal), so it must Vary on it. ADD
+	// (not SET) so an existing Vary: Origin from nginx is
+	// preserved.
+	c.Response().Header().Add(echo.HeaderVary, "Authorization")
 
 	rawQ := c.QueryParam("q")
 	q := strings.TrimSpace(rawQ)
@@ -107,6 +110,18 @@ func (h *SearchHandler) Search(c echo.Context) error {
 	if err != nil {
 		return shared.RespondError(c, shared.Wrap(shared.ErrValidation, "invalid cursor"))
 	}
+	// K7 (anti-scraping): anonymous callers are capped at
+	// offset 1000; logged-in viewers keep maxOffset.
+	if !hasViewer && offset > maxAnonymousOffset {
+		return shared.RespondError(c, shared.NewAPIError(shared.CodeValidationError, "cursor offset exceeds anonymous limit").WithDetails(shared.FieldError{Field: "cursor", Message: "offset must be <= 1000 for anonymous callers"}))
+	}
+
+	// K2: single viewer-or-anonymous decision point. When
+	// no viewer is on the context (AuthenticateOptional
+	// passed an anonymous request through) the SQL params
+	// carry a NULL viewer: public results only,
+	// liked_by_me=false, is_owner=false (K3/K4).
+	viewerParams := uuid.NullUUID{UUID: viewerID, Valid: hasViewer}
 
 	ctx := c.Request().Context()
 	data := SearchData{
@@ -120,14 +135,14 @@ func (h *SearchHandler) Search(c echo.Context) error {
 	// Search Users
 	if searchType == "all" || searchType == "users" {
 		userRows, err := h.Queries.SearchUsers(ctx, db.SearchUsersParams{
-			ViewerID:     viewer.ID,
+			ViewerID:     viewerParams,
 			QueryPattern: escapedQ,
 			RawQuery:     q,
 			PageOffset:   int32(offset),
 			PageLimit:    int32(limit + 1),
 		})
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			slog.Error("SearchUsers failed", "err", err, "viewer_id", viewer.ID, "query", q)
+			slog.Error("SearchUsers failed", "err", err, "viewer_id", viewerLogValue(viewerID, hasViewer), "query", q)
 			return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "search users failed"))
 		}
 		hasNext := len(userRows) > limit
@@ -151,13 +166,13 @@ func (h *SearchHandler) Search(c echo.Context) error {
 	// Search Videos
 	if searchType == "all" || searchType == "videos" {
 		videoRows, err := h.Queries.SearchVideos(ctx, db.SearchVideosParams{
-			ViewerID:     viewer.ID,
+			ViewerID:     viewerParams,
 			QueryPattern: escapedQ,
 			PageOffset:   int32(offset),
 			PageLimit:    int32(limit + 1),
 		})
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			slog.Error("SearchVideos failed", "err", err, "viewer_id", viewer.ID, "query", q)
+			slog.Error("SearchVideos failed", "err", err, "viewer_id", viewerLogValue(viewerID, hasViewer), "query", q)
 			return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "search videos failed"))
 		}
 		hasNext := len(videoRows) > limit
@@ -165,7 +180,7 @@ func (h *SearchHandler) Search(c echo.Context) error {
 			videoRows = videoRows[:limit]
 		}
 		for _, r := range videoRows {
-			vo, err := videoObjectFromSearchRow(ctx, h.R2, h.Cfg, r, viewer.ID)
+			vo, err := videoObjectFromSearchRow(ctx, h.R2, h.Cfg, r, viewerID, hasViewer)
 			if err != nil {
 				slog.Error("presign search video owner avatar failed", "err", err, "user_id", r.UserID2)
 				return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load search avatar URLs"))
@@ -184,7 +199,7 @@ func (h *SearchHandler) Search(c echo.Context) error {
 	})
 }
 
-func videoObjectFromSearchRow(ctx context.Context, r2 r2ObjectStore, cfg *shared.APIConfig, r db.SearchVideosRow, viewerID uuid.UUID) (VideoObject, error) {
+func videoObjectFromSearchRow(ctx context.Context, r2 r2ObjectStore, cfg *shared.APIConfig, r db.SearchVideosRow, viewerID uuid.UUID, hasViewer bool) (VideoObject, error) {
 	out := VideoObject{
 		ID:            r.ID,
 		UserID:        r.UserID,
@@ -195,7 +210,7 @@ func videoObjectFromSearchRow(ctx context.Context, r2 r2ObjectStore, cfg *shared
 		CommentsCount: int(r.CommentsCount),
 		CreatedAt:     formatVideoTime(r.CreatedAt),
 		LikedByMe:     r.LikedByMe,
-		IsOwner:       r.UserID == viewerID,
+		IsOwner:       hasViewer && r.UserID == viewerID,
 	}
 	if r.Title.Valid {
 		v := r.Title.String
@@ -227,6 +242,19 @@ func escapeSQLWildcards(s string) string {
 }
 
 const maxOffset = 100000
+
+// maxAnonymousOffset caps anonymous pagination depth
+// (K7 anti-scraping). Logged-in callers keep maxOffset.
+const maxAnonymousOffset = 1000
+
+// viewerLogValue formats the viewer id for logs; anonymous
+// requests log "anonymous" instead of the zero UUID.
+func viewerLogValue(id uuid.UUID, hasViewer bool) any {
+	if !hasViewer {
+		return "anonymous"
+	}
+	return id
+}
 
 func parseOffsetCursor(raw string) (int, error) {
 	if raw == "" {

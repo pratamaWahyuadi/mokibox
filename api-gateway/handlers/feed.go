@@ -4,19 +4,19 @@
 //
 //	GET /api/feed/home
 //
-// Behaviour (per FR-FEED-01):
+// Behaviour (per FR-FEED-01, Fitur A makes auth OPTIONAL):
 //   - status=READY
 //   - owner active (u.is_active=true)
-//   - exclude the viewer's own videos
-//   - include public accounts (u.is_private=false) +
-//     accounts the viewer follows
-//   - cursor pagination over (created_at DESC, id DESC)
+//   - viewer present: exclude the viewer's own videos,
+//     include public accounts + accounts the viewer follows
+//   - anonymous (no Authorization header): public accounts
+//     only, liked_by_me=false for every row (K3/K4)
+//   - header PRESENT but token invalid: 401 fail-closed
+//     via middleware.AuthenticateOptional (K1)
 //
-// The handler is mounted inside the auth group so the
-// current *db.User is always available via
-// middleware.UserFromContext; a feed without a session
-// is not a supported use-case yet (the LLD / contract
-// both pin the endpoint behind JWT).
+// The handler uses middleware.UserIDFromContext as the
+// single viewer-or-anonymous decision point (K2); the
+// visibility rules stay in SQL (ListFeedVideos).
 //
 // Errors are funnelled through shared.RespondError so
 // the wire format stays consistent with the rest of the
@@ -103,10 +103,13 @@ func (h *FeedHandler) HomeFeed(c echo.Context) error {
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "feed handler not configured"))
 	}
 
-	viewer, ok := middleware.UserFromContext(c)
-	if !ok || viewer == nil {
-		return shared.RespondError(c, shared.Wrap(shared.ErrUnauthorized, "no authenticated user"))
-	}
+	viewerID, hasViewer := middleware.UserIDFromContext(c)
+
+	// K8: the response depends on the Authorization header
+	// (anonymous vs personal), so it must Vary on it. ADD
+	// (not SET) so an existing Vary: Origin from nginx is
+	// preserved.
+	c.Response().Header().Add(echo.HeaderVary, "Authorization")
 
 	limit, err := parseLimit(c.QueryParam("limit"))
 	if err != nil {
@@ -118,9 +121,11 @@ func (h *FeedHandler) HomeFeed(c echo.Context) error {
 	}
 
 	params := db.ListFeedVideosParams{
-		UserID:    viewer.ID,
 		PageLimit: int32(limit),
-		ViewerID:  uuid.NullUUID{UUID: viewer.ID, Valid: true},
+		// K2: anonymous -> NULL viewer (public timeline,
+		// liked_by_me=false, no self-exclusion in SQL);
+		// viewer -> personal feed unchanged.
+		ViewerID: uuid.NullUUID{UUID: viewerID, Valid: hasViewer},
 	}
 	if !cursorTS.IsZero() {
 		params.CursorCreated = sql.NullTime{Time: cursorTS, Valid: true}
@@ -136,7 +141,7 @@ func (h *FeedHandler) HomeFeed(c echo.Context) error {
 			// than a 500 so the client sees a sane envelope.
 			return shared.RespondList(c, []VideoObject{}, nil)
 		}
-		slog.Error("ListFeedVideos failed", "err", err, "viewer_id", viewer.ID)
+		slog.Error("ListFeedVideos failed", "err", err, "viewer_id", viewerLogValue(viewerID, hasViewer))
 		return shared.RespondError(c, shared.Wrap(shared.ErrInternal, "load feed"))
 	}
 
@@ -161,9 +166,10 @@ func (h *FeedHandler) HomeFeed(c echo.Context) error {
 }
 
 // videoObjectFromFeedRow maps a sqlc ListFeedVideosRow
-// into the wire VideoObject. is_owner is always false
-// because the feed query excludes the viewer's own
-// videos upstream (v.user_id <> $1).
+// into the wire VideoObject. is_owner is always false:
+// for a viewer the feed excludes their own videos
+// upstream (v.user_id <> viewer), and an anonymous caller
+// is never the owner.
 func videoObjectFromFeedRow(ctx context.Context, r2 r2ObjectStore, cfg *shared.APIConfig, r db.ListFeedVideosRow) (VideoObject, error) {
 	out := VideoObject{
 		ID:            r.ID,

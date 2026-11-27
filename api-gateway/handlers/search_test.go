@@ -317,15 +317,154 @@ func TestSearch_Pagination(t *testing.T) {
 	}
 }
 
-func TestSearch_Unauthorized(t *testing.T) {
-	h := NewSearchHandlerForTest(&mockSearchStore{}, &mockR2Store{}, testConfig())
+func TestSearch_AnonymousReturnsPublicResults(t *testing.T) {
+	// Fitur A (K2/K4): no user on the context -> anonymous
+	// search. 200 (NOT 401), liked_by_me=false,
+	// is_owner=false, and the SQL params carry a NULL
+	// viewer.
+	videoID := uuid.New()
+	var capturedUsers db.SearchUsersParams
+	captVideosParams := db.SearchVideosParams{}
+
+	store := &mockSearchStore{
+		searchUsersFn: func(ctx context.Context, arg db.SearchUsersParams) ([]db.SearchUsersRow, error) {
+			capturedUsers = arg
+			return []db.SearchUsersRow{{ID: uuid.New(), Username: "someone"}}, nil
+		},
+		searchVideosFn: func(ctx context.Context, arg db.SearchVideosParams) ([]db.SearchVideosRow, error) {
+			captVideosParams = arg
+			return []db.SearchVideosRow{{ID: videoID, Status: "READY", UserID: uuid.New(), UserID2: uuid.New()}}, nil
+		},
+	}
+
+	h := NewSearchHandlerForTest(store, &mockR2Store{}, testConfig())
 	c, rec := setupSearchTestContext(http.MethodGet, "/api/search?q=test", nil)
 	if err := h.Search(c); err != nil {
 		t.Fatalf("unexpected handler error: %v", err)
 	}
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected status 401, got %d", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200 for anonymous search, got %d", rec.Code)
+	}
+	if captVideosParams.ViewerID.UUID != uuid.Nil || captVideosParams.ViewerID.Valid {
+		t.Errorf("anonymous SearchVideos must carry a NULL viewer_id, got %+v", captVideosParams.ViewerID)
+	}
+	if capturedUsers.ViewerID.UUID != uuid.Nil || capturedUsers.ViewerID.Valid {
+		t.Errorf("anonymous SearchUsers must carry a NULL viewer_id, got %+v", capturedUsers.ViewerID)
+	}
+
+	var resp searchEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Data.Videos) != 1 {
+		t.Fatalf("expected 1 video, got %d", len(resp.Data.Videos))
+	}
+	if resp.Data.Videos[0].LikedByMe {
+		t.Errorf("anonymous liked_by_me must be false")
+	}
+	if resp.Data.Videos[0].IsOwner {
+		t.Errorf("anonymous is_owner must be false")
+	}
+
+	// K8: response must carry Vary: Authorization.
+	if vary := rec.Header().Get("Vary"); !strings.Contains(vary, "Authorization") {
+		t.Errorf("expected Vary to include Authorization, got %q", vary)
+	}
+}
+
+func TestSearch_AnonymousOffsetCap(t *testing.T) {
+	// K7: anonymous pagination is capped at offset 1000.
+	h := NewSearchHandlerForTest(&mockSearchStore{}, &mockR2Store{}, testConfig())
+
+	c, rec := setupSearchTestContext(http.MethodGet, "/api/search?q=test&cursor="+encodeOffsetCursor(1001), nil)
+	if err := h.Search(c); err != nil {
+		t.Fatalf("unexpected handler error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("anonymous offset >1000 must be 400, got %d", rec.Code)
+	}
+
+	// Logged-in users keep the large cap (100000).
+	viewer := &db.User{ID: uuid.New(), Username: "viewer"}
+	c2, rec2 := setupSearchTestContext(http.MethodGet, "/api/search?q=test&type=users&cursor="+encodeOffsetCursor(2000), viewer)
+	if err := h.Search(c2); err != nil {
+		t.Fatalf("unexpected handler error: %v", err)
+	}
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("logged-in offset 2000 must be 200, got %d", rec2.Code)
+	}
+}
+
+func TestSearch_ValidViewerPersonalResults(t *testing.T) {
+	// Fitur A (K2): viewer on the context -> personal
+	// results unchanged. The SQL params carry the viewer
+	// id; liked_by_me/is_owner come from the row + viewer.
+	viewerID := uuid.New()
+	viewer := &db.User{ID: viewerID, Username: "viewer"}
+	videoID := uuid.New()
+	otherUserID := uuid.New()
+
+	var captUsers db.SearchUsersParams
+	var captVideos db.SearchVideosParams
+	store := &mockSearchStore{
+		searchUsersFn: func(ctx context.Context, arg db.SearchUsersParams) ([]db.SearchUsersRow, error) {
+			captUsers = arg
+			// SQL excludes the viewer themself; the mock
+			// returns only the other user.
+			return []db.SearchUsersRow{{ID: otherUserID, Username: "other"}}, nil
+		},
+		searchVideosFn: func(ctx context.Context, arg db.SearchVideosParams) ([]db.SearchVideosRow, error) {
+			captVideos = arg
+			return []db.SearchVideosRow{{
+				ID: videoID, Status: "READY", UserID: otherUserID, UserID2: otherUserID,
+				LikedByMe: true,
+			}}, nil
+		},
+	}
+
+	h := NewSearchHandlerForTest(store, &mockR2Store{}, testConfig())
+	c, rec := setupSearchTestContext(http.MethodGet, "/api/search?q=test", viewer)
+	if err := h.Search(c); err != nil {
+		t.Fatalf("unexpected handler error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if !captUsers.ViewerID.Valid || captUsers.ViewerID.UUID != viewerID {
+		t.Errorf("SearchUsers must receive the viewer id, got %+v", captUsers.ViewerID)
+	}
+	if !captVideos.ViewerID.Valid || captVideos.ViewerID.UUID != viewerID {
+		t.Errorf("SearchVideos must receive the viewer id, got %+v", captVideos.ViewerID)
+	}
+
+	var resp searchEnvelope
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if len(resp.Data.Videos) != 1 || !resp.Data.Videos[0].LikedByMe {
+		t.Errorf("viewer liked_by_me must come from SQL, got %+v", resp.Data.Videos)
+	}
+	// Video owned by another user -> is_owner false even
+	// for a logged-in viewer.
+	if resp.Data.Videos[0].IsOwner {
+		t.Errorf("is_owner must only be true for the owner")
+	}
+}
+
+func TestSearch_VaryHeaderAddPreservesExistingVary(t *testing.T) {
+	// K8: Vary: Authorization must be ADDED, not SET, so a
+	// pre-existing Vary: Origin (set by nginx) survives.
+	viewer := &db.User{ID: uuid.New(), Username: "viewer"}
+	store := &mockSearchStore{}
+	h := NewSearchHandlerForTest(store, &mockR2Store{}, testConfig())
+	c, rec := setupSearchTestContext(http.MethodGet, "/api/search?q=test&type=users", viewer)
+	c.Response().Header().Add(echo.HeaderVary, "Origin")
+	if err := h.Search(c); err != nil {
+		t.Fatalf("unexpected handler error: %v", err)
+	}
+	vary := rec.Header().Values("Vary")
+	joined := strings.Join(vary, ", ")
+	if !strings.Contains(joined, "Origin") || !strings.Contains(joined, "Authorization") {
+		t.Fatalf("Vary must contain both Origin and Authorization, got %v", vary)
 	}
 }
 

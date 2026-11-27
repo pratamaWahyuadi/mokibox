@@ -29,7 +29,12 @@
 //   - DELETE /api/users/:id/follow           (auth)
 //   - GET  /api/users/:id/followers          (auth)
 //   - GET  /api/users/:id/following          (auth)
-//   - GET  /api/feed/home                    (auth)
+//   - GET  /api/feed/home                    (auth OPTIONAL:
+//     anonymous public timeline; valid token = personal;
+//     invalid token = 401 fail-closed; combined per-user/
+//     per-IP limiter)
+//   - GET  /api/search                        (auth OPTIONAL,
+//     same semantics as /api/feed/home)
 //   - POST /api/videos/upload-intent         (auth)
 //   - POST /api/videos/confirm               (auth)
 //   - GET  /api/videos/:id                   (auth)
@@ -189,6 +194,54 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	})
 	api := e.Group("/api", authenticate, authRateLimit)
 
+	// Fitur A (K1): auth-OPTIONAL middleware for the two
+	// public read endpoints. Absent header -> anonymous;
+	// present-but-invalid token -> 401 fail-closed (same
+	// resolveUser as Authenticate; no weakening).
+	authenticateOptional := middleware.AuthenticateOptional(middleware.AuthenticateConfig{
+		Verifier: d.AuthVerifier,
+		Queries:  d.Queries,
+	})
+
+	// Fitur A (K5): combined per-user/per-IP limiters for
+	// /api/search and /api/feed/home. Refill rate comes
+	// from env (SEARCH_RATE_LIMIT_PER_MIN default 60,
+	// FEED_RATE_LIMIT_PER_MIN default 120); anonymous
+	// bursts are fixed (15/40). Empty/invalid env values
+	// fall back to the defaults without crashing.
+	searchPerMin := middleware.DefaultSearchRateLimitPerMin
+	feedPerMin := middleware.DefaultFeedRateLimitPerMin
+	trustedProxyCIDRs := middleware.DefaultTrustedProxyCIDRs
+	if d.Cfg != nil {
+		if d.Cfg.SearchRateLimitPerMin > 0 {
+			searchPerMin = d.Cfg.SearchRateLimitPerMin
+		}
+		if d.Cfg.FeedRateLimitPerMin > 0 {
+			feedPerMin = d.Cfg.FeedRateLimitPerMin
+		}
+		if d.Cfg.TrustedProxyCIDRs != "" {
+			trustedProxyCIDRs = d.Cfg.TrustedProxyCIDRs
+		}
+	}
+	searchRateLimit, err := middleware.NewRateLimitOptionalAuth(middleware.RateLimitConfig{
+		Rate:          rate.Limit(float64(searchPerMin) / 60.0),
+		Burst:         middleware.SearchRateLimitBurstAnon,
+		TTL:           10 * time.Minute,
+		SweepInterval: 5 * time.Minute,
+	}, trustedProxyCIDRs)
+	if err != nil {
+		panic(fmt.Sprintf("api-gateway: NewRateLimitOptionalAuth for search: %v", err))
+	}
+	feedRateLimit, err := middleware.NewRateLimitOptionalAuth(middleware.RateLimitConfig{
+		Rate:          rate.Limit(float64(feedPerMin) / 60.0),
+		Burst:         middleware.FeedRateLimitBurstAnon,
+		TTL:           10 * time.Minute,
+		SweepInterval: 5 * time.Minute,
+	}, trustedProxyCIDRs)
+	if err != nil {
+		panic(fmt.Sprintf("api-gateway: NewRateLimitOptionalAuth for feed: %v", err))
+	}
+
 	if d.Cfg != nil && d.Cfg.DME2EEEnabled {
 		apiDelivery := e.Group("/api", authenticate)
 		dmHandler, err := handlers.NewDMHandler(d.Queries, d.DB, d.Cfg.DMInboxTTL)
@@ -288,23 +341,25 @@ func NewRouter(d RouterDeps) *echo.Echo {
 	api.POST("/videos/upload-intent", vh.UploadIntent)
 	api.POST("/videos/confirm", vh.ConfirmUpload)
 
-	// Phase 6.A: home feed. Same auth-group placement
-	// as the rest of /api/*. The handler builds the
-	// full VideoObject (presigned thumbnail, signed
-	// playlist URL, liked_by_me, user summary) so the
-	// client gets a ready-to-render page in a single
-	// request - no N+1 follow-up round trips.
+	// Phase 6.A: home feed. Fitur A moves it OUT of the
+	// auth group and makes auth OPTIONAL
+	// (middleware.AuthenticateOptional): anonymous callers
+	// get the public timeline, a valid token gets the
+	// personal feed unchanged, a present-but-invalid token
+	// is 401 fail-closed. The combined per-user/per-IP
+	// limiter (K5) runs AFTER AuthenticateOptional so a
+	// logged-in user is keyed per user id, not per IP.
 	fh, err := handlers.NewFeedHandler(d.Queries, d.R2, d.Cfg)
 	if err != nil {
 		panic(fmt.Sprintf("api-gateway: NewFeedHandler: %v", err))
 	}
-	api.GET("/feed/home", fh.HomeFeed)
+	e.GET("/api/feed/home", fh.HomeFeed, authenticateOptional, feedRateLimit)
 
 	searchH, err := handlers.NewSearchHandler(d.Queries, d.R2, d.Cfg)
 	if err != nil {
 		panic(fmt.Sprintf("api-gateway: NewSearchHandler: %v", err))
 	}
-	api.GET("/search", searchH.Search)
+	e.GET("/api/search", searchH.Search, authenticateOptional, searchRateLimit)
 
 	// Phase 6.B: video read endpoints. All three
 	// share the same VideoHandler from video.go.

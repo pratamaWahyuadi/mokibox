@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -63,6 +64,22 @@ type APIConfig struct {
 	// Direct messages remain disabled unless explicitly enabled.
 	DME2EEEnabled bool
 	DMInboxTTL    time.Duration
+
+	// Auth-optional endpoint rate limits (Fitur A, K5).
+	// Per-minute refill rates for /api/search and
+	// /api/feed/home; empty or invalid env values fall
+	// back to the defaults WITHOUT an error (unlike the
+	// fail-loud helpers above) so a bad value can never
+	// take the gateway down.
+	SearchRateLimitPerMin int
+	FeedRateLimitPerMin   int
+
+	// TrustedProxyCIDRs is the comma-separated CIDR list
+	// for trusted reverse-proxy peers (K6). Empty env ->
+	// middleware.DefaultTrustedProxyCIDRs (dev loopback +
+	// docker dev range). Production value:
+	// 127.0.0.1/32,::1/128,192.168.144.1/32
+	TrustedProxyCIDRs string
 }
 
 // WorkerConfig is the configuration consumed by transcoder-worker.
@@ -147,6 +164,15 @@ func LoadAPI() (*APIConfig, error) {
 	if c.DME2EEEnabled && c.DMInboxTTL != 168*time.Hour {
 		return nil, fmt.Errorf("DM_INBOX_TTL must be 168h when DM_E2EE_ENABLED=true")
 	}
+
+	// Fitur A (K5): rate-limit and trusted-proxy config
+	// for /api/search and /api/feed/home. Deliberately
+	// LENIENT: empty OR invalid values fall back to the
+	// defaults instead of failing startup - a bad limiter
+	// env value must not take the API down.
+	c.SearchRateLimitPerMin = envIntLenient("SEARCH_RATE_LIMIT_PER_MIN", 60)
+	c.FeedRateLimitPerMin = envIntLenient("FEED_RATE_LIMIT_PER_MIN", 120)
+	c.TrustedProxyCIDRs = strings.TrimSpace(os.Getenv("TRUSTED_PROXY_CIDRS"))
 
 	if err := requireFields(
 		"API_BASE_URL", c.APIBaseURL,
@@ -253,6 +279,24 @@ func envInt(name string, def int) (int, error) {
 		return 0, fmt.Errorf("invalid int for %s=%q: must be > 0", name, v)
 	}
 	return n, nil
+}
+
+// envIntLenient parses an int env var, falling back to def
+// when unset OR invalid (K5: the search/feed limiter config
+// must never crash the gateway - unlike envInt above, a
+// present-but-invalid value is tolerated with a warning
+// log). A non-positive value is treated as invalid.
+func envIntLenient(name string, def int) int {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		fmt.Fprintf(os.Stderr, "warning: invalid int for %s=%q, using default %d\n", name, v, def)
+		return def
+	}
+	return n
 }
 
 // requireFields returns the first missing field as a wrapped

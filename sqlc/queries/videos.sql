@@ -109,18 +109,15 @@ ORDER BY created_at DESC, id DESC
 LIMIT sqlc.arg('page_limit');
 
 -- name: ListFeedVideos :many
--- FR-FEED-01: status=READY, owner active, exclude self,
--- include public accounts + accounts the viewer follows.
--- Cursor pagination uses (created_at, id) < ($3, $4).
---
--- Phase 6 widened the row to include the owner user
--- fields (for the nested "user" summary in VideoObject)
--- and an EXISTS (likes) per-row "liked_by_me" flag, so
--- the feed handler can build the full VideoObject
--- without an N+1 round trip. viewer_id can be NULL
--- when the feed is fetched without a session (e.g. a
--- cron job pulling the public timeline) - in that case
--- liked_by_me is FALSE for every row.
+-- FR-FEED-01: status=READY, owner active, exclude self
+-- (only when a viewer is present), include public accounts
+-- + accounts the viewer follows.
+-- Fitur A (auth-optional feed): viewer_id is NULL-aware.
+-- Anonymous feed (viewer_id NULL): public READY videos
+-- only (u.is_private = FALSE), liked_by_me FALSE for every
+-- row, no self-exclusion (an anonymous caller owns
+-- nothing). Logged-in viewer: exclude own videos and add
+-- followed private accounts, liked_by_me from EXISTS.
 SELECT
     v.id, v.user_id, v.title, v.description, v.r2_key,
     v.hls_prefix, v.thumbnail_key, v.duration_seconds,
@@ -139,12 +136,12 @@ SELECT
 FROM videos v
 JOIN users u ON u.id = v.user_id
 WHERE v.status = 'READY'
-  AND v.user_id <> $1
+  AND (sqlc.narg('viewer_id')::uuid IS NULL OR v.user_id <> sqlc.narg('viewer_id')::uuid)
   AND u.is_active = TRUE
   AND (u.is_private = FALSE
        OR EXISTS (
            SELECT 1 FROM follows f
-           WHERE f.follower_id = $1 AND f.followee_id = u.id
+           WHERE f.follower_id = sqlc.narg('viewer_id')::uuid AND f.followee_id = u.id
        ))
   AND (sqlc.narg('cursor_created')::timestamptz IS NULL
        OR (v.created_at, v.id) < (sqlc.narg('cursor_created')::timestamptz, sqlc.narg('cursor_id')::uuid))

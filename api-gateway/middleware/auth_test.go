@@ -363,3 +363,70 @@ func TestUserIDFromContext(t *testing.T) {
 		t.Errorf("want (%s,true), got (%v,%v)", want, id, ok)
 	}
 }
+
+// Fitur A (K1): AuthenticateOptional on /api/search and
+// /api/feed/home. Absent header -> anonymous pass-through;
+// present-but-invalid token -> 401 FAIL-CLOSED (never a
+// silent downgrade to anonymous).
+func TestAuthenticateOptional_AnonymousPassesThrough(t *testing.T) {
+	e := echo.New()
+	called := false
+	e.GET("/api/probe", func(c echo.Context) error {
+		called = true
+		if _, ok := UserFromContext(c); ok {
+			t.Errorf("anonymous request must NOT carry a user")
+		}
+		return c.NoContent(http.StatusOK)
+	}, AuthenticateOptional(AuthenticateConfig{Verifier: &stubVerifier{}, Queries: &stubUserStore{}}))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/probe", nil)
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !called {
+		t.Fatalf("absent header must pass through anonymously: code=%d called=%v", rec.Code, called)
+	}
+}
+
+func TestAuthenticateOptional_InvalidTokenFailsClosed(t *testing.T) {
+	verifier := &stubVerifier{err: errors.New("jwt: signature invalid")}
+	e := echo.New()
+	e.GET("/api/probe", func(c echo.Context) error {
+		return c.NoContent(http.StatusOK)
+	}, AuthenticateOptional(AuthenticateConfig{Verifier: verifier, Queries: &stubUserStore{}}))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/probe", nil)
+	req.Header.Set(echo.HeaderAuthorization, "Bearer broken-token")
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("present-but-invalid token must be 401, got %d", rec.Code)
+	}
+}
+
+func TestAuthenticateOptional_ValidTokenResolvesUser(t *testing.T) {
+	sub := "optsub"
+	uid := uuid.MustParse("123e4567-e89b-12d3-a456-426614174009")
+	verifier := &stubVerifier{sub: sub}
+	store := &stubUserStore{
+		getByZitadelID: func(ctx context.Context, zitadelID string) (db.User, error) {
+			return db.User{ID: uid, ZitadelID: zitadelID, IsActive: true}, nil
+		},
+	}
+	e := echo.New()
+	var seenID uuid.UUID
+	e.GET("/api/probe", func(c echo.Context) error {
+		id, ok := UserIDFromContext(c)
+		if ok {
+			seenID = id
+		}
+		return c.NoContent(http.StatusOK)
+	}, AuthenticateOptional(AuthenticateConfig{Verifier: verifier, Queries: store}))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/probe", nil)
+	req.Header.Set(echo.HeaderAuthorization, "Bearer good-token")
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || seenID != uid {
+		t.Fatalf("valid token must resolve the user: code=%d seen=%s", rec.Code, seenID)
+	}
+}

@@ -383,8 +383,9 @@
       "get": {
         "tags": ["Videos"],
         "operationId": "getHomeFeed",
-        "summary": "Home feed: READY videos from active owners — public accounts plus accounts the viewer follows. The viewer's own videos are excluded.",
-        "description": "Pagination over (created_at DESC, id DESC); cursor is base64url of `<RFC3339Nano>|<uuid>`; a next_cursor is emitted only on full pages.",
+        "security": [{}, {"zitadelOAuth": []}],
+        "summary": "Home feed (auth OPTIONAL: anonymous -> public timeline of READY videos from active public accounts with liked_by_me=false; valid token -> personal feed excluding own videos plus followed private accounts; present-but-invalid token -> 401 fail-closed). The viewer's own videos are excluded.",
+        "description": "Pagination over (created_at DESC, id DESC); cursor is base64url of `<RFC3339Nano>|<uuid>`; a next_cursor is emitted only on full pages. Anonymous callers receive only public-account videos. Rate limited per user id (logged in) or per client IP (anonymous, trusted-proxy X-Real-IP/X-Forwarded-For resolution); FEED_RATE_LIMIT_PER_MIN (default 120/min, anonymous burst 40).",
         "parameters": [
           {"$ref": "#/components/parameters/Limit"},
           {"$ref": "#/components/parameters/Cursor"}
@@ -395,7 +396,11 @@
             "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PageEnvelope"}}}
           },
           "400": {"$ref": "#/components/responses/Validation"},
-          "401": {"$ref": "#/components/responses/Unauthorized"}
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "429": {
+            "description": "Rate limited (combined per-user/per-IP limiter; anonymous burst exceeded)",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}
+          }
         }
       }
     },
@@ -403,7 +408,9 @@
       "get": {
         "tags": ["Search"],
         "operationId": "search",
-        "summary": "Search users and/or videos (case-insensitive ILIKE on username/title/description; underscore/wildcard chars escaped).",
+        "security": [{}, {"zitadelOAuth": []}],
+        "summary": "Search users and/or videos (auth OPTIONAL: anonymous -> public results only with liked_by_me=false, is_owner=false; valid token -> personal results incl. own private videos and followed private accounts; present-but-invalid token -> 401 fail-closed). Case-insensitive ILIKE on username/title/description; underscore/wildcard chars escaped. Anonymous pagination offset capped at 1000.",
+        "description": "Anonymous callers see only READY videos from active public accounts. Logged-in callers additionally see their own private videos and videos from followed private accounts, with liked_by_me/is_owner computed for the viewer. Rate limited per user id (logged in) or per client IP (anonymous, trusted-proxy X-Real-IP/X-Forwarded-For resolution); SEARCH_RATE_LIMIT_PER_MIN (default 60/min, anonymous burst 15).",
         "parameters": [
           {"$ref": "#/components/parameters/SearchQ"},
           {"$ref": "#/components/parameters/SearchType"},
@@ -416,7 +423,11 @@
             "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SearchResponse"}}}
           },
           "400": {"$ref": "#/components/responses/Validation"},
-          "401": {"$ref": "#/components/responses/Unauthorized"}
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "429": {
+            "description": "Rate limited (combined per-user/per-IP limiter; anonymous burst exceeded)",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}
+          }
         }
       }
     },

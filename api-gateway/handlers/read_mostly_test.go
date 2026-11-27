@@ -744,8 +744,8 @@ func TestHomeFeed_ExcludesSelfPresignedURLs(t *testing.T) {
 	thumbKey := sql.NullString{String: "thumbs/1.jpg", Valid: true}
 	store := &stubFeedStore{
 		listFeed: func(ctx context.Context, arg db.ListFeedVideosParams) ([]db.ListFeedVideosRow, error) {
-			if arg.UserID != testViewerID {
-				t.Errorf("feed viewer = %s", arg.UserID)
+			if !arg.ViewerID.Valid || arg.ViewerID.UUID != testViewerID {
+				t.Errorf("feed viewer = %+v", arg.ViewerID)
 			}
 			return []db.ListFeedVideosRow{{
 				ID: testVideoID, UserID: testOwnerID, Status: "READY",

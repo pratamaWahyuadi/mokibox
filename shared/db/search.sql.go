@@ -24,7 +24,7 @@ SELECT
     u.is_private
 FROM users u
 WHERE u.is_active = TRUE
-  AND u.id <> $1
+  AND ($1::uuid IS NULL OR u.id <> $1::uuid)
   AND (u.username ILIKE '%' || $2::text || '%' OR u.display_name ILIKE '%' || $2::text || '%')
 ORDER BY
     (LOWER(u.username) = LOWER($3::text)) DESC,
@@ -35,11 +35,11 @@ LIMIT $5 OFFSET $4
 `
 
 type SearchUsersParams struct {
-	ViewerID     uuid.UUID `json:"viewer_id"`
-	QueryPattern string    `json:"query_pattern"`
-	RawQuery     string    `json:"raw_query"`
-	PageOffset   int32     `json:"page_offset"`
-	PageLimit    int32     `json:"page_limit"`
+	ViewerID     uuid.NullUUID `json:"viewer_id"`
+	QueryPattern string        `json:"query_pattern"`
+	RawQuery     string        `json:"raw_query"`
+	PageOffset   int32         `json:"page_offset"`
+	PageLimit    int32         `json:"page_limit"`
 }
 
 type SearchUsersRow struct {
@@ -108,7 +108,7 @@ SELECT
     u.is_private    AS user_is_private,
     EXISTS (
         SELECT 1 FROM likes l
-        WHERE l.video_id = v.id AND l.user_id = $1
+        WHERE l.video_id = v.id AND l.user_id = $1::uuid
     ) AS liked_by_me
 FROM videos v
 JOIN users u ON u.id = v.user_id
@@ -117,20 +117,20 @@ WHERE v.status = 'READY'
   AND u.is_active = TRUE
   AND (v.title ILIKE '%' || $2::text || '%' OR v.description ILIKE '%' || $2::text || '%')
   AND (u.is_private = FALSE
-       OR u.id = $1
+       OR u.id = $1::uuid
        OR EXISTS (
            SELECT 1 FROM follows f
-           WHERE f.follower_id = $1 AND f.followee_id = u.id
+           WHERE f.follower_id = $1::uuid AND f.followee_id = u.id
        ))
 ORDER BY v.views_count DESC, v.created_at DESC, v.id DESC
 LIMIT $4 OFFSET $3
 `
 
 type SearchVideosParams struct {
-	ViewerID     uuid.UUID `json:"viewer_id"`
-	QueryPattern string    `json:"query_pattern"`
-	PageOffset   int32     `json:"page_offset"`
-	PageLimit    int32     `json:"page_limit"`
+	ViewerID     uuid.NullUUID `json:"viewer_id"`
+	QueryPattern string        `json:"query_pattern"`
+	PageOffset   int32         `json:"page_offset"`
+	PageLimit    int32         `json:"page_limit"`
 }
 
 type SearchVideosRow struct {

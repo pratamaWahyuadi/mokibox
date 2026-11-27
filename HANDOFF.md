@@ -1,5 +1,21 @@
 # Handoff — Domain-Asli Lokal (fase migrasi) → Prod-VPS next
 
+## Fitur A — `/api/search` & `/api/feed/home` auth opsional + limiter gabungan (2026-11-26)
+
+Branch `feat/anonymous-search-feed` (working tree, belum di-commit saat sesi ini).
+
+- **Perilaku**: kedua endpoint keluar dari grup auth `/api` dan memakai `middleware.AuthenticateOptional` (K1) — tanpa header = anonim (timeline/hasil publik, `liked_by_me=false`, `is_owner=false`, akun privat tidak pernah muncul), token valid = hasil personal eksisting, token ADA tapi invalid = `401` fail-closed.
+- **SQL NULL-aware**: `viewer_id` menjadi `sqlc.narg('viewer_id')::uuid` di `SearchUsers`, `SearchVideos`, dan `ListFeedVideos` (param `UserID` dihapus dari `ListFeedVideosParams`); `sqlc generate` dijalankan ulang.
+- **Limiter gabungan** (K5): `middleware.NewRateLimitOptionalAuth` di `api-gateway/middleware/ratelimit_mixed.go` — key = user ID bila login, selain itu IP klien hasil resolusi trusted-proxy (K6): peer di `TRUSTED_PROXY_CIDRS` → `X-Real-IP` (utama) / `X-Forwarded-For` (fallback); peer tidak trusted → IP peer langsung, header diabaikan (anti-spoof). Env: `SEARCH_RATE_LIMIT_PER_MIN` (default 60, burst anonim 15), `FEED_RATE_LIMIT_PER_MIN` (default 120, burst anonim 40), `TRUSTED_PROXY_CIDRS` (dev default loopback + 172.16.0.0/12; **produksi: `127.0.0.1/32,::1/128,192.168.144.1/32`**). Env kosong/invalid → default, tidak crash.
+- **Cache**: `Vary: Authorization` ditambahkan dengan `Header().Add` (bukan `Set`) agar `Vary: Origin` nginx tidak tertimpa (K8). Tidak ada `Cache-Control: public` di respons berisi presigned URL.
+- **Anti-scraping**: offset cursor anonim ≤1000 (`maxAnonymousOffset`), `limit` tetap cap 50, `q` ≤100 char (K7).
+- **Smoke test**: `scripts/smoketest/phase13_anonymous_read/` (pola phase11) — 7 kelompok assertion; butuh stack dev (postgres) via docker, belum dijalankan lokal tanpa docker.
+- **Pelajaran**: (1) `sqlc.arg('viewer_id')` tidak nullable — pola NULL-aware harus `sqlc.narg(...)::uuid` dengan guard `IS NULL OR` agar baris tidak tereliminasi oleh perbandingan `<> NULL`; (2) limiter per-user eksisting (`NewRateLimitAuth`) tidak bisa dipakai untuk endpoint anonim karena melempar 401 tanpa user — key func gabungan harus jadi middleware terpisah yang di-install SETELAH `AuthenticateOptional` supaya user login di-key per user, bukan per IP; (3) `Vary` harus `Add` karena Echo/nginx bisa sudah menaruh `Vary: Origin`.
+- **Prasyarat rilis (pemilik)**: branch `chore/pin-docker-subnet` (pin subnet `mokibox_backend` 192.168.144.0/20, gateway 192.168.144.1 di `docker-compose.ports.yml`) harus di-merge ke main dulu — `TRUSTED_PROXY_CIDRS` produksi bergantung pada pin ini. Cek tabrakan subnet sebelum down/up:
+  `docker network ls -q | xargs docker network inspect --format '{{.Name}} {{range .IPAM.Config}}{{.Subnet}}{{end}}'`
+  Down/up (tiga file compose) membuat ulang jaringan — API mati beberapa detik, jadwalkan jam sepi; JANGAN PERNAH `down -v`.
+- **Swagger** (`api-gateway/docs/swagger.json`, di-embed via `docs.go`) memakai `"security": [{}, {"zitadelOAuth": []}]` untuk kedua operasi → image api-gateway WAJIB di-rebuild saat rilis.
+
 State captured 2026-09-09, post domain-migration lokal (DOMAIN-MIGRATION-LOCAL-PROMPT.md).
 Fase 10 + refactor-testability (PR #52) + PR #54 semua merged.
 

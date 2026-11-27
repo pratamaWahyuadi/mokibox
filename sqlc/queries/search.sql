@@ -16,7 +16,7 @@ SELECT
     u.is_private
 FROM users u
 WHERE u.is_active = TRUE
-  AND u.id <> sqlc.arg('viewer_id')
+  AND (sqlc.narg('viewer_id')::uuid IS NULL OR u.id <> sqlc.narg('viewer_id')::uuid)
   AND (u.username ILIKE '%' || sqlc.arg('query_pattern')::text || '%' OR u.display_name ILIKE '%' || sqlc.arg('query_pattern')::text || '%')
 ORDER BY
     (LOWER(u.username) = LOWER(sqlc.arg('raw_query')::text)) DESC,
@@ -41,7 +41,7 @@ SELECT
     u.is_private    AS user_is_private,
     EXISTS (
         SELECT 1 FROM likes l
-        WHERE l.video_id = v.id AND l.user_id = sqlc.arg('viewer_id')
+        WHERE l.video_id = v.id AND l.user_id = sqlc.narg('viewer_id')::uuid
     ) AS liked_by_me
 FROM videos v
 JOIN users u ON u.id = v.user_id
@@ -50,10 +50,10 @@ WHERE v.status = 'READY'
   AND u.is_active = TRUE
   AND (v.title ILIKE '%' || sqlc.arg('query_pattern')::text || '%' OR v.description ILIKE '%' || sqlc.arg('query_pattern')::text || '%')
   AND (u.is_private = FALSE
-       OR u.id = sqlc.arg('viewer_id')
+       OR u.id = sqlc.narg('viewer_id')::uuid
        OR EXISTS (
            SELECT 1 FROM follows f
-           WHERE f.follower_id = sqlc.arg('viewer_id') AND f.followee_id = u.id
+           WHERE f.follower_id = sqlc.narg('viewer_id')::uuid AND f.followee_id = u.id
        ))
 ORDER BY v.views_count DESC, v.created_at DESC, v.id DESC
 LIMIT sqlc.arg('page_limit') OFFSET sqlc.arg('page_offset');

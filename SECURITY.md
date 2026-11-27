@@ -91,6 +91,20 @@ so it drops the full docker-recommended list except those.
 | Wrong-size / invalid media → cleanup:objects enqueue | best-effort enqueue of the raw key | confirm + worker FAILED branches |
 | Confirm requires exact r2_key match | `GetVideoByIDForUpdate` + key rotation | `video.go` (r2_key rotation, phase-4) |
 
+## SEC-09 — Auth-optional read endpoints + combined per-user/per-IP limiter (Fitur A, 2026-11-26)
+
+`GET /api/search` dan `GET /api/feed/home` are mounted OUTSIDE the `/api` auth group with `middleware.AuthenticateOptional` (fail-closed: absent header = anonymous, present-but-invalid token = 401 — validation is the same `resolveUser` path, never weakened).
+
+| Control | Implementation | Evidence |
+|---|---|---|
+| Anonymous visibility kept in SQL | `SearchVideos`/`ListFeedVideos` NULL-aware `viewer_id` (`sqlc.narg`): private-account videos never returned when viewer is NULL; `liked_by_me=false` from EXISTS | `sqlc/queries/search.sql`, `sqlc/queries/videos.sql`; `phase13_anonymous_read` smoke |
+| Fail-closed on broken token | `AuthenticateOptional` (reuses `resolveUser`) | `auth_test.go` `TestAuthenticateOptional_InvalidTokenFailsClosed` |
+| Combined limiter (K5) | `middleware.NewRateLimitOptionalAuth`: key = user UUID when logged in (never counted per-IP), else client IP; env `SEARCH_RATE_LIMIT_PER_MIN` (default 60, anon burst 15), `FEED_RATE_LIMIT_PER_MIN` (default 120, anon burst 40); empty/invalid env → defaults, never crashes | `ratelimit_mixed.go` + `ratelimit_mixed_test.go` |
+| Trusted proxy / anti-spoof (K6) | `resolveClientIP`: trusted peer (`TRUSTED_PROXY_CIDRS`) → `X-Real-IP` preferred, `X-Forwarded-For` fallback; untrusted peer → direct peer IP, forwarding headers IGNORED. Dev default: `127.0.0.1/32,::1/128,172.16.0.0/12`. **Production value: `TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128,192.168.144.1/32`** (aaPanel nginx → docker bridge gateway 192.168.144.1; subnet pinned in `docker-compose.ports.yml`, branch `chore/pin-docker-subnet`) | `ratelimit_mixed_test.go` spoof tests |
+| Anti-scraping | anonymous offset cursor ≤1000 (`maxAnonymousOffset`); `limit` still capped at 50; `q` ≤100 chars; `Vary: Authorization` added (not set) so nginx `Vary: Origin` survives | `search.go`/`feed.go` + tests |
+
+Cache note: responses contain presigned URLs — no `Cache-Control: public` is ever emitted on search/feed; cacheability variance is declared via `Vary: Authorization`.
+
 ## Secrets hygiene
 
 - `.env` is gitignored; only `.env.example` is tracked (no

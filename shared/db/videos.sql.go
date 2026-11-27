@@ -481,26 +481,25 @@ SELECT
     u.is_private    AS user_is_private,
     EXISTS (
         SELECT 1 FROM likes l
-        WHERE l.video_id = v.id AND l.user_id = $2
+        WHERE l.video_id = v.id AND l.user_id = $1
     ) AS liked_by_me
 FROM videos v
 JOIN users u ON u.id = v.user_id
 WHERE v.status = 'READY'
-  AND v.user_id <> $1
+  AND ($1::uuid IS NULL OR v.user_id <> $1::uuid)
   AND u.is_active = TRUE
   AND (u.is_private = FALSE
        OR EXISTS (
            SELECT 1 FROM follows f
-           WHERE f.follower_id = $1 AND f.followee_id = u.id
+           WHERE f.follower_id = $1::uuid AND f.followee_id = u.id
        ))
-  AND ($3::timestamptz IS NULL
-       OR (v.created_at, v.id) < ($3::timestamptz, $4::uuid))
+  AND ($2::timestamptz IS NULL
+       OR (v.created_at, v.id) < ($2::timestamptz, $3::uuid))
 ORDER BY v.created_at DESC, v.id DESC
-LIMIT $5
+LIMIT $4
 `
 
 type ListFeedVideosParams struct {
-	UserID        uuid.UUID     `json:"user_id"`
 	ViewerID      uuid.NullUUID `json:"viewer_id"`
 	CursorCreated sql.NullTime  `json:"cursor_created"`
 	CursorID      uuid.NullUUID `json:"cursor_id"`
@@ -532,21 +531,17 @@ type ListFeedVideosRow struct {
 	LikedByMe       bool           `json:"liked_by_me"`
 }
 
-// FR-FEED-01: status=READY, owner active, exclude self,
-// include public accounts + accounts the viewer follows.
-// Cursor pagination uses (created_at, id) < ($3, $4).
-//
-// Phase 6 widened the row to include the owner user
-// fields (for the nested "user" summary in VideoObject)
-// and an EXISTS (likes) per-row "liked_by_me" flag, so
-// the feed handler can build the full VideoObject
-// without an N+1 round trip. viewer_id can be NULL
-// when the feed is fetched without a session (e.g. a
-// cron job pulling the public timeline) - in that case
-// liked_by_me is FALSE for every row.
+// FR-FEED-01: status=READY, owner active, exclude self
+// (only when a viewer is present), include public accounts
+// + accounts the viewer follows.
+// Fitur A (auth-optional feed): viewer_id is NULL-aware.
+// Anonymous feed (viewer_id NULL): public READY videos
+// only (u.is_private = FALSE), liked_by_me FALSE for every
+// row, no self-exclusion (an anonymous caller owns
+// nothing). Logged-in viewer: exclude own videos and add
+// followed private accounts, liked_by_me from EXISTS.
 func (q *Queries) ListFeedVideos(ctx context.Context, arg ListFeedVideosParams) ([]ListFeedVideosRow, error) {
 	rows, err := q.db.QueryContext(ctx, listFeedVideos,
-		arg.UserID,
 		arg.ViewerID,
 		arg.CursorCreated,
 		arg.CursorID,

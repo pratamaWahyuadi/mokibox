@@ -340,7 +340,8 @@ menghapus baris inbox DM terlebih dahulu.
 | DELETE | `/api/users/:id/follow` | Unfollow user | JWT |
 | GET | `/api/users/:id/followers` | List followers | JWT |
 | GET | `/api/users/:id/following` | List following | JWT |
-| GET | `/api/feed/home` | Home feed | JWT |
+| GET | `/api/feed/home` | Home feed | JWT opsional (anonim = timeline publik) |
+| GET | `/api/search` | Search users + videos | JWT opsional (anonim = hasil publik) |
 | POST | `/api/videos/upload-intent` | Minta presigned URL upload | JWT |
 | POST | `/api/videos/confirm` | Konfirmasi upload selesai | JWT |
 | GET | `/api/videos/:id` | Detail video + signed media URL | JWT |
@@ -982,11 +983,13 @@ Error: `401`, `404` (bukan owner / tidak ditemukan — anti-enumerasi, bukan 403
 
 ### `GET /api/feed/home`
 
-Menampilkan video `READY` dari:
-- user yang di-follow oleh requester
-- user publik
+**Auth: OPSIONAL (Fitur A, 2026-11-26).** Endpoint berada di LUAR grup auth `/api` dan memakai `middleware.AuthenticateOptional`:
 
-Tidak termasuk video milik requester sendiri.
+- **Tanpa header `Authorization`** → anonim: public timeline berisi video `READY` dari akun aktif **non-privat** saja. Semua `liked_by_me=false`, `is_owner=false`. Akun privat TIDAK pernah muncul untuk anonim.
+- **Token valid** → feed personal (perilaku lama TIDAK berubah): video `READY` dari user yang di-follow requester + user publik; video milik requester sendiri di-exclude.
+- **Header ADA tapi token tidak valid/kedaluwarsa** → `401` fail-closed (tidak pernah turun ke anonim).
+
+Respons memakai header `Vary: Authorization` (ditambahkan, bukan menimpa `Vary: Origin` dari nginx). Endpoint memakai limiter gabungan per-user/per-IP (lihat SEC-09): `FEED_RATE_LIMIT_PER_MIN` (default 120/menit, burst anonim 40).
 
 Query Parameters:
 
@@ -1595,7 +1598,7 @@ Error: `500` (gateway internal).
 
 ### `GET /api/search`
 
-Search users + videos. Query Parameters:
+**Auth: OPSIONAL (Fitur A, 2026-11-26).** Endpoint berada di LUAR grup auth `/api` dan memakai `middleware.AuthenticateOptional` (semantik sama dengan `/api/feed/home`: tanpa header = anonim, token valid = personal, token rusak = `401` fail-closed). Query Parameters:
 
 | Nama | Tipe | Keterangan |
 |---|---|---|
@@ -1606,13 +1609,15 @@ Search users + videos. Query Parameters:
 
 Rules:
 - Hanya akun aktif & video `READY` + `deleted_at IS NULL`.
-- Video privat hanya muncul untuk owner.
+- **Anonim**: hanya video dari akun publik; `liked_by_me=false`, `is_owner=false`; offset cursor dibatasi **maks 1000** (anti-scraping).
+- **Viewer login**: video privat hanya muncul untuk owner; akun privat yang di-follow ikut muncul; offset maks 100000 (perilaku lama).
+- Pencarian user: akun privat tetap muncul sebagai `UserSummary` (profil dasar publik, Q1) — video tetap dijaga aturan visibilitas.
 - Exact-match username (case-insensitive) diberi ranking lebih tinggi.
 - `%`/`_` di-escape (bukan wildcard).
 
-Auth: JWT (dalam grup `/api`).
+Limiter gabungan per-user/per-IP (SEC-09): `SEARCH_RATE_LIMIT_PER_MIN` (default 60/menit, burst anonim 15).
 
-Error: `400 VALIDATION_ERROR`, `401`, `500`.
+Error: `400 VALIDATION_ERROR`, `401`, `429 RATE_LIMITED`, `500`.
 
 ---
 

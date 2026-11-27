@@ -139,7 +139,8 @@ func run() error {
 
 	// 5. Run ListFeedVideos and assert.
 	rows, err := q.ListFeedVideos(ctx, db.ListFeedVideosParams{
-		UserID:    viewer.ID,
+		// Fitur A: UserID param removed; viewer identity is
+		// carried solely by viewer_id (NULL-aware).
 		ViewerID:  uuid.NullUUID{UUID: viewer.ID, Valid: true},
 		PageLimit: 50,
 	})
